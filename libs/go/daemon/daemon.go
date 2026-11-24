@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,7 +131,8 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	}
 	send := startStream(w)
 	s.log.Info("build started", "weightfile", req.Weightfile, "tags", req.Tags)
-	res, err := build.Build(r.Context(), s.store, build.Options{Weightfile: req.Weightfile, Tags: req.Tags}, send)
+	opts := build.Options{Weightfile: req.Weightfile, Tags: req.Tags, Pull: s.pullForBuild}
+	res, err := build.Build(r.Context(), s.store, opts, send)
 	if err != nil {
 		s.log.Info("build failed", "weightfile", req.Weightfile, "err", err)
 		send(api.Event{Error: err.Error()})
@@ -138,6 +140,15 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("build finished", "digest", res.Manifest.Digest, "new_bytes", res.NewBytes)
 	send(api.Event{Result: res})
+}
+
+// pullForBuild fetches an image a Weightfile names when the store lacks it,
+// as docker build pulls a missing FROM image. Registries on loopback
+// addresses use plain HTTP; for another insecure registry, wpk pull
+// --plain-http the image first.
+func (s *server) pullForBuild(ctx context.Context, ref string, progress func(api.Event)) error {
+	_, err := registry.Pull(ctx, s.store, ref, registry.Options{}, progress)
+	return err
 }
 
 // push and pull stream progress like build. A client that disconnects

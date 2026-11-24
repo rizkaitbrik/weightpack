@@ -234,6 +234,7 @@ LICENSE inherit
 ```
 
 - `LAYER` and `EXPERT` accept a local adapter, an OCI reference, a Hugging Face repo, or a `TRAIN` block that calls a trainer.
+- `FROM` an image inherits its base and stack as they are. `LAYER` or `EXPERT` from an image takes its top layer, and the build refuses it unless the layer's parent chain ID equals the chain it would sit on: rule 1 below, checked at build time.
 - `LABEL key=value` sets annotations on the image's manifest, as a Dockerfile's labels do.
 - A full fine-tune given as an `EXPERT` (finance above) is imported: Weightpack subtracts the parent, encodes the delta with the named codec, runs the eval, and fails the build if the drop exceeds `max_drop`.
 - The cache key of a step is the hash of its parent chain ID, data digest, trainer config and trainer version. Change the French data and only `french` and everything above it rebuild.

@@ -182,3 +182,45 @@ func TestTagPushPull(t *testing.T) {
 		t.Errorf("pulled image: %v", err)
 	}
 }
+
+func TestBuildPullsImagesItLacks(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	reg := httptest.NewServer(ggcr.New(ggcr.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(reg.Close)
+	host := strings.TrimPrefix(reg.URL, "http://")
+
+	dir := t.TempDir()
+	buildtest.Project(t, dir)
+	a, _ := store.Open(filepath.Join(dir, "a"))
+	b, _ := store.Open(filepath.Join(dir, "b"))
+	ca, cb := serveUnix(t, a), serveUnix(t, b)
+	ctx := context.Background()
+
+	baseWF := filepath.Join(dir, "Base.Weightfile")
+	_ = os.WriteFile(baseWF, []byte("FROM ./base\n"), 0o644)
+	ref := host + "/team/base:v1"
+	if _, err := ca.Build(ctx, api.BuildRequest{Weightfile: baseWF, Tags: []string{ref}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ca.Push(ctx, api.PushRequest{Ref: ref}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	wf := filepath.Join(dir, "Child.Weightfile")
+	_ = os.WriteFile(wf, []byte("FROM "+ref+"\nLAYER french ./adapters/french\n"), 0o644)
+	var events []api.Event
+	res, err := cb.Build(ctx, api.BuildRequest{Weightfile: wf, Tags: []string{"child"}}, func(e api.Event) { events = append(events, e) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Config.Layers) != 2 {
+		t.Errorf("child layers = %+v", res.Config.Layers)
+	}
+	var pulled bool
+	for _, e := range events {
+		pulled = pulled || strings.HasPrefix(e.Step, "pull ")
+	}
+	if !pulled {
+		t.Errorf("no pull progress in the build stream: %+v", events)
+	}
+}

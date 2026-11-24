@@ -1,10 +1,11 @@
 // Package build turns a Weightfile into an image in the local store.
 //
-// It handles local sources: FROM a directory holding safetensors weights,
-// config.json and a tokenizer; LAYER and EXPERT from PEFT LoRA adapter
-// directories. Registry and Hugging Face sources, imports of full fine-tunes
-// (codec=xor|bit1|sparse) and ROUTER train are rejected with a clear error
-// until they land.
+// Sources: FROM a directory holding safetensors weights, config.json and a
+// tokenizer, or FROM an image (in the store, or pulled through
+// Options.Pull); LAYER and EXPERT from a PEFT LoRA adapter directory, or
+// from the top layer of an image built on the same chain. Hugging Face
+// sources, imports of full fine-tunes (codec=xor|bit1|sparse) and ROUTER
+// train are rejected with a clear error until they are supported.
 //
 // The builder never reads tensor values. It splits safetensors files along
 // the byte ranges their headers give, checks adapter shapes against the base,
@@ -40,7 +41,13 @@ type Options struct {
 	Weightfile string
 	// Tags to point at the built image, such as "assistant:v1".
 	Tags []string
+	// Pull fetches an image a FROM, LAYER or EXPERT names when the store
+	// does not have it. Nil means such images must be in the store already.
+	Pull PullFunc
 }
+
+// PullFunc fetches ref into the store, reporting progress.
+type PullFunc func(ctx context.Context, ref string, progress func(api.Event)) error
 
 // Image-level meta blobs get these titles.
 const (
@@ -54,6 +61,10 @@ type builder struct {
 	dir      string
 	file     string
 	progress func(api.Event)
+	pull     PullFunc
+
+	// inherited is what a FROM image passes on, nil for a local FROM.
+	inherited *inherited
 
 	// blobs holds each layer's manifest descriptors in build order; the
 	// key "" holds image-level meta blobs.
@@ -90,27 +101,40 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	}
 
 	b := &builder{
-		ctx: ctx, store: s, progress: progress,
+		ctx: ctx, store: s, progress: progress, pull: opts.Pull,
 		dir: filepath.Dir(opts.Weightfile), file: opts.Weightfile,
 		blobs: map[string][]ocispec.Descriptor{},
 	}
-	byID := make(map[string]*spec.Layer, len(cfg.Layers))
-	for i := range cfg.Layers {
-		byID[cfg.Layers[i].ID] = &cfg.Layers[i]
-	}
 
-	baseLayer := byID[weightfile.ReservedBaseID]
-	base, err := b.ingestBase(wf.From, baseLayer)
-	if err != nil {
-		return nil, err
+	var base *baseModel
+	top := weightfile.ReservedBaseID
+	if wf.From.Source.Kind == weightfile.SourceLocal {
+		base, err = b.ingestBase(wf.From, &cfg.Layers[0])
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		inh, err := b.fromImage(wf.From)
+		if err != nil {
+			return nil, err
+		}
+		if err := b.graft(wf, cfg, inh); err != nil {
+			return nil, err
+		}
+		base = inh.base
+		top = inh.layers[len(inh.layers)-1].ID
 	}
 	cfg.Arch = base.arch
 	cfg.Tokenizer = base.tokenizer
 
-	parent := baseLayer
+	byID := make(map[string]*spec.Layer, len(cfg.Layers))
+	for i := range cfg.Layers {
+		byID[cfg.Layers[i].ID] = &cfg.Layers[i]
+	}
+	parent := byID[top]
 	for _, l := range wf.Layers {
 		layer := byID[l.ID]
-		if err := b.ingestLoRA("LAYER "+l.ID, l, layer, parent, base, nil); err != nil {
+		if err := b.ingestLayer("LAYER "+l.ID, l, layer, parent, base, nil, byID); err != nil {
 			return nil, err
 		}
 		parent = layer
@@ -120,7 +144,7 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 		var experts []string
 		for _, e := range m.Experts {
 			layer := byID[e.ID]
-			if err := b.ingestLoRA("EXPERT "+e.ID, e, layer, parent, base, m); err != nil {
+			if err := b.ingestLayer("EXPERT "+e.ID, e, layer, parent, base, m, byID); err != nil {
 				return nil, err
 			}
 			experts = append(experts, layer.Digest)
@@ -143,22 +167,25 @@ func checkSupported(path string, wf *weightfile.File) error {
 	fail := func(line int, format string, args ...any) {
 		errs = append(errs, &weightfile.Error{File: path, Line: line, Msg: fmt.Sprintf(format, args...)})
 	}
-	if k := wf.From.Source.Kind; k != weightfile.SourceLocal {
-		fail(wf.From.Line, "FROM %s: only local directories can be built from so far; %s sources come with wpk pull", wf.From.Source, k)
+	if wf.From.Source.Kind == weightfile.SourceHF {
+		fail(wf.From.Line, "FROM %s: Hugging Face sources are not supported yet; download the model and use its directory", wf.From.Source)
 	}
 	layers := append([]weightfile.Layer{}, wf.Layers...)
 	if wf.Mix != nil {
 		layers = append(layers, wf.Mix.Experts...)
 		if wf.Mix.Router.Kind == "train" {
-			fail(wf.Mix.Router.Line, "ROUTER train lands in phase 3; use ROUTER arrow, which needs no training")
+			fail(wf.Mix.Router.Line, "ROUTER train is not supported yet; use ROUTER arrow, which needs no training")
 		}
 	}
 	for _, l := range layers {
-		if l.Source.Kind != weightfile.SourceLocal {
-			fail(l.Line, "%s: only local adapter directories can be built from so far; %s sources come with wpk pull", l.ID, l.Source.Kind)
-		}
-		if l.Codec != "" && l.Codec != weightfile.CodecLoRA {
-			fail(l.Line, "%s: codec=%s imports a full fine-tune; delta import lands in phase 2", l.ID, l.Codec)
+		lossyOrDelta := l.Codec != "" && l.Codec != weightfile.CodecLoRA
+		switch {
+		case l.Source.Kind == weightfile.SourceHF:
+			fail(l.Line, "%s: Hugging Face sources are not supported yet; download the adapter and use its directory", l.ID)
+		case l.Source.Kind == weightfile.SourceOCI && lossyOrDelta:
+			fail(l.Line, "%s: codec= applies to importing a full fine-tune; a layer from an image is stored already", l.ID)
+		case lossyOrDelta:
+			fail(l.Line, "%s: codec=%s imports a full fine-tune, which is not supported yet", l.ID, l.Codec)
 		}
 	}
 	return errors.Join(errs...)
@@ -218,8 +245,9 @@ func isPath(v string) bool {
 
 // imageMeta stores TEMPLATE and a LICENSE file as image-level meta blobs. An
 // SPDX license id becomes the manifest's licenses annotation; "inherit"
-// leaves the base's license files in charge. LABEL lines become manifest
-// annotations too.
+// leaves the base's license files, or a FROM image's license, in charge.
+// LABEL lines become manifest annotations too. A FROM image's template and
+// license carry over unless the Weightfile sets its own; its labels do not.
 func (b *builder) imageMeta(wf *weightfile.File) (map[string]string, error) {
 	annotations := map[string]string{}
 	if t := wf.Template; t != nil {
@@ -229,6 +257,18 @@ func (b *builder) imageMeta(wf *weightfile.File) (map[string]string, error) {
 		}
 		b.blobs[""] = append(b.blobs[""], d)
 		b.progress(api.Event{Step: "TEMPLATE", Message: t.Value})
+	} else if inh := b.inherited; inh != nil && inh.template != nil {
+		b.blobs[""] = append(b.blobs[""], *inh.template)
+	}
+	// Without LICENSE, or with LICENSE inherit, a FROM image's license
+	// carries over.
+	if inh := b.inherited; inh != nil && (wf.License == nil || strings.EqualFold(wf.License.Value, "inherit")) {
+		switch {
+		case inh.licenseFile != nil:
+			b.blobs[""] = append(b.blobs[""], *inh.licenseFile)
+		case inh.license != "":
+			annotations[ocispec.AnnotationLicenses] = inh.license
+		}
 	}
 	if l := wf.License; l != nil {
 		switch {
