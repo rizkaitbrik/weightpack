@@ -62,8 +62,11 @@ func (b *builder) image(step string, line int, ref string) (*ocispec.Manifest, *
 }
 
 // stackOf returns an image's base and stack, bottom first, and its MIX if
-// it has one.
-func stackOf(c *spec.Config) ([]spec.Layer, *spec.Layer) {
+// it has one. It refuses every other shape rather than guess: two layers on
+// one parent outside a mix, a mix that is not on top of the stack, or a
+// layer above a mix or an expert. Export and squash read images the same
+// way.
+func stackOf(c *spec.Config) ([]spec.Layer, *spec.Layer, error) {
 	children := map[string][]spec.Layer{}
 	var stack []spec.Layer
 	var mix *spec.Layer
@@ -78,25 +81,58 @@ func stackOf(c *spec.Config) ([]spec.Layer, *spec.Layer) {
 			children[l.Parent] = append(children[l.Parent], l)
 		}
 	}
+	if len(stack) == 0 {
+		return nil, nil, errors.New("the image has no base layer")
+	}
 	experts := map[string]bool{}
 	if mix != nil {
 		for _, e := range mix.Experts {
 			experts[e] = true
 		}
 	}
-	for len(stack) > 0 {
-		var next *spec.Layer
+	for {
+		var next []spec.Layer
 		for _, ch := range children[stack[len(stack)-1].ID] {
 			if ch.Kind != spec.KindMix && !experts[ch.ID] {
-				next = &ch
+				next = append(next, ch)
 			}
 		}
-		if next == nil {
+		if len(next) > 1 {
+			var ids []string
+			for _, l := range next {
+				ids = append(ids, l.ID)
+			}
+			return nil, nil, fmt.Errorf("layers %s both sit on %s; an image must be one stack, with at most one MIX on top",
+				strings.Join(ids, " and "), stack[len(stack)-1].ID)
+		}
+		if len(next) == 0 {
 			break
 		}
-		stack = append(stack, *next)
+		stack = append(stack, next[0])
 	}
-	return stack, mix
+	placed := map[string]bool{}
+	for _, l := range stack {
+		placed[l.ID] = true
+	}
+	if mix != nil {
+		if top := stack[len(stack)-1].ID; mix.Parent != top {
+			return nil, nil, fmt.Errorf("MIX %s sits on %s, not on the top of the stack (%s)", mix.ID, mix.Parent, top)
+		}
+		placed[mix.ID] = true
+		for e := range experts {
+			placed[e] = true
+		}
+	}
+	var stray []string
+	for _, l := range c.Layers {
+		if !placed[l.ID] {
+			stray = append(stray, l.ID)
+		}
+	}
+	if len(stray) > 0 {
+		return nil, nil, fmt.Errorf("layers %s sit above a MIX or an expert, which an image cannot express", strings.Join(stray, ", "))
+	}
+	return stack, mix, nil
 }
 
 // chainPath names the layers a chain runs through: "base → french".
@@ -145,7 +181,10 @@ func (b *builder) fromImage(from weightfile.From) (*inherited, error) {
 	if err != nil {
 		return nil, err
 	}
-	stack, mix := stackOf(c)
+	stack, mix, err := stackOf(c)
+	if err != nil {
+		return nil, fail("%s: %v", ref, err)
+	}
 	if mix != nil {
 		return nil, fail("%s ends in MIX %s, and nothing can be stacked above a mix", ref, mix.ID)
 	}
@@ -237,7 +276,10 @@ func (b *builder) ingestImageLayer(step string, src weightfile.Layer, layer, par
 	if err != nil {
 		return err
 	}
-	stack, srcMix := stackOf(c)
+	stack, srcMix, err := stackOf(c)
+	if err != nil {
+		return fail("%s: %v", ref, err)
+	}
 	switch {
 	case srcMix != nil:
 		return fail("%s ends in MIX %s; name an image whose top layer is the one to use", ref, srcMix.ID)

@@ -255,3 +255,60 @@ func loadImage(t *testing.T, s *store.Store, ref string) (*ocispec.Manifest, *sp
 	}
 	return &m, &c
 }
+
+// addLayer stores a copy of ref with an extra layer "other": a copy of
+// layer copyID placed on parentID. The result passes CheckImage but is not
+// one stack (with a mix on top).
+func addLayer(t *testing.T, s *store.Store, ref, tag, copyID, parentID string) {
+	t.Helper()
+	m, c := loadImage(t, s, ref)
+	other := layerByID(c, copyID)
+	other.ID, other.Parent = "other", parentID
+	other.Chain = spec.ChainID(layerByID(c, parentID).Chain, other.Digest)
+	c.Layers = append(c.Layers, other)
+	for _, d := range m.Layers {
+		if d.Annotations[spec.AnnotationLayer] == copyID {
+			nd := d
+			nd.Annotations = map[string]string{spec.AnnotationLayer: "other", spec.AnnotationTensor: d.Annotations[spec.AnnotationTensor]}
+			m.Layers = append(m.Layers, nd)
+		}
+	}
+	if err := spec.CheckImage(m, c); err != nil {
+		t.Fatalf("the altered image should pass CheckImage: %v", err)
+	}
+	cd, _, err := s.PutJSON(spec.MediaTypeConfig, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Config = cd
+	md, _, err := s.PutJSON(ocispec.MediaTypeImageManifest, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Tag(tag, md); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBranchedImagesAreRefused(t *testing.T) {
+	w := newWorld(t)
+	if _, _, err := w.build(t, w.a, "French.Weightfile", "FROM ./base\nLAYER french ./adapters/french\n", "french"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := w.build(t, w.a, "Weightfile", buildtest.Assistant, "assistant"); err != nil {
+		t.Fatal(err)
+	}
+	addLayer(t, w.a, "french", "branched", "french", "base")       // beside french
+	addLayer(t, w.a, "assistant", "on-expert", "medical", "legal") // above an expert
+	cases := map[string]struct{ body, want string }{
+		"from a branch":       {"FROM branched\nLAYER legal ./adapters/legal\n", "french and other both sit on base"},
+		"layer from a branch": {"FROM ./base\nLAYER x oci://branched\n", "french and other both sit on base"},
+		"above an expert":     {"FROM ./base\nLAYER french ./adapters/french\nLAYER x oci://on-expert\n", "layers other sit above a MIX or an expert"},
+	}
+	for name, c := range cases {
+		_, _, err := w.build(t, w.a, "Bad.Weightfile", c.body, "bad")
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: err = %v, want %q", name, err, c.want)
+		}
+	}
+}
