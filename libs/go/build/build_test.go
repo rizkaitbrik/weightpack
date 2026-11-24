@@ -271,10 +271,12 @@ func TestBuildRejects(t *testing.T) {
 				buildtest.WriteBase(t, filepath.Join(dir, "notok"), 1)
 				_ = os.Remove(filepath.Join(dir, "notok/tokenizer.json"))
 			}},
-		{name: "full fine-tune import", wf: "FROM ./base\nLAYER x ./adapters/french codec=xor\n", want: "lands in phase 2"},
-		{name: "registry source", wf: "FROM ./base\nLAYER x oci://r.example.com/x:1\n", want: "only local adapter directories"},
-		{name: "hf base", wf: "FROM hf://acme/llama\n", want: "only local directories"},
-		{name: "router train", wf: "FROM ./base\nMIX m\n EXPERT a ./adapters/legal\n ROUTER train data=./d.jsonl\n", want: "phase 3"},
+		{name: "full fine-tune import", wf: "FROM ./base\nLAYER x ./adapters/french codec=xor\n", want: "which is not supported yet"},
+		{name: "image not stored, no pull", wf: "FROM ./base\nLAYER x oci://r.example.com/x:1\n", want: "not in the local store; pull it first"},
+		{name: "codec on an image layer", wf: "FROM ./base\nLAYER x oci://r.example.com/x:1 codec=xor\n", want: "a layer from an image is stored already"},
+		{name: "hf base", wf: "FROM hf://acme/llama\n", want: "Hugging Face sources are not supported yet"},
+		{name: "hf layer", wf: "FROM ./base\nLAYER x hf://acme/lora\n", want: "Hugging Face sources are not supported yet"},
+		{name: "router train", wf: "FROM ./base\nMIX m\n EXPERT a ./adapters/legal\n ROUTER train data=./d.jsonl\n", want: "ROUTER train is not supported yet"},
 		{name: "missing template", wf: "FROM ./base\nTEMPLATE ./nope.jinja\n", want: "TEMPLATE"},
 		{name: "bad tag", wf: "FROM ./base\n", tags: []string{"Bad Tag"}, want: "bad"},
 		{name: "parse error", wf: "FROM ./base\nLAYER\n", want: "Weightfile"},

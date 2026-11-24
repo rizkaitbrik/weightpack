@@ -95,7 +95,7 @@ func TestBuildReportsErrors(t *testing.T) {
 	if code := run([]string{"build", dir}, &out, &errOut); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(errOut.String(), "phase 2") {
+	if !strings.Contains(errOut.String(), "not supported yet") {
 		t.Errorf("stderr %q", errOut.String())
 	}
 	if code := run([]string{"build", "a", "b"}, &out, &errOut); code != 2 {
