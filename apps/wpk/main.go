@@ -1,5 +1,6 @@
 // Command wpk is the Weightpack command-line client. It parses commands and
-// forwards work to the local wpkd daemon.
+// forwards work to the local wpkd daemon over its Unix socket ($WPK_SOCKET,
+// else $WPK_ROOT/wpkd.sock, else ~/.weightpack/wpkd.sock).
 package main
 
 import (
@@ -28,23 +29,24 @@ type command struct {
 // planned commands from the design doc; they exist so the CLI surface is
 // visible from day one and fail clearly until implemented.
 var planned = map[string]string{
-	"build":   "Build an image from a Weightfile",
-	"push":    "Push an image, sending only blobs the registry lacks",
-	"pull":    "Pull an image, fetching only missing blobs",
-	"run":     "Serve an image through the local engine",
-	"squash":  "Bake a stack or fixed mix into dense weights",
-	"diff":    "Show which tensors differ between two images",
-	"inspect": "Show an image's layers, parents, sizes and fidelity",
-	"history": "Show how an image was built",
-	"import":  "Turn an existing fine-tune into a delta layer",
-	"export":  "Write a plain Hugging Face or GGUF checkpoint",
-	"rebase":  "Move layers onto a new base (transfer, gate, distil)",
+	"push":   "Push an image, sending only blobs the registry lacks",
+	"pull":   "Pull an image, fetching only missing blobs",
+	"run":    "Serve an image through the local engine",
+	"squash": "Bake a stack or fixed mix into dense weights",
+	"diff":   "Show which tensors differ between two images",
+	"import": "Turn an existing fine-tune into a delta layer",
+	"export": "Write a plain Hugging Face or GGUF checkpoint",
+	"rebase": "Move layers onto a new base (transfer, gate, distil)",
 }
 
 func commands() map[string]command {
 	cmds := map[string]command{
 		"version":  {"Print the wpk version", runVersion},
 		"validate": {"Check a Weightfile or image config against the composition rules", runValidate},
+		"build":    {"Build an image from a Weightfile", runBuild},
+		"images":   {"List the images in the local store", runImages},
+		"inspect":  {"Print an image's manifest and config as JSON", runInspect},
+		"history":  {"Show an image's layers, parents, sizes and chain IDs", runHistory},
 	}
 	for name, summary := range planned {
 		cmds[name] = command{summary, notImplemented(name)}

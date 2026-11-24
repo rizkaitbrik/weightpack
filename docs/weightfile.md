@@ -1,6 +1,6 @@
 # Weightfile reference
 
-A Weightfile declares an image the way a Dockerfile does: one instruction per line, read top to bottom. `wpk validate <Weightfile | dir>` checks one without building it. The parser lives in `libs/go/weightfile`.
+A Weightfile declares an image the way a Dockerfile does: one instruction per line, read top to bottom. `wpk validate <Weightfile | dir>` checks one without building it, and `wpk build -t name:tag <Weightfile | dir>` builds it into the local store (see [Building](#building)). The parser lives in `libs/go/weightfile` and the builder in `libs/go/build`.
 
 ```dockerfile
 FROM registry.example.com/llama-3.1-8b-instruct@sha256:<64 hex>
@@ -73,3 +73,21 @@ Without `codec=`, or with `codec=lora`, the source is an adapter and is stored a
 - Double quotes group a value with spaces: `LAYER a "./my adapters/a"`. Inside quotes, `\"` and `\\` are escapes.
 - Instruction names are case-insensitive. Parameters are `key=value` with no spaces around `=`.
 - All errors in a file are reported at once, each with its line number.
+
+## Building
+
+`wpk build` sends the Weightfile's path to the local `wpkd`, which reads the build context in place and streams progress back. What it accepts so far:
+
+| Instruction       | Accepted source                                | Reads                                                                                                                                                                                                                                 |
+| ----------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `FROM`            | A local directory                              | `*.safetensors` (or the files `model.safetensors.index.json` names), `config.json`, and `tokenizer.json` or `tokenizer.model`. Other tokenizer files, `generation_config.json`, `README.md` and license files are kept as meta blobs. |
+| `LAYER`, `EXPERT` | A local PEFT LoRA adapter directory            | `adapter_config.json` and `adapter_model.safetensors`                                                                                                                                                                                 |
+| `ROUTER`          | `arrow`                                        | Nothing: Arrow prototypes are a function of the experts' weights                                                                                                                                                                      |
+| `TEMPLATE`        | A local file                                   | Stored as `chat_template.jinja`                                                                                                                                                                                                       |
+| `LICENSE`         | `inherit`, an SPDX id, or a local file (`./…`) | A file is stored as `LICENSE`; an SPDX id becomes the manifest's licenses annotation                                                                                                                                                  |
+
+The build checks every adapter against the base before storing it: each module's base weight must exist and be a matrix, and `lora_A` must be `[r, in]` and `lora_B` `[out, r]` for a base weight of `[out, in]`. A mismatch fails the build, since it means the adapter was trained on another model. An `EXPERT` with modules outside its `MIX`'s targets or blocks builds with a warning.
+
+Not yet supported, each with a clear error: `oci://` and `hf://` sources (they come with `wpk pull`), `codec=xor|bit1|sparse` imports (phase 2), `ROUTER train` (phase 3), pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `modules_to_save`, `rank_pattern` or `alpha_pattern`.
+
+Building the same inputs twice gives the same image digest and stores nothing new. Two images on the same base share its blobs, so the second stores only its own layers.

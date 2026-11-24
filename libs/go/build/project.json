@@ -1,0 +1,12 @@
+{
+  "name": "build",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "libs/go/build",
+  "tags": ["lang:go", "type:lib"],
+  "targets": {
+    
+    "test": { "executor": "@nx-go/nx-go:test", "options": { "race": true }, "cache": true },
+    "lint": { "executor": "@nx-go/nx-go:lint", "options": { "linter": "go", "args": ["vet"] }, "cache": true }
+  }
+}

@@ -2,7 +2,7 @@
 
 **Docker for neural nets.** Ship a model as a base plus small, content-addressed weight layers. Stack layers, or mix them side by side as experts behind a router, and push the result to any OCI registry.
 
-> **Status: early design and scaffolding.** The image format types, the local blob store and reference codecs exist; `build`, `push`, `pull` and serving do not yet. See the [design doc](docs/design.md) and the roadmap below.
+> **Status: phase 1 in progress.** `wpk build` turns a Weightfile with a local safetensors base and PEFT LoRA adapters into an image in the local store, and `images`, `inspect` and `history` read it back. `push`, `pull`, `squash` and serving do not exist yet. See the [design doc](docs/design.md) and the roadmap below.
 
 ## Why
 
@@ -41,9 +41,14 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | --- | --- | --- | --- |
 | `apps/wpk` | `wpk` | Go | Command-line client |
 | `apps/wpkd` | `wpkd` | Go | Daemon: local store, build cache, push/pull; node agent on GPU hosts |
-| `libs/go/spec` | `spec` | Go | Image format: media types, config schema, chain IDs, architecture fingerprint |
-| `libs/go/store` | `store` | Go | Content-addressed blob store |
+| `libs/go/spec` | `spec` | Go | Image format: media types, config schema, layer digests, chain IDs, architecture fingerprint |
+| `libs/go/store` | `store` | Go | Content-addressed blob store and tags |
 | `libs/go/weightfile` | `weightfile` | Go | Weightfile parser ([reference](docs/weightfile.md)) |
+| `libs/go/build` | `build` | Go | Builder: Weightfile to image (base split into tensor blobs, LoRA layers checked against the base) |
+| `libs/go/safetensors` | `safetensors` | Go | safetensors header reader and canonical writer; never decodes values |
+| `libs/go/reference` | `reference` | Go | OCI image reference parsing |
+| `libs/go/api` | `api` | Go | `wpk` to `wpkd` wire types and client |
+| `libs/go/daemon` | `daemon` | Go | `wpkd`'s HTTP API over the store |
 | `python/worker` | `worker` | Python | Build worker: training, delta import, codecs, evals |
 | `python/vllm-plugin` | `vllm-plugin` | Python | vLLM plugin: composition loading, expert pool, routers |
 | `proto/` | | Protobuf | gRPC contract between `wpkd` and the workers |
@@ -67,10 +72,15 @@ npx nx graph                                           # project graph
 Try the CLI:
 
 ```bash
-npx nx build wpk
-./dist/apps/wpk version
-./dist/apps/wpk validate path/to/Weightfile   # or a directory, or a config.json
+npx nx run-many -t build --projects=wpk,wpkd
+./dist/apps/wpkd &                              # store in ~/.weightpack, or set WPK_ROOT
+./dist/apps/wpk validate path/to/Weightfile     # or a directory, or a config.json
+./dist/apps/wpk build -t assistant:v1 path/to/project
+./dist/apps/wpk images
+./dist/apps/wpk history assistant:v1
 ```
+
+`wpk` finds the daemon at `$WPK_SOCKET`, else `$WPK_ROOT/wpkd.sock`, else `~/.weightpack/wpkd.sock`.
 
 ## Roadmap
 

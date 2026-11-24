@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/rizkaitbrik/weightpack/libs/go/reference"
 )
 
 // SourceKind says where a FROM, LAYER or EXPERT source comes from.
@@ -54,15 +56,8 @@ func (s Source) Path(dir string) string {
 }
 
 var (
-	// OCI distribution reference grammar, slightly simplified: a registry
-	// host is only recognised when the first component has a '.' or ':' or
-	// is "localhost", as Docker does.
-	ociComponent = regexp.MustCompile(`^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$`)
-	ociHost      = regexp.MustCompile(`^(?:localhost|[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*)(?::[0-9]+)?$`)
-	ociTag       = regexp.MustCompile(`^[\w][\w.-]{0,127}$`)
-	ociDigest    = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-	hfRepo       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
-	hfRevision   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
+	hfRepo     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	hfRevision = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 )
 
 // ParseSource classifies a source string:
@@ -114,31 +109,6 @@ func checkHF(ref string) error {
 // CheckOCIReference validates a reference of the form
 // [host[:port]/]path[:tag][@sha256:<hex>].
 func CheckOCIReference(ref string) error {
-	name, digest, hasDigest := strings.Cut(ref, "@")
-	if hasDigest && !ociDigest.MatchString(digest) {
-		return fmt.Errorf("reference %q: digest must be sha256:<64 hex>", ref)
-	}
-	if i := strings.LastIndex(name, ":"); i > strings.LastIndex(name, "/") {
-		tag := name[i+1:]
-		name = name[:i]
-		if !ociTag.MatchString(tag) {
-			return fmt.Errorf("reference %q: bad tag %q", ref, tag)
-		}
-	}
-	if name == "" {
-		return fmt.Errorf("reference %q: missing repository", ref)
-	}
-	parts := strings.Split(name, "/")
-	if len(parts) > 1 && (strings.ContainsAny(parts[0], ".:") || parts[0] == "localhost") {
-		if !ociHost.MatchString(parts[0]) {
-			return fmt.Errorf("reference %q: bad registry host %q", ref, parts[0])
-		}
-		parts = parts[1:]
-	}
-	for _, p := range parts {
-		if !ociComponent.MatchString(p) {
-			return fmt.Errorf("reference %q: bad path component %q", ref, p)
-		}
-	}
-	return nil
+	_, err := reference.Parse(ref)
+	return err
 }

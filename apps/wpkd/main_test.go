@@ -1,49 +1,57 @@
 package main
 
 import (
-	"bytes"
-	"net/http"
-	"net/http/httptest"
+	"context"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
-	"github.com/rizkaitbrik/weightpack/libs/go/store"
+	"github.com/rizkaitbrik/weightpack/libs/go/api"
 )
 
-func TestHealthz(t *testing.T) {
-	s, err := store.Open(t.TempDir())
+func TestServeOnPrivateSocket(t *testing.T) {
+	// Unix socket paths are limited to about 100 bytes, so avoid t.TempDir.
+	root, err := os.MkdirTemp("", "wpkd")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := httptest.NewRecorder()
-	newMux(s).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status %d", rec.Code)
-	}
-}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	socket := filepath.Join(root, "wpkd.sock")
 
-func TestBlobLookup(t *testing.T) {
-	s, _ := store.Open(t.TempDir())
-	d, _, err := s.Put(bytes.NewReader([]byte("blob")), "")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, root, socket, slog.New(slog.DiscardHandler)) }()
+
+	c := api.NewClient(socket)
+	var health map[string]string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		health, err = c.Health(context.Background())
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil || health["status"] != "ok" {
+		t.Fatalf("health = %v, %v", health, err)
+	}
+	info, err := os.Stat(socket)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux := newMux(s)
-
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/blobs/"+d, nil))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("present blob: status %d", rec.Code)
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("socket mode %o, want 600", perm)
 	}
 
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/blobs/sha256:"+string(bytes.Repeat([]byte("0"), 64)), nil))
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("missing blob: status %d", rec.Code)
-	}
-
-	rec = httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/blobs/bogus", nil))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("bad digest: status %d", rec.Code)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not stop")
 	}
 }
