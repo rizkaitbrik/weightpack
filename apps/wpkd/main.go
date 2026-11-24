@@ -1,11 +1,10 @@
-// Command wpkd is the Weightpack daemon. It owns the local blob store and,
-// on GPU nodes, acts as the node agent. This skeleton opens the store and
-// serves a health endpoint on a Unix socket.
+// Command wpkd is the Weightpack daemon. It owns the local blob store, runs
+// builds and, on GPU nodes, acts as the node agent. It serves its API (see
+// libs/go/api) on a Unix socket that only its owner can connect to.
 package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"log/slog"
@@ -17,34 +16,32 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rizkaitbrik/weightpack/libs/go/api"
+	"github.com/rizkaitbrik/weightpack/libs/go/daemon"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 )
 
 var version = "dev"
 
 func main() {
-	root := flag.String("root", defaultRoot(), "directory of the local store")
-	socket := flag.String("socket", "", "Unix socket to listen on (default <root>/wpkd.sock)")
+	root := flag.String("root", api.DefaultRoot(), "directory of the local store ($WPK_ROOT)")
+	socket := flag.String("socket", "", "Unix socket to listen on (default $WPK_SOCKET, else <root>/wpkd.sock)")
 	flag.Parse()
+	if *socket == "" {
+		*socket = os.Getenv("WPK_SOCKET")
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := serve(*root, *socket, logger); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := serve(ctx, *root, *socket, logger); err != nil {
 		logger.Error("wpkd stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
-func defaultRoot() string {
-	if dir := os.Getenv("WPK_ROOT"); dir != "" {
-		return dir
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".weightpack")
-	}
-	return ".weightpack"
-}
-
-func serve(root, socket string, logger *slog.Logger) error {
+// serve opens the store and serves the API until ctx is done.
+func serve(ctx context.Context, root, socket string, logger *slog.Logger) error {
 	s, err := store.Open(root)
 	if err != nil {
 		return err
@@ -57,10 +54,12 @@ func serve(root, socket string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if err := os.Chmod(socket, 0o600); err != nil {
+		_ = ln.Close()
+		return err
+	}
 
-	srv := &http.Server{Handler: newMux(s), ReadHeaderTimeout: 5 * time.Second}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	srv := &http.Server{Handler: daemon.NewHandler(s, version, logger), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -73,28 +72,4 @@ func serve(root, socket string, logger *slog.Logger) error {
 		return err
 	}
 	return nil
-}
-
-func newMux(s *store.Store) *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status":  "ok",
-			"version": version,
-			"root":    s.Root(),
-		})
-	})
-	mux.HandleFunc("GET /v1/blobs/{digest}", func(w http.ResponseWriter, r *http.Request) {
-		ok, err := s.Has(r.PathValue("digest"))
-		switch {
-		case err != nil:
-			http.Error(w, err.Error(), http.StatusBadRequest)
-		case !ok:
-			http.Error(w, "not found", http.StatusNotFound)
-		default:
-			w.WriteHeader(http.StatusNoContent)
-		}
-	})
-	return mux
 }

@@ -1,0 +1,15 @@
+# The example from docs/design.md, with full digests.
+FROM registry.example.com/llama-3.1-8b-instruct@sha256:b45e6a1f0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f
+
+# Stack: applied on top of FROM; trained on FROM
+LAYER french ./adapters/french
+
+# Mix: experts side by side; each trained on FROM + french
+MIX domain targets=mlp blocks=8-31 top_k=2
+  EXPERT legal    ./adapters/legal
+  EXPERT medical  oci://registry.example.com/experts/medical:1.4
+  EXPERT finance  hf://acme/llama-fin-full  codec=bit1 eval=./evals/finance.yaml max_drop=0.5
+  ROUTER arrow            # zero-shot; or: ROUTER train data=./mix.jsonl steps=2000
+
+TEMPLATE ./chat.jinja
+LICENSE inherit

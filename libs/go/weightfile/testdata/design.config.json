@@ -1,0 +1,58 @@
+{
+  "schema": "weightpack.config.v1",
+  "arch": {
+    "family": "",
+    "fingerprint": ""
+  },
+  "tokenizer": "",
+  "layers": [
+    {
+      "id": "base",
+      "kind": "base"
+    },
+    {
+      "id": "french",
+      "kind": "lora",
+      "parent": "base"
+    },
+    {
+      "id": "domain",
+      "kind": "mix",
+      "parent": "french",
+      "targets": [
+        "gate",
+        "up",
+        "down"
+      ],
+      "blocks": "8-31",
+      "top_k": 2,
+      "router": "arrow",
+      "experts": [
+        "legal",
+        "medical",
+        "finance"
+      ]
+    },
+    {
+      "id": "legal",
+      "kind": "lora",
+      "parent": "french"
+    },
+    {
+      "id": "medical",
+      "kind": "lora",
+      "parent": "french"
+    },
+    {
+      "id": "finance",
+      "kind": "delta.bit1",
+      "parent": "french",
+      "fidelity": {
+        "source": "hf://acme/llama-fin-full",
+        "codec": "bit1",
+        "eval": "./evals/finance.yaml",
+        "max_drop": 0.5
+      }
+    }
+  ]
+}

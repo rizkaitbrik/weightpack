@@ -147,8 +147,8 @@ Blobs reach a node only through the registry, and only the ones it lacks. Reques
 **Design decisions**
 
 - **One daemon per machine, as with dockerd.** The CLI stays thin. `wpkd` owns the store, so concurrent builds and pulls share one CAS and one cache. On a GPU node the same daemon is the node agent.
-- **Go around the tensors, Python on them.** OCI, Kubernetes and Sigstore libraries are Go-first; PEFT, vLLM and eval harnesses are Python. The two talk over a local gRPC socket. Per-weight work (codecs, hashing large tensors) stays in Python on native libraries, never in the daemon.
-- **Store layout.** Blobs sit under `blobs/sha256/<ab>/<digest>`, compressed as pushed. Beside them is a decoded cache of memory-mappable safetensors, and SQLite holds images, chain IDs, reference counts and fidelity records. The decoded cache is disposable.
+- **Go around the tensors, Python on them.** OCI, Kubernetes and Sigstore libraries are Go-first; PEFT, vLLM and eval harnesses are Python. The two talk over a local gRPC socket. Per-weight work (codecs, hashing large tensors) stays in Python on native libraries, never in the daemon. Splitting a safetensors file into tensor blobs is not per-weight work: the daemon copies the byte ranges the header names and never decodes a value, and the store hashes blobs as it writes them, as any OCI store does.
+- **Store layout.** Blobs sit under `blobs/sha256/<ab>/<digest>`, compressed as pushed. Beside them is a decoded cache of memory-mappable safetensors, and SQLite holds images, chain IDs, reference counts and fidelity records. The decoded cache is disposable. Until reference counts and fidelity records arrive, tags live in an `index.json` in the OCI image-layout format, one manifest descriptor per `name:tag`.
 - **Base affinity is the scheduling rule.** The scheduler groups images by base digest and sends each request to a replica that already holds that base. Cluster-level memory savings come from this rule, not from the format. A new copy of a base loads only when no replica holding it has room.
 - **The engine stays stock.** The plugin uses vLLM's plugin and LoRA interfaces plus one custom module for mixes, so a vLLM upgrade does not mean maintaining a fork.
 - **Nodes are disposable.** Everything a node needs is addressable by digest, so a node can be drained, rebuilt and refilled from the registry.
@@ -167,9 +167,9 @@ An image is a standard OCI manifest. Its blobs are tensors and its config declar
   "arch": { "family": "llama", "fingerprint": "sha256:9f1c…", "blocks": 32, "hidden": 4096 },
   "tokenizer": "sha256:44ab…",
   "layers": [
-    { "id": "base",    "kind": "base" },
-    { "id": "french",  "kind": "lora", "parent": "base", "rank": 32,
-      "targets": ["q", "k", "v", "o", "gate", "up", "down"] },
+    { "id": "base",    "kind": "base", "digest": "sha256:d203…", "chain": "sha256:d203…" },
+    { "id": "french",  "kind": "lora", "parent": "base", "digest": "sha256:7e01…", "chain": "sha256:cbb5…",
+      "rank": 32, "alpha": 64, "targets": ["q", "k", "v", "o", "gate", "up", "down"] },
     { "id": "domain",  "kind": "mix", "parent": "french", "blocks": "8-31",
       "targets": ["gate", "up", "down"], "top_k": 2, "router": "arrow",
       "experts": ["legal", "medical", "finance"] },
@@ -181,10 +181,12 @@ An image is a standard OCI manifest. Its blobs are tensors and its config declar
 }
 ```
 
+A build sets `digest` and `chain` on every layer (the other layers are abbreviated above). A LoRA layer's `alpha` and `rslora` give its scaling as PEFT defines it: alpha / rank, or alpha / √rank with `rslora: true`.
+
 Four rules make composition safe:
 
-1. **Chain IDs.** A layer's identity is `sha256(parent chain ID + layer digest)`, as Docker computes it. A layer is valid only on the exact chain it was built on.
-2. **Architecture fingerprint.** A hash over the base's sorted (tensor name, shape, dtype) list plus the tokenizer digest. It plays the role of `linux/amd64`: pull and build refuse a mismatch.
+1. **Chain IDs.** A layer's identity is `sha256(parent chain ID + " " + layer digest)`, as Docker computes it; the base's chain ID is its own digest. A layer is valid only on the exact chain it was built on. The **layer digest** is sha256 over the compact JSON of the layer's kind, the parameters that change how it applies (`rank`, `alpha`, `rslora`, `targets`, `blocks`, `top_k`, `router`), the layer digests of its experts in mix order (for a mix), and its blobs (tensor, title, media type, digest), sorted. The layer id is left out, so the same content under another name is the same layer, and so is the fidelity record, which says how a layer was made rather than what it is. Any reader can recompute every digest and chain ID from the manifest and config, which is how a pulled image is checked.
+2. **Architecture fingerprint.** A hash over the base's sorted (tensor name, shape, dtype) list plus the tokenizer digest: the digest of the `tokenizer.json` blob, or of `tokenizer.model` when there is no `tokenizer.json`. It plays the role of `linux/amd64`: pull and build refuse a mismatch.
 3. **Declared targets.** Every delta lists the tensors it touches. Untouched tensors cost nothing.
 4. **One parent per mix.** All experts in a `MIX` must have the mix's parent chain.
 
@@ -199,6 +201,14 @@ Four rules make composition safe:
 | `meta.v1` | Tokenizer, chat template, license, model card | Yes |
 
 An entropy coder is a suffix, as OCI does with `+zstd`: `lora.v1+zipnn`. Docker keeps model layers uncompressed so they can be memory-mapped; Weightpack trades that for size and decodes once into a local cache on pull.
+
+**Blob layout.** Tensor blobs are safetensors files in one canonical byte layout: tensors ordered by name, data packed with no gaps, a compact JSON header with sorted keys and no `__metadata__`, padded with spaces to a multiple of 8 bytes. The same tensors under the same names therefore give the same digest whatever file, shard or writer they came from, which is what makes tensor-level dedup work.
+
+- `tensor.v1`: one base tensor, annotated `wpk.tensor` with its name. Tensors under 64 KiB (norms, biases) share one packed blob per layer, which has no `wpk.tensor` annotation; their names are in its header.
+- `lora.v1`: the `lora_A` and `lora_B` matrices of one module, named in the base's naming (`model.layers.0.self_attn.q_proj.lora_A.weight`, without PEFT's `base_model.model.` prefix), annotated `wpk.tensor` with the base weight they modify.
+- `meta.v1`: one file per blob, named by the standard `org.opencontainers.image.title` annotation. The base's `config.json`, tokenizer files, license and model card belong to the base layer. A `TEMPLATE` file and a `LICENSE` file are image-level: they carry no `wpk.layer` annotation. A `LICENSE` given as an SPDX id becomes the manifest's `org.opencontainers.image.licenses` annotation instead.
+
+Nothing in a manifest depends on paths, file order or time, so building the same inputs twice gives the same manifest digest.
 
 ## Weightfile and CLI
 

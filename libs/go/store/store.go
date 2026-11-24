@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // ErrNotFound is returned when a blob is not in the store.
@@ -27,6 +28,7 @@ const algo = "sha256"
 // Store is a content-addressed blob store rooted at a directory.
 type Store struct {
 	root string
+	mu   sync.Mutex // guards index.json
 }
 
 // Open creates the store layout under root if needed and returns the store.
@@ -68,14 +70,20 @@ func (s *Store) blobPath(hexPart string) string {
 // is not empty, the content must hash to it or nothing is stored. Writing a
 // blob that already exists is a no-op.
 func (s *Store) Put(r io.Reader, expected string) (digest string, size int64, err error) {
+	digest, size, _, err = s.Ingest(r, expected)
+	return digest, size, err
+}
+
+// Ingest is Put that also reports whether the blob was new to the store.
+func (s *Store) Ingest(r io.Reader, expected string) (digest string, size int64, created bool, err error) {
 	if expected != "" {
 		if _, err := ParseDigest(expected); err != nil {
-			return "", 0, err
+			return "", 0, false, err
 		}
 	}
 	tmp, err := os.CreateTemp(filepath.Join(s.root, "tmp"), "put-*")
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	defer func() {
 		_ = tmp.Close()
@@ -85,31 +93,31 @@ func (s *Store) Put(r io.Reader, expected string) (digest string, size int64, er
 	h := sha256.New()
 	size, err = io.Copy(io.MultiWriter(tmp, h), r)
 	if err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if err := tmp.Sync(); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	hexPart := hex.EncodeToString(h.Sum(nil))
 	digest = algo + ":" + hexPart
 	if expected != "" && expected != digest {
-		return "", 0, fmt.Errorf("%w: got %s, want %s", ErrDigestMismatch, digest, expected)
+		return "", 0, false, fmt.Errorf("%w: got %s, want %s", ErrDigestMismatch, digest, expected)
 	}
 
 	final := s.blobPath(hexPart)
 	if _, err := os.Stat(final); err == nil {
-		return digest, size, nil
+		return digest, size, false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if err := tmp.Close(); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
 	if err := os.Rename(tmp.Name(), final); err != nil {
-		return "", 0, err
+		return "", 0, false, err
 	}
-	return digest, size, nil
+	return digest, size, true, nil
 }
 
 // Has reports whether the blob is present.

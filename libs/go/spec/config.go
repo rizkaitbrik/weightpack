@@ -42,11 +42,18 @@ type Arch struct {
 
 // Layer is one logical layer of the composition graph.
 type Layer struct {
-	ID       string    `json:"id"`
-	Kind     LayerKind `json:"kind"`
-	Parent   string    `json:"parent,omitempty"`
-	Chain    string    `json:"chain,omitempty"`
-	Rank     int       `json:"rank,omitempty"`
+	ID     string    `json:"id"`
+	Kind   LayerKind `json:"kind"`
+	Parent string    `json:"parent,omitempty"`
+	// Digest identifies the layer's content (see LayerDigest) and Chain pins
+	// it to the chain it was built on (see ChainID). Both are set by a build.
+	Digest string `json:"digest,omitempty"`
+	Chain  string `json:"chain,omitempty"`
+	Rank   int    `json:"rank,omitempty"`
+	// Alpha and RSLoRA set a LoRA layer's scaling, as PEFT does:
+	// alpha / rank, or alpha / sqrt(rank) when RSLoRA is true.
+	Alpha    float64   `json:"alpha,omitempty"`
+	RSLoRA   bool      `json:"rslora,omitempty"`
 	Targets  []string  `json:"targets,omitempty"`
 	Blocks   string    `json:"blocks,omitempty"`
 	TopK     int       `json:"top_k,omitempty"`
