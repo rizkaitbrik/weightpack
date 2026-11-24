@@ -43,10 +43,11 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `apps/wpkd` | `wpkd` | Go | Daemon: local store, build cache, push/pull; node agent on GPU hosts |
 | `libs/go/spec` | `spec` | Go | Image format: media types, config schema, chain IDs, architecture fingerprint |
 | `libs/go/store` | `store` | Go | Content-addressed blob store |
+| `libs/go/weightfile` | `weightfile` | Go | Weightfile parser ([reference](docs/weightfile.md)) |
 | `python/worker` | `worker` | Python | Build worker: training, delta import, codecs, evals |
 | `python/vllm-plugin` | `vllm-plugin` | Python | vLLM plugin: composition loading, expert pool, routers |
 | `proto/` | | Protobuf | gRPC contract between `wpkd` and the workers |
-| `docs/` | | | Design doc |
+| `docs/` | | | Design doc, Weightfile reference |
 
 ## Getting started
 
@@ -68,7 +69,7 @@ Try the CLI:
 ```bash
 npx nx build wpk
 ./dist/apps/wpk version
-./dist/apps/wpk validate path/to/config.json
+./dist/apps/wpk validate path/to/Weightfile   # or a directory, or a config.json
 ```
 
 ## Roadmap
