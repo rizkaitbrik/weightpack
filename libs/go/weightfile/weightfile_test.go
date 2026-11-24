@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -206,6 +207,11 @@ func TestErrors(t *testing.T) {
 		{"oci bad digest", "FROM registry.example.com/llama@sha256:b45e\n", 1, "digest must be"},
 		{"oci uppercase", "FROM Llama/Base\n", 1, "bad path component"},
 		{"hf no org", "FROM hf://llama\n", 1, "want hf://<org>/<name>"},
+		{"label usage", "FROM ./b\nLABEL\n", 2, "usage: LABEL"},
+		{"label no value", "FROM ./b\nLABEL team\n", 2, "want key=value"},
+		{"label bad key", "FROM ./b\nLABEL =x\n", 2, "want key=value"},
+		{"label twice", "FROM ./b\nLABEL a=1\nLABEL a=2\n", 3, "already set at line 2"},
+		{"label license", "FROM ./b\nLABEL org.opencontainers.image.licenses=MIT\n", 2, "set the license with LICENSE"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -224,6 +230,22 @@ func TestErrors(t *testing.T) {
 				t.Errorf("first error at line %d, want %d (%v)", we.Line, c.line, err)
 			}
 		})
+	}
+}
+
+func TestLabels(t *testing.T) {
+	f, err := Parse(strings.NewReader("FROM ./b\nLABEL org.example.team=nlp \"note=two words\" empty=\nMIX m\n EXPERT x ./x\nLABEL wpk.squashed.from=sha256:abc\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Label{
+		{Line: 2, Key: "org.example.team", Value: "nlp"},
+		{Line: 2, Key: "note", Value: "two words"},
+		{Line: 2, Key: "empty", Value: ""},
+		{Line: 5, Key: "wpk.squashed.from", Value: "sha256:abc"},
+	}
+	if !reflect.DeepEqual(f.Labels, want) {
+		t.Errorf("labels = %+v", f.Labels)
 	}
 }
 

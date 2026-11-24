@@ -148,6 +148,18 @@ func (c *Client) Squash(ctx context.Context, req SquashRequest, onEvent func(Eve
 	return last.Result, nil
 }
 
+// Export writes an image out as files, reporting progress to onEvent.
+func (c *Client) Export(ctx context.Context, req ExportRequest, onEvent func(Event)) (*ExportResult, error) {
+	last, err := c.stream(ctx, "/v1/export", req, onEvent)
+	if err != nil {
+		return nil, err
+	}
+	if last.Export == nil {
+		return nil, errors.New("wpkd ended the export stream without a result")
+	}
+	return last.Export, nil
+}
+
 // Push sends a local image to its registry, reporting progress to onEvent.
 func (c *Client) Push(ctx context.Context, req PushRequest, onEvent func(Event)) (*TransferResult, error) {
 	return c.transfer(ctx, "/v1/push", req, onEvent)
@@ -200,7 +212,7 @@ func (c *Client) stream(ctx context.Context, path string, req any, onEvent func(
 		switch {
 		case e.Error != "":
 			return Event{}, errors.New(e.Error)
-		case e.Result != nil || e.Transfer != nil:
+		case e.Result != nil || e.Transfer != nil || e.Export != nil:
 			return e, nil
 		case onEvent != nil:
 			onEvent(e)

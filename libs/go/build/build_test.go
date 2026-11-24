@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -189,6 +190,26 @@ func TestRebuildIsReproducibleAndSharesTheBase(t *testing.T) {
 	_, c2 := f.load(t, "support")
 	if c1.Layers[0].Chain != c2.Layers[0].Chain || c1.Arch.Fingerprint != c2.Arch.Fingerprint {
 		t.Error("the two images do not share the base chain and fingerprint")
+	}
+}
+
+func TestLabelsBecomeAnnotations(t *testing.T) {
+	f := newFixture(t)
+	res, err := f.build(t, f.weightfile(t, "W", "FROM ./base\nLICENSE MIT\nLABEL org.example.team=nlp \"note=two words\"\n"), "labelled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := f.load(t, "labelled")
+	want := map[string]string{ocispec.AnnotationLicenses: "MIT", "org.example.team": "nlp", "note": "two words"}
+	if !reflect.DeepEqual(m.Annotations, want) {
+		t.Errorf("annotations = %v", m.Annotations)
+	}
+	plain, err := f.build(t, f.weightfile(t, "P", "FROM ./base\nLICENSE MIT\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Manifest.Digest == res.Manifest.Digest {
+		t.Error("labels did not change the manifest digest")
 	}
 }
 

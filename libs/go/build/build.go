@@ -218,7 +218,8 @@ func isPath(v string) bool {
 
 // imageMeta stores TEMPLATE and a LICENSE file as image-level meta blobs. An
 // SPDX license id becomes the manifest's licenses annotation; "inherit"
-// leaves the base's license files in charge.
+// leaves the base's license files in charge. LABEL lines become manifest
+// annotations too.
 func (b *builder) imageMeta(wf *weightfile.File) (map[string]string, error) {
 	annotations := map[string]string{}
 	if t := wf.Template; t != nil {
@@ -242,6 +243,9 @@ func (b *builder) imageMeta(wf *weightfile.File) (map[string]string, error) {
 			annotations[ocispec.AnnotationLicenses] = l.Value
 		}
 		b.progress(api.Event{Step: "LICENSE", Message: l.Value})
+	}
+	for _, l := range wf.Labels {
+		annotations[l.Key] = l.Value
 	}
 	if len(annotations) == 0 {
 		return nil, nil

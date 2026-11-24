@@ -9,6 +9,7 @@
 //	POST /v1/pull                  PullRequest -> NDJSON stream of Event
 //	POST /v1/tag                   TagRequest -> TagResponse
 //	POST /v1/squash                SquashRequest -> NDJSON stream of Event
+//	POST /v1/export                ExportRequest -> NDJSON stream of Event
 //	GET  /v1/images                -> []Image
 //	GET  /v1/images/inspect?ref=R  -> ImageDetail
 package api
@@ -54,6 +55,27 @@ type SquashRequest struct {
 	Tags   []string `json:"tags,omitempty"`
 }
 
+// ExportRequest asks the daemon to write an image out as files: a Hugging
+// Face model directory for the base, a PEFT adapter directory per LoRA
+// layer, and a Weightfile that rebuilds the image. Dir is absolute and must
+// not exist yet, or be empty.
+type ExportRequest struct {
+	Ref string `json:"ref"`
+	Dir string `json:"dir"`
+	// Format is "hf", the only one so far ("" means hf).
+	Format string `json:"format,omitempty"`
+	// MaxShardSize caps each base weight file, in bytes, as Hugging Face's
+	// max_shard_size does. 0 means 5 GB.
+	MaxShardSize int64 `json:"max_shard_size,omitempty"`
+}
+
+// ExportResult describes a finished export.
+type ExportResult struct {
+	Dir   string `json:"dir"`
+	Files int    `json:"files"`
+	Bytes int64  `json:"bytes"`
+}
+
 // TagRequest points Target at the image Source names.
 type TagRequest struct {
 	Source string `json:"source"`
@@ -66,14 +88,16 @@ type TagResponse struct {
 	Digest string `json:"digest"`
 }
 
-// Event is one line of a build, squash, push or pull NDJSON stream. The last
-// line carries Result (build, squash), Transfer (push, pull) or Error.
+// Event is one line of a build, squash, push, pull or export NDJSON stream.
+// The last line carries Result (build, squash), Transfer (push, pull),
+// Export or Error.
 type Event struct {
 	Step     string          `json:"step,omitempty"`
 	Message  string          `json:"message,omitempty"`
 	Warning  bool            `json:"warning,omitempty"`
 	Result   *BuildResult    `json:"result,omitempty"`
 	Transfer *TransferResult `json:"transfer,omitempty"`
+	Export   *ExportResult   `json:"export,omitempty"`
 	Error    string          `json:"error,omitempty"`
 }
 
