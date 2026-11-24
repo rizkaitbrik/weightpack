@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: astral-sh/setup-uv@v7
+
+      - run: npm ci
+
+      - name: Set Nx base and head for affected
+        uses: nrwl/nx-set-shas@v4
+
+      - name: Sync Python environments
+        run: npx nx run-many -t sync --projects=tag:lang:python
+
+      - name: Check formatting
+        run: |
+          test -z "$(gofmt -l apps libs)" || (gofmt -l apps libs; exit 1)
+          npx nx run-many -t format --projects=tag:lang:python --check
+
+      - name: Lint, test and build affected projects
+        run: npx nx affected -t lint test build

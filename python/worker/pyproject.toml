@@ -1,0 +1,78 @@
+[tool.coverage.run]
+branch = true
+source = [ "weightpack_worker" ]
+
+[tool.coverage.report]
+exclude_lines = ['if TYPE_CHECKING:']
+show_missing = true
+
+[tool.pytest.ini_options]
+addopts = """
+ --cov
+ --cov-report html:'../../coverage/python/worker/html'
+ --cov-report xml:'../../coverage/python/worker/coverage.xml'
+ --html='../../reports/python/worker/unittests/html/index.html'
+ --junitxml='../../reports/python/worker/unittests/junit.xml'
+"""
+
+[project]
+name = "weightpack-worker"
+version = "0.1.0"
+description = "Weightpack build worker: training, delta import, codecs and eval runs"
+requires-python = ">=3.10,<4"
+readme = 'README.md'
+license = "Apache-2.0"
+authors = [{ name = "Weightpack contributors" }]
+dependencies = ["numpy>=1.26"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["weightpack_worker"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[dependency-groups]
+dev = [
+  "autopep8>=2.3.1",
+  "ruff>=0.8.2",
+  "pytest>=8.3.4",
+  "pytest-sugar>=1.0.0",
+  "pytest-cov>=6.0.0",
+  "pytest-html>=4.1.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+exclude = [
+  ".ruff_cache",
+  ".svn",
+  ".tox",
+  ".venv",
+  "dist",
+]
+
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = [
+  # pycodestyle
+  "E",
+  # Pyflakes
+  "F",
+  # pyupgrade
+  "UP",
+  # flake8-bugbear
+  "B",
+  # flake8-simplify
+  "SIM",
+  # isort
+  "I",
+]
+ignore = []
+
+fixable = ["ALL"]
+unfixable = []

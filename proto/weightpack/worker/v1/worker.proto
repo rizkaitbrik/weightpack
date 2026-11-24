@@ -1,0 +1,72 @@
+// Contract between wpkd (Go) and the Python build workers, over a local
+// gRPC socket. The daemon owns the store; workers read and write blobs
+// through it and do all per-weight work (training, delta extraction,
+// codecs, evals). Code generation is not wired up yet.
+syntax = "proto3";
+
+package weightpack.worker.v1;
+
+option go_package = "github.com/rizkaitbrik/weightpack/libs/go/workerpb;workerpb";
+
+service Worker {
+  // Extract and encode a delta of `target` against `parent`, tensor by tensor.
+  rpc EncodeLayer(EncodeLayerRequest) returns (EncodeLayerResponse);
+  // Run an eval suite against a composition and report the score.
+  rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
+  // Report the worker's version and the codecs it supports.
+  rpc Info(InfoRequest) returns (InfoResponse);
+}
+
+enum Codec {
+  CODEC_UNSPECIFIED = 0;
+  CODEC_XOR = 1;      // lossless
+  CODEC_BIT1 = 2;     // lossy, sign bits + one scale per matrix
+  CODEC_SPARSE = 3;   // lossy, drop and rescale
+  CODEC_LORA = 4;     // pass-through for adapters
+}
+
+message TensorRef {
+  string name = 1;    // e.g. model.layers.12.mlp.up_proj.weight
+  string digest = 2;  // sha256:<hex> of the blob in the wpkd store
+  string dtype = 3;
+  repeated int64 shape = 4;
+}
+
+message EncodeLayerRequest {
+  string layer_id = 1;
+  string parent_chain_id = 2;
+  repeated TensorRef parent = 3;
+  repeated TensorRef target = 4;
+  Codec codec = 5;
+  string entropy_coder = 6;  // "", "zipnn" or "zstd"
+}
+
+message EncodedTensor {
+  string name = 1;
+  string media_type = 2;  // e.g. application/vnd.weightpack.delta.xor.v1+zipnn
+  string digest = 3;
+  int64 size = 4;
+  double relative_error = 5;  // 0 for lossless codecs
+}
+
+message EncodeLayerResponse {
+  repeated EncodedTensor tensors = 1;
+  string layer_digest = 2;
+}
+
+message EvaluateRequest {
+  string image_ref = 1;
+  string suite = 2;
+}
+
+message EvaluateResponse {
+  string suite = 1;
+  double score = 2;
+}
+
+message InfoRequest {}
+
+message InfoResponse {
+  string version = 1;
+  repeated Codec codecs = 2;
+}

@@ -1,0 +1,114 @@
+// Command wpk is the Weightpack command-line client. It parses commands and
+// forwards work to the local wpkd daemon.
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+
+	"github.com/rizkaitbrik/weightpack/libs/go/spec"
+)
+
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
+type command struct {
+	summary string
+	run     func(args []string, stdout, stderr io.Writer) int
+}
+
+// planned commands from the design doc; they exist so the CLI surface is
+// visible from day one and fail clearly until implemented.
+var planned = map[string]string{
+	"build":   "Build an image from a Weightfile",
+	"push":    "Push an image, sending only blobs the registry lacks",
+	"pull":    "Pull an image, fetching only missing blobs",
+	"run":     "Serve an image through the local engine",
+	"squash":  "Bake a stack or fixed mix into dense weights",
+	"diff":    "Show which tensors differ between two images",
+	"inspect": "Show an image's layers, parents, sizes and fidelity",
+	"history": "Show how an image was built",
+	"import":  "Turn an existing fine-tune into a delta layer",
+	"export":  "Write a plain Hugging Face or GGUF checkpoint",
+	"rebase":  "Move layers onto a new base (transfer, gate, distil)",
+}
+
+func commands() map[string]command {
+	cmds := map[string]command{
+		"version":  {"Print the wpk version", runVersion},
+		"validate": {"Check an image config against the composition rules", runValidate},
+	}
+	for name, summary := range planned {
+		cmds[name] = command{summary, notImplemented(name)}
+	}
+	return cmds
+}
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	cmds := commands()
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		usage(stdout, cmds)
+		return 0
+	}
+	cmd, ok := cmds[args[0]]
+	if !ok {
+		fmt.Fprintf(stderr, "wpk: unknown command %q\n\n", args[0])
+		usage(stderr, cmds)
+		return 2
+	}
+	return cmd.run(args[1:], stdout, stderr)
+}
+
+func usage(w io.Writer, cmds map[string]command) {
+	fmt.Fprintln(w, "wpk - Docker for neural nets\n\nUsage: wpk <command> [arguments]\n\nCommands:")
+	names := make([]string, 0, len(cmds))
+	for n := range cmds {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Fprintf(w, "  %-9s %s\n", n, cmds[n].summary)
+	}
+}
+
+func runVersion(_ []string, stdout, _ io.Writer) int {
+	fmt.Fprintf(stdout, "wpk %s (config schema %s)\n", version, spec.SchemaV1)
+	return 0
+}
+
+func runValidate(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: wpk validate <config.json>")
+		return 2
+	}
+	data, err := os.ReadFile(args[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "wpk: %v\n", err)
+		return 1
+	}
+	var cfg spec.Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(stderr, "wpk: parse %s: %v\n", args[0], err)
+		return 1
+	}
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(stderr, "wpk: invalid config: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "%s: valid (%d layers)\n", args[0], len(cfg.Layers))
+	return 0
+}
+
+func notImplemented(name string) func([]string, io.Writer, io.Writer) int {
+	return func(_ []string, _, stderr io.Writer) int {
+		fmt.Fprintf(stderr, "wpk %s: not implemented yet (see docs/design.md)\n", name)
+		return 3
+	}
+}

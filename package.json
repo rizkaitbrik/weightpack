@@ -1,0 +1,24 @@
+{
+  "name": "weightpack",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "scripts": {
+    "lint": "nx run-many -t lint",
+    "test": "nx run-many -t test",
+    "build": "nx run-many -t build",
+    "graph": "nx graph"
+  },
+  "private": true,
+  "devDependencies": {
+    "@nx-go/nx-go": "^24.0.0",
+    "@nxlv/python": "^23.6.0",
+    "nx": "24.0.0",
+    "prettier": "^3.8.1"
+  },
+  "packageManager": "npm@10.9.9",
+  "description": "Docker for neural nets: composable weight layers, mixture-of-experts assembly and delta storage",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rizkaitbrik/weightpack.git"
+  }
+}
