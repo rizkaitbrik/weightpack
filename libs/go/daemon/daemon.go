@@ -15,6 +15,7 @@ import (
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build"
+	"github.com/rizkaitbrik/weightpack/libs/go/export"
 	"github.com/rizkaitbrik/weightpack/libs/go/registry"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/squash"
@@ -55,6 +56,7 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	mux.HandleFunc("POST /v1/pull", srv.pull)
 	mux.HandleFunc("POST /v1/tag", srv.tag)
 	mux.HandleFunc("POST /v1/squash", srv.squash)
+	mux.HandleFunc("POST /v1/export", srv.export)
 	mux.HandleFunc("GET /v1/images", srv.images)
 	mux.HandleFunc("GET /v1/images/inspect", srv.inspect)
 	return mux
@@ -193,6 +195,32 @@ func (s *server) squash(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("squash finished", "ref", req.Ref, "digest", res.Manifest.Digest, "new_bytes", res.NewBytes)
 	send(api.Event{Result: res})
+}
+
+// export streams progress like build; the last line says what it wrote.
+func (s *server) export(w http.ResponseWriter, r *http.Request) {
+	var req api.ExportRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Format != "" && req.Format != "hf" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("export format %q is not supported; only hf is so far", req.Format))
+		return
+	}
+	if !filepath.IsAbs(req.Dir) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("export directory must be an absolute path, got %q", req.Dir))
+		return
+	}
+	send := startStream(w)
+	s.log.Info("export started", "ref", req.Ref, "dir", req.Dir)
+	res, err := export.Export(r.Context(), s.store, req.Ref, export.Options{Dir: req.Dir, MaxShardSize: req.MaxShardSize}, send)
+	if err != nil {
+		s.log.Info("export failed", "ref", req.Ref, "err", err)
+		send(api.Event{Error: err.Error()})
+		return
+	}
+	s.log.Info("export finished", "ref", req.Ref, "dir", res.Dir, "bytes", res.Bytes)
+	send(api.Event{Export: res})
 }
 
 func (s *server) tag(w http.ResponseWriter, r *http.Request) {

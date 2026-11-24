@@ -109,6 +109,10 @@ const ReservedBaseID = "base"
 
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
+// ValidID reports whether id is a valid layer id: lowercase letters, digits,
+// '.', '_' and '-', starting with a letter or digit, at most 64 characters.
+func ValidID(id string) bool { return idPattern.MatchString(id) }
+
 // ParseFile parses the Weightfile at path.
 func ParseFile(path string) (*File, error) {
 	f, err := os.Open(path)
