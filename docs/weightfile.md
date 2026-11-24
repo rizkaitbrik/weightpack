@@ -28,8 +28,13 @@ LICENSE inherit
 | `ROUTER`    | `ROUTER arrow` or `ROUTER train data=<path> [steps=<n>]` | At most one per `MIX`. Default `arrow`; `steps` defaults to 2000. |
 | `TEMPLATE`  | `TEMPLATE <path>`                                        | Chat template. At most once.                                      |
 | `LICENSE`   | `LICENSE inherit \| <SPDX id> \| <path>`                 | At most once.                                                     |
+| `LABEL`     | `LABEL <key>=<value> ...`                                | Manifest annotations, as in a Dockerfile. Each key once.          |
 
 A `MIX` block stays open while `EXPERT` and `ROUTER` lines follow it; any other instruction closes it. Indentation is only for reading. `TRAIN` blocks are reserved and rejected for now.
+
+## Labels
+
+`LABEL org.example.team=nlp "note=two words"` sets annotations on the image's manifest, as a Dockerfile's labels do. Keys are letters, digits, `.`, `_`, `-` and `/`, and each key may be set once per file. The license annotation is set with `LICENSE`, not `LABEL`. `wpk export` writes an image's annotations back as `LABEL` lines (a squashed image's `wpk.squashed` and `wpk.squashed.from` among them), which is how its exported Weightfile rebuilds the same manifest.
 
 ## Layer ids
 
@@ -85,6 +90,7 @@ Without `codec=`, or with `codec=lora`, the source is an adapter and is stored a
 | `ROUTER`          | `arrow`                                        | Nothing: Arrow prototypes are a function of the experts' weights                                                                                                                                                                      |
 | `TEMPLATE`        | A local file                                   | Stored as `chat_template.jinja`                                                                                                                                                                                                       |
 | `LICENSE`         | `inherit`, an SPDX id, or a local file (`./…`) | A file is stored as `LICENSE`; an SPDX id becomes the manifest's licenses annotation                                                                                                                                                  |
+| `LABEL`           | `key=value` pairs                              | Each becomes a manifest annotation                                                                                                                                                                                                    |
 
 The build checks every adapter against the base before storing it: each module's base weight must exist and be a matrix, and `lora_A` must be `[r, in]` and `lora_B` `[out, r]` for a base weight of `[out, in]`. A mismatch fails the build, since it means the adapter was trained on another model. An `EXPERT` with modules outside its `MIX`'s targets or blocks builds with a warning.
 

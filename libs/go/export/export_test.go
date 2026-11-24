@@ -145,6 +145,11 @@ func TestExportLayout(t *testing.T) {
 	var french, legal map[string]any
 	readJSON(t, filepath.Join(out, "adapters/french/adapter_config.json"), &french)
 	readJSON(t, filepath.Join(out, "adapters/legal/adapter_config.json"), &legal)
+	// task_type stays null: the image does not record the adapter's task,
+	// and null loads with PEFT's generic wrapper on any model.
+	if tt, set := french["task_type"]; !set || tt != nil {
+		t.Errorf("french task_type = %v, want null", tt)
+	}
 	if french["peft_type"] != "LORA" || french["r"] != 8.0 || french["lora_alpha"] != 16.0 || french["use_rslora"] != false {
 		t.Errorf("french config = %v", french)
 	}
@@ -160,6 +165,41 @@ func TestExportLayout(t *testing.T) {
 	rx := regexp.MustCompile(re)
 	if !rx.MatchString("model.layers.1.mlp.up_proj") || rx.MatchString("model.layers.0.mlp.up_proj") || rx.MatchString("model.layers.1.mlp.up_proj.x") {
 		t.Errorf("legal target_modules %q matches the wrong modules", re)
+	}
+}
+
+// Annotations, such as the provenance wpk squash records, come back through
+// LABEL lines, so the rebuilt manifest is the same.
+func TestExportKeepsAnnotations(t *testing.T) {
+	f := newFixture(t)
+	wf := filepath.Join(f.dir, "Labelled.Weightfile")
+	body := "FROM ./base\nLAYER french ./adapters/french\nLICENSE \"MIT OR Apache-2.0\"\n" +
+		"LABEL wpk.squashed=french,legal wpk.squashed.from=sha256:" + strings.Repeat("ab", 32) + "\n" +
+		"LABEL org.example.note=\"a \\\"quoted\\\" #hash and \\\\ slash\" org.example.empty=\n"
+	if err := os.WriteFile(wf, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := f.build(t, wf, "labelled")
+	out := filepath.Join(f.dir, "out")
+	if _, err := Export(context.Background(), f.store, "labelled", Options{Dir: out}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.build(t, filepath.Join(out, "Weightfile")); got != want {
+		exported, _ := os.ReadFile(filepath.Join(out, "Weightfile"))
+		t.Errorf("rebuilt %s, want %s; exported Weightfile:\n%s", got, want, exported)
+	}
+}
+
+func TestQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		"MIT": "MIT", "a b": `"a b"`, `say "hi"`: `"say \"hi\""`, `c:\x`: `"c:\\x"`, "#1": `"#1"`, "": "",
+	} {
+		if got, err := quote(in); err != nil || got != want {
+			t.Errorf("quote(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := quote("two\nlines"); err == nil {
+		t.Error("a line break was accepted")
 	}
 }
 

@@ -39,6 +39,15 @@ type File struct {
 	Mix      *Mix    // optional; always on top of the stack
 	Template *Meta   // chat template path
 	License  *Meta   // "inherit", an SPDX id or a path
+	Labels   []Label // manifest annotations, in file order
+}
+
+// Label is one key=value of a LABEL line. It becomes an annotation on the
+// image's manifest, as Dockerfile labels do.
+type Label struct {
+	Line  int
+	Key   string
+	Value string
 }
 
 // From is the FROM instruction.
@@ -173,6 +182,7 @@ type parser struct {
 	sawFrom bool
 	inMix   bool // a MIX block is open: EXPERT and ROUTER attach to it
 	ids     map[string]int
+	labels  map[string]int // label key -> line
 	errs    []error
 }
 
@@ -207,6 +217,8 @@ func (p *parser) line(l rawLine) {
 		p.meta(l, args, &p.file.Template, "TEMPLATE", "<path>")
 	case "LICENSE":
 		p.meta(l, args, &p.file.License, "LICENSE", "inherit | <SPDX id> | <path>")
+	case "LABEL":
+		p.label(l, args)
 	case "TRAIN":
 		p.errorf(l.no, "TRAIN blocks are not supported yet; train the adapter and give its path")
 	default:
@@ -418,6 +430,40 @@ func (p *parser) meta(l rawLine, args []string, dst **Meta, instr, usage string)
 		return
 	}
 	*dst = &Meta{Line: l.no, Value: args[0]}
+}
+
+// labelKey is an annotation key: reverse-domain style, such as
+// org.example.team or wpk.squashed.from.
+var labelKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
+
+// licensesKey is the annotation LICENSE sets from an SPDX id.
+const licensesKey = "org.opencontainers.image.licenses"
+
+func (p *parser) label(l rawLine, args []string) {
+	if len(args) == 0 {
+		p.errorf(l.no, "usage: LABEL <key>=<value> ...")
+		return
+	}
+	if p.labels == nil {
+		p.labels = map[string]int{}
+	}
+	for _, a := range args {
+		k, v, ok := strings.Cut(a, "=")
+		switch {
+		case !ok || !labelKey.MatchString(k):
+			p.errorf(l.no, "LABEL %q: want key=value, the key made of letters, digits, '.', '_', '-' and '/'", a)
+			continue
+		case k == licensesKey:
+			p.errorf(l.no, "LABEL %s: set the license with LICENSE", k)
+			continue
+		}
+		if first, dup := p.labels[k]; dup {
+			p.errorf(l.no, "LABEL %s already set at line %d", k, first)
+			continue
+		}
+		p.labels[k] = l.no
+		p.file.Labels = append(p.file.Labels, Label{Line: l.no, Key: k, Value: v})
+	}
 }
 
 // finish applies defaults and the checks that need the whole file.

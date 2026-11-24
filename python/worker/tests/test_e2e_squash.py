@@ -106,3 +106,20 @@ def test_squash_end_to_end(weightpack, tmp_path):
         np.testing.assert_allclose(have, want, rtol=2**-7, atol=0, err_msg=name)
         assert np.mean(have == want) > 0.95, name
         assert digest != src[name][2], name
+
+
+def test_squashed_image_exports_and_rebuilds_identically(weightpack, tmp_path):
+    write_project(tmp_path, np.random.default_rng(7))
+    weightpack.wpk("build", "-t", "french", str(tmp_path))
+    weightpack.wpk("squash", "-t", "french-dense", "french")
+    squashed = weightpack.inspect("french-dense")
+
+    out = tmp_path / "exported"
+    weightpack.wpk("export", "-o", str(out), "french-dense")
+    assert "LABEL wpk.squashed=french" in (out / "Weightfile").read_text()
+    rebuilt = weightpack.wpk("build", "-t", "rebuilt", str(out))
+    assert f"Built {squashed['digest']}:" in rebuilt
+    assert (
+        weightpack.inspect("rebuilt")["manifest"]["annotations"]
+        == (squashed["manifest"]["annotations"])
+    )

@@ -234,6 +234,7 @@ LICENSE inherit
 ```
 
 - `LAYER` and `EXPERT` accept a local adapter, an OCI reference, a Hugging Face repo, or a `TRAIN` block that calls a trainer.
+- `LABEL key=value` sets annotations on the image's manifest, as a Dockerfile's labels do.
 - A full fine-tune given as an `EXPERT` (finance above) is imported: Weightpack subtracts the parent, encodes the delta with the named codec, runs the eval, and fails the build if the drop exceeds `max_drop`.
 - The cache key of a step is the hash of its parent chain ID, data digest, trainer config and trainer version. Change the French data and only `french` and everything above it rebuild.
 
@@ -248,7 +249,7 @@ LICENSE inherit
 | `wpk import hf://… --parent ref` | `docker import` | Turns an existing fine-tune into a delta layer over a parent |
 | `wpk export --format hf\|gguf` | `docker save` | Plain checkpoint for other tools |
 
-**Export.** `wpk export -o DIR <ref>` writes an image out for other tools and, with its Weightfile, back into Weightpack. `DIR/base/` is a Hugging Face model directory: the base tensors in safetensors shards of at most `--max-shard-size` (5 GB by default, with `model.safetensors.index.json` when there are several), plus the base's `config.json`, tokenizer and other files. `DIR/adapters/<id>/` holds each LoRA layer as a PEFT adapter, with PEFT's tensor names and an `adapter_config.json`: `target_modules` is the module-suffix list when the adapter covers every matching base matrix, and otherwise a regular expression naming its modules exactly. The image's chat template and license file go to the export root, and `DIR/Weightfile` rebuilds the image: `wpk build DIR` gives the same manifest digest. A squashed image exports as a plain `DIR/base` any engine loads. Only `--format hf` exists so far.
+**Export.** `wpk export -o DIR <ref>` writes an image out for other tools and, with its Weightfile, back into Weightpack. `DIR/base/` is a Hugging Face model directory: the base tensors in safetensors shards of at most `--max-shard-size` (5 GB by default, with `model.safetensors.index.json` when there are several), plus the base's `config.json`, tokenizer and other files. `DIR/adapters/<id>/` holds each LoRA layer as a PEFT adapter, with PEFT's tensor names and an `adapter_config.json`: `target_modules` is the module-suffix list when the adapter covers every matching base matrix, and otherwise a regular expression naming its modules exactly. Adapter configs leave `task_type` null, since the image does not record an adapter's task, so PEFT loads them with its generic wrapper on any model. The image's chat template and license file go to the export root, its manifest annotations (a squash's provenance among them) become `LABEL` lines, and `DIR/Weightfile` rebuilds the image: `wpk build DIR` gives the same manifest digest, squashed images included. A squashed image exports as a plain `DIR/base` any engine loads. Only `--format hf` exists so far.
 
 ## Storage and compression
 

@@ -25,7 +25,6 @@ import (
 	"regexp"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -115,7 +114,7 @@ func Export(ctx context.Context, s *store.Store, ref string, opts Options, progr
 	if err != nil {
 		return nil, err
 	}
-	if err := e.weightfile(ref, root.Digest.String(), plan, files, m.Annotations[ocispec.AnnotationLicenses]); err != nil {
+	if err := e.weightfile(ref, root.Digest.String(), plan, files, m.Annotations); err != nil {
 		return nil, err
 	}
 
@@ -409,8 +408,11 @@ func checkTitle(title string) error {
 // peftConfig is the adapter_config.json written for each LoRA layer: what
 // PEFT and vLLM read to load it.
 type peftConfig struct {
-	PeftType          string         `json:"peft_type"`
-	TaskType          string         `json:"task_type"`
+	PeftType string `json:"peft_type"`
+	// TaskType stays null: the image does not record the adapter's task,
+	// and null makes PEFT load it with its generic wrapper, which suits
+	// every model (CAUSAL_LM would break encoders, for one).
+	TaskType          *string        `json:"task_type"`
 	BaseModel         *string        `json:"base_model_name_or_path"`
 	R                 int            `json:"r"`
 	LoraAlpha         float64        `json:"lora_alpha"`
@@ -457,7 +459,7 @@ func (e *exporter) adapter(l spec.Layer, ds []ocispec.Descriptor, base map[strin
 		return err
 	}
 	cfg := peftConfig{
-		PeftType: "LORA", TaskType: "CAUSAL_LM", R: l.Rank, LoraAlpha: l.Alpha, UseRSLoRA: l.RSLoRA,
+		PeftType: "LORA", R: l.Rank, LoraAlpha: l.Alpha, UseRSLoRA: l.RSLoRA,
 		TargetModules: targetModules(modules, base), Bias: "none",
 		RankPattern: map[string]any{}, AlphaPattern: map[string]any{},
 		InferenceMode: true, InitLoraWeights: true,
@@ -527,7 +529,10 @@ func (e *exporter) imageMeta(ds []ocispec.Descriptor) (map[string]bool, error) {
 }
 
 // weightfile writes the Weightfile that rebuilds the image from the export.
-func (e *exporter) weightfile(ref, digest string, p *layerPlan, files map[string]bool, license string) error {
+// The manifest's annotations come back as LICENSE (the SPDX licenses one)
+// and LABEL lines (all others, such as a squash's provenance), so the
+// rebuilt manifest is the same.
+func (e *exporter) weightfile(ref, digest string, p *layerPlan, files map[string]bool, annotations map[string]string) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Exported from %s (%s) by wpk export.\n# `wpk build` on this directory rebuilds the same layers.\n", ref, digest)
 	b.WriteString("FROM ./base\n")
@@ -551,11 +556,36 @@ func (e *exporter) weightfile(ref, digest string, p *layerPlan, files map[string
 	if files["chat_template.jinja"] {
 		b.WriteString("TEMPLATE ./chat_template.jinja\n")
 	}
+	license := annotations[ocispec.AnnotationLicenses]
 	switch {
 	case files["LICENSE"]:
 		b.WriteString("LICENSE ./LICENSE\n")
 	case license != "":
-		fmt.Fprintf(&b, "LICENSE %s\n", quote(license))
+		v, err := quote(license)
+		if err != nil {
+			return fmt.Errorf("license %w", err)
+		}
+		fmt.Fprintf(&b, "LICENSE %s\n", v)
+	}
+	keys := make([]string, 0, len(annotations))
+	for k := range annotations {
+		if k != ocispec.AnnotationLicenses {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if !labelKey.MatchString(k) {
+			return fmt.Errorf("annotation key %q cannot be written as a Weightfile LABEL", k)
+		}
+		v, err := quote(annotations[k])
+		if err != nil {
+			return fmt.Errorf("annotation %s %w", k, err)
+		}
+		if v == "" {
+			v = `""`
+		}
+		fmt.Fprintf(&b, "LABEL %s=%s\n", k, v)
 	}
 	// The Weightfile must parse; anything else is a bug here.
 	if _, err := weightfile.Parse(strings.NewReader(b.String())); err != nil {
@@ -564,11 +594,21 @@ func (e *exporter) weightfile(ref, digest string, p *layerPlan, files map[string
 	return e.writeFile("Weightfile", strings.NewReader(b.String()))
 }
 
-// quote writes a Weightfile value, in double quotes when it has spaces or
-// characters the lexer treats specially.
-func quote(v string) string {
-	if v != "" && !strings.ContainsAny(v, " \t\"\\#") {
-		return v
+// labelKey matches the keys a Weightfile LABEL accepts.
+var labelKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$`)
+
+// quote writes a Weightfile value: as it is when it is a plain word, else
+// in double quotes with the only escapes the lexer knows, \" and \\. A
+// value with a line break cannot be written at all.
+func quote(v string) (string, error) {
+	if strings.ContainsAny(v, "\r\n") {
+		return "", errors.New("value has a line break, which a Weightfile cannot carry")
 	}
-	return strconv.Quote(v)
+	if v != "" && !strings.ContainsAny(v, " \t\"\\#") {
+		return v, nil
+	}
+	if v == "" {
+		return "", nil
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`, nil
 }
