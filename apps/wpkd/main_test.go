@@ -22,7 +22,7 @@ func TestServeOnPrivateSocket(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serve(ctx, root, socket, slog.New(slog.DiscardHandler)) }()
+	go func() { done <- serve(ctx, config{root: root, socket: socket}, slog.New(slog.DiscardHandler)) }()
 
 	c := api.NewClient(socket)
 	var health map[string]string

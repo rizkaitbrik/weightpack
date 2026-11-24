@@ -26,6 +26,15 @@ const (
 	AnnotationTensor = "wpk.tensor"
 )
 
+// Manifest annotation keys set on a squashed image.
+const (
+	// AnnotationSquashed lists the layer ids baked into the base, bottom
+	// first, comma-separated.
+	AnnotationSquashed = "wpk.squashed"
+	// AnnotationSquashedFrom is the manifest digest of the image squashed.
+	AnnotationSquashedFrom = "wpk.squashed.from"
+)
+
 // lossless reports which base media types restore the source bit for bit.
 var lossless = map[string]bool{
 	MediaTypeTensor:      true,

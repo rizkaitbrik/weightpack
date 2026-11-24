@@ -23,10 +23,18 @@ requires-python = ">=3.10,<4"
 readme = 'README.md'
 license = "Apache-2.0"
 authors = [{ name = "Weightpack contributors" }]
-dependencies = ["numpy>=1.26"]
+dependencies = [
+    "grpcio>=1.85.4",
+    "numpy>=1.26",
+    "protobuf>=7.35.1",
+]
+
+[project.scripts]
+weightpack-worker = "weightpack_worker.server:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["weightpack_worker"]
+# weightpack/worker/v1 is the generated gRPC code (npx nx run proto:generate).
+packages = ["weightpack_worker", "weightpack"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -39,6 +47,12 @@ dev = [
   "pytest-sugar>=1.0.0",
   "pytest-cov>=6.0.0",
   "pytest-html>=4.1.1",
+  "grpcio-tools>=1.85.4",
+]
+parity = [
+    "peft>=0.21.3",
+    "torch>=2.14.1",
+    "transformers>=5.20.2",
 ]
 
 [build-system]
@@ -76,3 +90,14 @@ ignore = []
 
 fixable = ["ALL"]
 unfixable = []
+
+# The parity dependency group (torch, transformers, peft) is only for the
+# PEFT parity test (npx nx run worker:parity). On Linux, take CPU-only torch
+# wheels instead of the CUDA builds.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

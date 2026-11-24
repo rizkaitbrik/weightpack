@@ -63,7 +63,13 @@
         "command": "uv run pytest tests/",
         "cwd": "{projectRoot}"
       },
-      "cache": true
+      "cache": true,
+      "dependsOn": [
+        {
+          "projects": ["wpk", "wpkd"],
+          "target": "build"
+        }
+      ]
     },
     "install": {
       "executor": "@nxlv/python:install",
@@ -78,6 +84,19 @@
       "executor": "@nxlv/python:publish",
       "options": {},
       "outputs": []
+    },
+    "parity": {
+      "executor": "@nxlv/python:run-commands",
+      "options": {
+        "command": "uv run --group parity pytest tests/test_peft_parity.py -s --no-cov",
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": [
+        {
+          "projects": ["wpk", "wpkd"],
+          "target": "build"
+        }
+      ]
     }
   },
   "tags": ["lang:python", "type:lib"],

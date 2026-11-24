@@ -1,4 +1,4 @@
-"""Weightpack build worker: training, delta import, codecs and eval runs."""
+"""Weightpack build worker: squash, training, delta import, codecs and eval runs."""
 
 from weightpack_worker.codecs import (
     Bit1Delta,

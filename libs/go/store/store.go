@@ -146,6 +146,28 @@ func (s *Store) Open(digest string) (io.ReadCloser, error) {
 	return f, err
 }
 
+// Path returns where a blob lives on disk, for a local reader such as a
+// build worker that opens it read-only. Writers must go through Put.
+func (s *Store) Path(digest string) (string, error) {
+	hexPart, err := ParseDigest(digest)
+	if err != nil {
+		return "", err
+	}
+	p := s.blobPath(hexPart)
+	if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
+		return "", fmt.Errorf("%w: %s", ErrNotFound, digest)
+	} else if err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
+// TempDir creates a staging directory inside the store, on the same file
+// system as the blobs. The caller removes it.
+func (s *Store) TempDir(prefix string) (string, error) {
+	return os.MkdirTemp(filepath.Join(s.root, "tmp"), prefix)
+}
+
 // Missing returns the digests from want that the store does not hold, in
 // order. It is what push and pull use to move only new blobs.
 func (s *Store) Missing(want []string) ([]string, error) {
