@@ -24,12 +24,14 @@ from pathlib import Path
 
 import numpy as np
 
+from weightpack_worker.delta import Parent
 from weightpack_worker.safetensors_io import (
     FLOAT_DTYPES,
     TensorInfo,
     from_float32,
     load_raw,
     read_header,
+    storage_dtype,
     to_float32,
     write_tensor,
 )
@@ -54,17 +56,6 @@ class _Delta:
     path: str
     a: TensorInfo
     b: TensorInfo
-
-
-def _index(paths: list[str]) -> dict[str, tuple[str, TensorInfo]]:
-    """Map every tensor name in the given files to (path, info)."""
-    out: dict[str, tuple[str, TensorInfo]] = {}
-    for p in paths:
-        for name, info in read_header(p).items():
-            if name in out:
-                raise ValueError(f"tensor {name} is in both {out[name][0]} and {p}")
-            out[name] = (p, info)
-    return out
 
 
 def _deltas(
@@ -114,27 +105,34 @@ def _deltas(
 
 
 def squash(
-    base_blobs: list[str], layers: list[LoRALayer], out_dir: str | Path
+    base_blobs: list[str],
+    layers: list[LoRALayer],
+    out_dir: str | Path,
+    xor_layers: list[list[str]] = (),
 ) -> list[tuple[str, str]]:
-    """Merge ``layers`` into the base tensors they modify.
+    """Merge XOR layers, then ``layers``, into the base tensors they modify.
 
-    Writes one safetensors file per merged tensor into ``out_dir`` and
-    returns ``(tensor name, file name)`` pairs, sorted by tensor name.
+    XOR layers apply first, exactly, bit for bit; LoRA deltas then add in
+    float32. Writes one safetensors file per merged tensor into ``out_dir``
+    and returns ``(tensor name, file name)`` pairs, sorted by tensor name.
     """
     out_dir = Path(out_dir)
-    base = _index(base_blobs)
-    deltas = _deltas(layers, base)
+    parent = Parent(base_blobs, xor_layers)
+    deltas = _deltas(layers, parent.base)
     merged: list[tuple[str, str]] = []
-    for i, target in enumerate(sorted(deltas)):
-        path, info = base[target]
-        w = to_float32(info.dtype, load_raw(path, info))
-        for d in deltas[target]:
-            a = to_float32(d.a.dtype, load_raw(d.path, d.a))
-            b = to_float32(d.b.dtype, load_raw(d.path, d.b))
-            delta = b @ a
-            delta *= np.float32(d.scaling)
-            w += delta
+    for i, target in enumerate(sorted(set(deltas) | parent.touched())):
+        info = parent.base[target][1]
+        raw = parent.bits(target).view(storage_dtype(info.dtype))
+        if target in deltas:
+            w = to_float32(info.dtype, raw)
+            for d in deltas[target]:
+                a = to_float32(d.a.dtype, load_raw(d.path, d.a))
+                b = to_float32(d.b.dtype, load_raw(d.path, d.b))
+                delta = b @ a
+                delta *= np.float32(d.scaling)
+                w += delta
+            raw = from_float32(info.dtype, w)
         file = f"{i:06d}.safetensors"
-        write_tensor(out_dir / file, target, info.dtype, from_float32(info.dtype, w))
+        write_tensor(out_dir / file, target, info.dtype, raw)
         merged.append((target, file))
     return merged

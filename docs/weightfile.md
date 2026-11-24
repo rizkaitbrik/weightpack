@@ -63,6 +63,8 @@ Without `codec=`, or with `codec=lora`, the source is an adapter and is stored a
 
 `eval=` names the suite the build gates on; without it the domain's shared default suite applies. `eval` and `max_drop` are rejected on lossless codecs.
 
+`codec=xor` is supported: the source is a directory of safetensors weights with exactly the base's tensor names, dtypes and shapes, and the layer must sit on the base or on other `xor` layers (LoRA layers can go on top of it). The build needs `wpkd`'s build worker. `wpk import --parent <image | dir> [--id name] -t name <dir>` is shorthand for `FROM <parent>` plus one such layer. `bit1` and `sparse` are not supported yet.
+
 ## MIX parameters
 
 | Parameter | Values                                                                                        | Default                      |
@@ -103,6 +105,6 @@ An image named by `FROM`, `LAYER` or `EXPERT` comes from the local store, or is 
 
 Building `FROM` a pushed base gives the same image digest as building from the base's directory.
 
-Not yet supported, each with a clear error: `hf://` sources (download the model or adapter and use its directory), `codec=xor|bit1|sparse` imports of full fine-tunes, `ROUTER train`, pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `modules_to_save`, `rank_pattern` or `alpha_pattern`.
+Not yet supported, each with a clear error: `hf://` sources (download the model or adapter and use its directory), lossy imports (`codec=bit1|sparse`), `ROUTER train`, pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `modules_to_save`, `rank_pattern` or `alpha_pattern`.
 
 Building the same inputs twice gives the same image digest and stores nothing new. Two images on the same base share its blobs, so the second stores only its own layers.

@@ -31,7 +31,6 @@ type command struct {
 var planned = map[string]string{
 	"run":    "Serve an image through the local engine",
 	"diff":   "Show which tensors differ between two images",
-	"import": "Turn an existing fine-tune into a delta layer",
 	"rebase": "Move layers onto a new base (transfer, gate, distil)",
 }
 
@@ -48,6 +47,7 @@ func commands() map[string]command {
 		"pull":     {"Pull an image, fetching only missing blobs", runPull},
 		"squash":   {"Bake an image's LoRA layers into a dense image", runSquash},
 		"export":   {"Write an image out as Hugging Face and PEFT files", runExport},
+		"import":   {"Store a full fine-tune as a lossless delta over a parent", runImport},
 	}
 	for name, summary := range planned {
 		cmds[name] = command{summary, notImplemented(name)}

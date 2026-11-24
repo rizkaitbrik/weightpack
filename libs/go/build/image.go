@@ -258,8 +258,11 @@ func (b *builder) graft(wf *weightfile.File, cfg *spec.Config, inh *inherited) e
 
 // ingestLayer dispatches a LAYER or EXPERT on its source.
 func (b *builder) ingestLayer(step string, src weightfile.Layer, layer, parent *spec.Layer, base *baseModel, mix *weightfile.Mix, byID map[string]*spec.Layer) error {
-	if src.Source.Kind == weightfile.SourceOCI {
+	switch {
+	case src.Source.Kind == weightfile.SourceOCI:
 		return b.ingestImageLayer(step, src, layer, parent, mix, byID)
+	case src.Codec == weightfile.CodecXOR:
+		return b.ingestXOR(step, src, layer, parent, base, byID)
 	}
 	return b.ingestLoRA(step, src, layer, parent, base, mix)
 }

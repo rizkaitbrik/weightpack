@@ -18,18 +18,48 @@ from pathlib import Path
 import grpc
 
 from weightpack.worker.v1 import worker_pb2, worker_pb2_grpc
+from weightpack_worker.delta import encode_xor
 from weightpack_worker.squash import LoRALayer, squash
 
 __version__ = "0.1.0"
 
 
 class Worker(worker_pb2_grpc.WorkerServicer):
-    """Implements Info and Squash; EncodeLayer and Evaluate are not done yet
-    and answer UNIMPLEMENTED (the generated base class does that)."""
+    """Implements Info, Squash and EncodeLayer (XOR); Evaluate is not done
+    yet and answers UNIMPLEMENTED (the generated base class does that)."""
 
     def Info(self, request, context):  # noqa: N802 (gRPC method name)
         return worker_pb2.InfoResponse(
-            version=__version__, codecs=[worker_pb2.CODEC_LORA]
+            version=__version__,
+            codecs=[worker_pb2.CODEC_LORA, worker_pb2.CODEC_XOR],
+        )
+
+    def EncodeLayer(self, request, context):  # noqa: N802
+        if request.codec != worker_pb2.CODEC_XOR:
+            context.abort(
+                grpc.StatusCode.UNIMPLEMENTED,
+                f"codec {worker_pb2.Codec.Name(request.codec)} is not supported yet",
+            )
+        out_dir = Path(request.out_dir)
+        if not out_dir.is_dir():
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                f"out_dir {out_dir} is not a directory",
+            )
+        try:
+            encoded, unchanged = encode_xor(
+                [b.path for b in request.base],
+                [[b.path for b in layer.blobs] for layer in request.parents],
+                list(request.target_files),
+                out_dir,
+            )
+        except (ValueError, OSError, KeyError) as exc:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
+        return worker_pb2.EncodeLayerResponse(
+            tensors=[
+                worker_pb2.EncodedTensor(name=name, file=file) for name, file in encoded
+            ],
+            unchanged=unchanged,
         )
 
     def Squash(self, request, context):  # noqa: N802
@@ -46,7 +76,12 @@ class Worker(worker_pb2_grpc.WorkerServicer):
             for layer in request.layers
         ]
         try:
-            merged = squash([b.path for b in request.base], layers, out_dir)
+            merged = squash(
+                [b.path for b in request.base],
+                layers,
+                out_dir,
+                [[b.path for b in layer.blobs] for layer in request.xor_layers],
+            )
         except (ValueError, OSError, KeyError) as exc:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
         return worker_pb2.SquashResponse(

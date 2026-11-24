@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/google/go-containerregistry v0.20.6
+	github.com/klauspost/compress v1.18.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	google.golang.org/grpc v1.80.0

@@ -41,14 +41,15 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type WorkerClient interface {
-	// Extract and encode a delta of `target` against `parent`, tensor by tensor.
+	// Encode a full fine-tune as a delta over its parent, tensor by tensor,
+	// writing one delta file per tensor that changed to out_dir.
 	EncodeLayer(ctx context.Context, in *EncodeLayerRequest, opts ...grpc.CallOption) (*EncodeLayerResponse, error)
 	// Run an eval suite against a composition and report the score.
 	Evaluate(ctx context.Context, in *EvaluateRequest, opts ...grpc.CallOption) (*EvaluateResponse, error)
 	// Report the worker's version and the codecs it supports.
 	Info(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*InfoResponse, error)
-	// Bake LoRA layers into the base tensors they modify and write the merged
-	// tensors to out_dir.
+	// Bake XOR and LoRA layers into the base tensors they modify and write the
+	// merged tensors to out_dir.
 	Squash(ctx context.Context, in *SquashRequest, opts ...grpc.CallOption) (*SquashResponse, error)
 }
 
@@ -104,14 +105,15 @@ func (c *workerClient) Squash(ctx context.Context, in *SquashRequest, opts ...gr
 // All implementations must embed UnimplementedWorkerServer
 // for forward compatibility.
 type WorkerServer interface {
-	// Extract and encode a delta of `target` against `parent`, tensor by tensor.
+	// Encode a full fine-tune as a delta over its parent, tensor by tensor,
+	// writing one delta file per tensor that changed to out_dir.
 	EncodeLayer(context.Context, *EncodeLayerRequest) (*EncodeLayerResponse, error)
 	// Run an eval suite against a composition and report the score.
 	Evaluate(context.Context, *EvaluateRequest) (*EvaluateResponse, error)
 	// Report the worker's version and the codecs it supports.
 	Info(context.Context, *InfoRequest) (*InfoResponse, error)
-	// Bake LoRA layers into the base tensors they modify and write the merged
-	// tensors to out_dir.
+	// Bake XOR and LoRA layers into the base tensors they modify and write the
+	// merged tensors to out_dir.
 	Squash(context.Context, *SquashRequest) (*SquashResponse, error)
 	mustEmbedUnimplementedWorkerServer()
 }

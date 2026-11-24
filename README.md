@@ -2,7 +2,7 @@
 
 **Docker for neural nets.** Ship a model as a base plus small, content-addressed weight layers. Stack layers, or mix them side by side as experts behind a router, and push the result to any OCI registry.
 
-> **Status: early development.** `wpk build` turns a Weightfile into an image in the local store, from local safetensors bases and PEFT LoRA adapters or from images in a registry, refusing a layer built on a different chain; `images`, `inspect` and `history` read it back; `push` and `pull` move it through any OCI registry, sending only the blobs the other side lacks; `squash` bakes LoRA layers into dense weights that match PEFT's merge bit for bit; `export` writes an image out as Hugging Face and PEFT files that transformers, PEFT and vLLM load. Serving does not exist yet. See the [design doc](docs/design.md) and the roadmap below.
+> **Status: early development.** `wpk build` turns a Weightfile into an image in the local store, from local safetensors bases and PEFT LoRA adapters or from images in a registry, refusing a layer built on a different chain; `images`, `inspect` and `history` read it back; `push` and `pull` move it through any OCI registry, sending only the blobs the other side lacks; `import` stores a full fine-tune losslessly as compressed XOR deltas over its parent; `squash` bakes LoRA and XOR layers into dense weights, matching PEFT's merge bit for bit; `export` writes an image out as Hugging Face and PEFT files that transformers, PEFT and vLLM load. Serving does not exist yet. See the [design doc](docs/design.md) and the roadmap below.
 
 ## Why
 
@@ -50,6 +50,7 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `libs/go/registry` | `registry` | Go | Push and pull to OCI registries; pulls are checked before any tensor is fetched |
 | `libs/go/api` | `api` | Go | `wpk` to `wpkd` wire types and client |
 | `libs/go/daemon` | `daemon` | Go | `wpkd`'s HTTP API over the store |
+| `libs/go/entropy` | `entropy` | Go | Entropy coders named by media-type suffixes (`+zstd`) |
 | `libs/go/export` | `export` | Go | Export: Hugging Face base, PEFT adapters and a Weightfile that rebuilds the image |
 | `libs/go/squash` | `squash` | Go | Squash: picks the layers, hands blobs to the worker, stores the dense image |
 | `libs/go/worker`, `libs/go/workerpb` | `worker-client` | Go | gRPC client for the build worker; generated contract code |
@@ -83,6 +84,7 @@ npx nx run-many -t build --projects=wpk,wpkd
 ./dist/apps/wpk images
 ./dist/apps/wpk history assistant:v1
 ./dist/apps/wpk squash -t assistant-legal --expert legal assistant:v1   # dense weights, one expert baked in
+./dist/apps/wpk import --parent ./base -t finance ./finance-finetune         # a full fine-tune, stored as XOR deltas
 ./dist/apps/wpk export -o ./assistant-legal assistant-legal               # ./assistant-legal/base loads in transformers or vLLM
 ./dist/apps/wpk tag assistant:v1 registry.example.com/team/assistant:v1
 ./dist/apps/wpk push registry.example.com/team/assistant:v1

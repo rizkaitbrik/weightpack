@@ -32,6 +32,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 	"github.com/rizkaitbrik/weightpack/libs/go/weightfile"
+	"github.com/rizkaitbrik/weightpack/libs/go/workerpb"
 )
 
 // Options says what to build.
@@ -44,6 +45,8 @@ type Options struct {
 	// Pull fetches an image a FROM, LAYER or EXPERT names when the store
 	// does not have it. Nil means such images must be in the store already.
 	Pull PullFunc
+	// Worker encodes codec=xor layers. Nil means such layers cannot be built.
+	Worker workerpb.WorkerClient
 }
 
 // PullFunc fetches ref into the store, reporting progress.
@@ -62,6 +65,7 @@ type builder struct {
 	file     string
 	progress func(api.Event)
 	pull     PullFunc
+	worker   workerpb.WorkerClient
 
 	// inherited is what a FROM image passes on, nil for a local FROM.
 	inherited *inherited
@@ -101,7 +105,7 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	}
 
 	b := &builder{
-		ctx: ctx, store: s, progress: progress, pull: opts.Pull,
+		ctx: ctx, store: s, progress: progress, pull: opts.Pull, worker: opts.Worker,
 		dir: filepath.Dir(opts.Weightfile), file: opts.Weightfile,
 		blobs: map[string][]ocispec.Descriptor{},
 	}
@@ -178,14 +182,14 @@ func checkSupported(path string, wf *weightfile.File) error {
 		}
 	}
 	for _, l := range layers {
-		lossyOrDelta := l.Codec != "" && l.Codec != weightfile.CodecLoRA
+		delta := l.Codec != "" && l.Codec != weightfile.CodecLoRA
 		switch {
 		case l.Source.Kind == weightfile.SourceHF:
 			fail(l.Line, "%s: Hugging Face sources are not supported yet; download the adapter and use its directory", l.ID)
-		case l.Source.Kind == weightfile.SourceOCI && lossyOrDelta:
+		case l.Source.Kind == weightfile.SourceOCI && delta:
 			fail(l.Line, "%s: codec= applies to importing a full fine-tune; a layer from an image is stored already", l.ID)
-		case lossyOrDelta:
-			fail(l.Line, "%s: codec=%s imports a full fine-tune, which is not supported yet", l.ID, l.Codec)
+		case delta && l.Codec != weightfile.CodecXOR:
+			fail(l.Line, "%s: codec=%s, a lossy import, is not supported yet; codec=xor imports losslessly", l.ID, l.Codec)
 		}
 	}
 	return errors.Join(errs...)

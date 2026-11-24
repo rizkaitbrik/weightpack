@@ -63,14 +63,18 @@ class Weightpack:
     def logs(self) -> str:
         return (self.root / "wpkd.log").read_text(errors="replace")
 
-    def wpk(self, *args: str) -> str:
-        r = subprocess.run(
+    def run(self, *args: str) -> subprocess.CompletedProcess:
+        """Run wpk and return the result, whatever its exit code."""
+        return subprocess.run(
             [str(self.wpk_bin), *args],
             env=self.env,
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def wpk(self, *args: str) -> str:
+        r = self.run(*args)
         if r.returncode != 0:
             raise AssertionError(
                 f"wpk {' '.join(args)} exited {r.returncode}:\n{r.stderr}\n"

@@ -1,0 +1,218 @@
+package build
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/rizkaitbrik/weightpack/libs/go/api"
+	"github.com/rizkaitbrik/weightpack/libs/go/entropy"
+	"github.com/rizkaitbrik/weightpack/libs/go/safetensors"
+	"github.com/rizkaitbrik/weightpack/libs/go/spec"
+	"github.com/rizkaitbrik/weightpack/libs/go/store"
+	"github.com/rizkaitbrik/weightpack/libs/go/weightfile"
+	"github.com/rizkaitbrik/weightpack/libs/go/workerpb"
+)
+
+// xorMediaType is how XOR deltas are stored: delta.xor.v1, zstd-compressed.
+const xorMediaType = spec.MediaTypeDeltaXOR + "+" + entropy.Zstd
+
+// ingestXOR imports a full fine-tune as a lossless XOR delta over its
+// parent. The worker computes the deltas; this checks each one, writes it in
+// canonical form and compresses it.
+//
+// XOR layers sit only on the base or on other XOR layers: their parent's
+// bits are then exact. Over a LoRA layer the parent would be the result of
+// float math, whose rounding can differ between machines, and decoding would
+// no longer give the fine-tune back bit for bit.
+func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *spec.Layer, base *baseModel, byID map[string]*spec.Layer) error {
+	fail := func(format string, args ...any) error {
+		return &weightfile.Error{File: b.file, Line: src.Line, Msg: step + ": " + fmt.Sprintf(format, args...)}
+	}
+	if b.worker == nil {
+		return fail("codec=xor runs in the build worker; start wpkd with --worker")
+	}
+	var xorParents []*spec.Layer
+	baseLayer := parent
+	for ; baseLayer.Kind != spec.KindBase; baseLayer = byID[baseLayer.Parent] {
+		if baseLayer.Kind != spec.KindDeltaXOR {
+			return fail("an XOR layer sits only on the base or on other XOR layers, but %s is a %s layer: "+
+				"its weights come from float math, so the delta would not be exact; put XOR layers below LoRA layers", baseLayer.ID, baseLayer.Kind)
+		}
+		xorParents = append([]*spec.Layer{baseLayer}, xorParents...)
+	}
+
+	// Check the fine-tune's tensor table against the base before any work.
+	dir := src.Source.Path(b.dir)
+	names, err := weightFiles(dir)
+	if err != nil {
+		return fail("%v", err)
+	}
+	req := &workerpb.EncodeLayerRequest{Codec: workerpb.Codec_CODEC_XOR}
+	seen := map[string]bool{}
+	for _, n := range names {
+		p := filepath.Join(dir, n)
+		f, err := safetensors.Open(p)
+		if err != nil {
+			return fail("%v", err)
+		}
+		for _, t := range f.Tensors {
+			want, ok := base.tensors[t.Name]
+			if !ok || want.DType != t.DType || !slices.Equal(want.Shape, t.Shape) {
+				_ = f.Close()
+				return fail("%s is %s%v in %s, which the base does not have; is this a fine-tune of another model?", t.Name, t.DType, t.Shape, n)
+			}
+			seen[t.Name] = true
+		}
+		_ = f.Close()
+		req.TargetFiles = append(req.TargetFiles, p)
+	}
+	if len(seen) != len(base.tensors) {
+		return fail("the fine-tune has %d of the base's %d tensors; it must have them all", len(seen), len(base.tensors))
+	}
+
+	staging, err := b.store.TempDir("encode-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
+	inDir, outDir := filepath.Join(staging, "in"), filepath.Join(staging, "out")
+	for _, d := range []string{inDir, outDir} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			return err
+		}
+	}
+	req.OutDir = outDir
+	for _, d := range b.blobs[baseLayer.ID] {
+		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeTensor {
+			continue
+		}
+		p, err := b.store.Path(d.Digest.String())
+		if err != nil {
+			return err
+		}
+		req.Base = append(req.Base, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
+	}
+	for _, x := range xorParents {
+		layerReq, err := DecodeXORLayer(b.store, x.ID, b.blobs[x.ID], inDir)
+		if err != nil {
+			return err
+		}
+		req.Parents = append(req.Parents, layerReq)
+	}
+
+	b.progress(api.Event{Step: step, Message: fmt.Sprintf("encoding %s as XOR deltas over %s", src.Source, parent.ID)})
+	resp, err := b.worker.EncodeLayer(b.ctx, req)
+	if err != nil {
+		return fail("%s", WorkerError(err))
+	}
+
+	var raw, stored int64
+	for _, t := range resp.Tensors {
+		want := base.tensors[t.Name]
+		if t.File == "" || t.File != filepath.Base(t.File) || strings.HasPrefix(t.File, ".") {
+			return fail("worker returned file %q outside its output directory", t.File)
+		}
+		if _, ok := base.tensors[t.Name]; !ok {
+			return fail("worker returned tensor %q, which the base does not have", t.Name)
+		}
+		f, err := safetensors.Open(filepath.Join(outDir, t.File))
+		if err != nil {
+			return fail("worker output: %v", err)
+		}
+		got, ok := f.Lookup(t.Name)
+		if !ok || len(f.Tensors) != 1 || got.DType != want.DType || !slices.Equal(got.Shape, want.Shape) {
+			_ = f.Close()
+			return fail("worker output %s does not hold %s as %s%v", t.File, t.Name, want.DType, want.Shape)
+		}
+		canon, size, err := safetensors.NewReader([]safetensors.Entry{{Name: t.Name, DType: got.DType, Shape: got.Shape, Data: f.Data(got)}}, nil)
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		zr, err := entropy.Encode(entropy.Zstd, canon)
+		if err != nil {
+			_ = f.Close()
+			return err
+		}
+		d, err := b.put(zr, xorMediaType, map[string]string{spec.AnnotationLayer: layer.ID, spec.AnnotationTensor: t.Name})
+		_ = f.Close()
+		if err != nil {
+			return fail("%s: %v", t.Name, err)
+		}
+		b.blobs[layer.ID] = append(b.blobs[layer.ID], d)
+		raw += size
+		stored += d.Size
+	}
+
+	var refs []spec.BlobRef
+	for _, d := range b.blobs[layer.ID] {
+		refs = append(refs, spec.BlobRefFromDescriptor(d))
+	}
+	layer.Kind = spec.KindDeltaXOR
+	layer.Digest = spec.LayerDigest(*layer, refs, nil)
+	layer.Chain = spec.ChainID(parent.Chain, layer.Digest)
+	ratio := "nothing changed"
+	if raw > 0 {
+		ratio = fmt.Sprintf("%s of deltas stored in %s (%.0f%%)", api.FormatSize(raw), api.FormatSize(stored), 100*float64(stored)/float64(raw))
+	}
+	b.progress(api.Event{Step: step, Message: fmt.Sprintf("XOR delta: %d tensors changed, %d unchanged; %s",
+		len(resp.Tensors), resp.Unchanged, ratio)})
+	return nil
+}
+
+// DecodeXORLayer writes a stored XOR layer's blobs into dir as plain
+// safetensors, for a worker to read, and describes them.
+func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir string) (*workerpb.XORLayer, error) {
+	out := &workerpb.XORLayer{Id: id}
+	for i, d := range blobs {
+		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeDeltaXOR {
+			continue
+		}
+		rc, err := s.Open(d.Digest.String())
+		if err != nil {
+			return nil, err
+		}
+		plain, err := entropy.Decode(d.MediaType, rc)
+		if err != nil {
+			return nil, err
+		}
+		p := filepath.Join(dir, fmt.Sprintf("%s-%06d.safetensors", id, i))
+		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			_ = plain.Close()
+			return nil, err
+		}
+		_, err = io.Copy(f, plain)
+		_ = plain.Close()
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return nil, fmt.Errorf("decode XOR blob %s: %w", d.Digest, err)
+		}
+		out.Blobs = append(out.Blobs, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
+	}
+	return out, nil
+}
+
+// WorkerError turns a worker call's error into a message: the worker's own
+// for a failed call, and what to do when no worker answers.
+func WorkerError(err error) string {
+	s, ok := status.FromError(err)
+	switch {
+	case !ok:
+		return err.Error()
+	case s.Code() == codes.Unavailable:
+		return "no build worker answers; start one with weightpack-worker, or start wpkd with --worker"
+	default:
+		return "worker: " + s.Message()
+	}
+}

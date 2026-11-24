@@ -35,7 +35,7 @@ def test_info_and_private_socket(stub):
     s, sock = stub
     info = s.Info(worker_pb2.InfoRequest(), timeout=5)
     assert info.version
-    assert list(info.codecs) == [worker_pb2.CODEC_LORA]
+    assert list(info.codecs) == [worker_pb2.CODEC_LORA, worker_pb2.CODEC_XOR]
     assert stat.S_IMODE(os.stat(sock).st_mode) & 0o077 == 0
 
 

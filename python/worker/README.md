@@ -9,6 +9,7 @@ weightpack-worker --socket ~/.weightpack/worker.sock   # or let wpkd start it: w
 What it does today:
 
 - **Squash** (`weightpack_worker.squash`): bakes LoRA layers into the base tensors they modify, in float32, rounding once to the base dtype. It matches PEFT's `merge_and_unload` bit for bit; `npx nx run worker:parity` checks that against a real PEFT merge, and that what `wpk export` writes loads back into transformers and PEFT unchanged (it installs the `parity` dependency group: torch, transformers and peft).
+- **Lossless delta import** (`weightpack_worker.delta`, the `EncodeLayer` RPC): a full fine-tune as XOR deltas over its parent, only for the tensors it changed. Squash decodes XOR layers exactly before any LoRA math, so an imported fine-tune comes back bit for bit.
 - **safetensors I/O on NumPy** (`weightpack_worker.safetensors_io`), BF16 included, with round-to-nearest-even conversion.
 - **Reference codecs** (`weightpack_worker.codecs`): `xor_encode` / `xor_decode`, a lossless XOR delta against the parent tensor, and `bit1_encode` / `bit1_decode`, a lossy 1-bit delta (sign bits plus one scale per matrix).
 

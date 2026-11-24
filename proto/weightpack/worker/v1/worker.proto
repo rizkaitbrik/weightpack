@@ -16,14 +16,15 @@ package weightpack.worker.v1;
 option go_package = "github.com/rizkaitbrik/weightpack/libs/go/workerpb;workerpb";
 
 service Worker {
-  // Extract and encode a delta of `target` against `parent`, tensor by tensor.
+  // Encode a full fine-tune as a delta over its parent, tensor by tensor,
+  // writing one delta file per tensor that changed to out_dir.
   rpc EncodeLayer(EncodeLayerRequest) returns (EncodeLayerResponse);
   // Run an eval suite against a composition and report the score.
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
   // Report the worker's version and the codecs it supports.
   rpc Info(InfoRequest) returns (InfoResponse);
-  // Bake LoRA layers into the base tensors they modify and write the merged
-  // tensors to out_dir.
+  // Bake XOR and LoRA layers into the base tensors they modify and write the
+  // merged tensors to out_dir.
   rpc Squash(SquashRequest) returns (SquashResponse);
 }
 
@@ -35,33 +36,40 @@ enum Codec {
   CODEC_LORA = 4;     // pass-through for adapters
 }
 
-message TensorRef {
-  string name = 1;    // e.g. model.layers.12.mlp.up_proj.weight
-  string digest = 2;  // sha256:<hex> of the blob in the wpkd store
-  string dtype = 3;
-  repeated int64 shape = 4;
+// An XOR layer: delta.xor.v1 blobs, each holding one tensor's bits XORed
+// with the same tensor of the layer's parent. The daemon hands the worker
+// uncompressed files, whatever entropy coder the store keeps them in.
+message XORLayer {
+  string id = 1;
+  repeated Blob blobs = 2;
 }
 
 message EncodeLayerRequest {
-  string layer_id = 1;
-  string parent_chain_id = 2;
-  repeated TensorRef parent = 3;
-  repeated TensorRef target = 4;
-  Codec codec = 5;
-  string entropy_coder = 6;  // "", "zipnn" or "zstd"
+  Codec codec = 1;  // only CODEC_XOR so far
+  // The parent's tensors: the base layer's tensor.v1 blobs, then the XOR
+  // layers between the base and the new layer, bottom first. XOR layers can
+  // only sit on the base or on other XOR layers, so the parent's bits are
+  // exact.
+  repeated Blob base = 2;
+  repeated XORLayer parents = 3;
+  // The fine-tuned model's safetensors files. Its tensor names, dtypes and
+  // shapes must match the base's.
+  repeated string target_files = 4;
+  // Directory the worker writes deltas to: one safetensors file per tensor
+  // that differs from the parent, holding target XOR parent with the
+  // tensor's name, dtype and shape. The daemon checks and stores them.
+  string out_dir = 5;
 }
 
 message EncodedTensor {
   string name = 1;
-  string media_type = 2;  // e.g. application/vnd.weightpack.delta.xor.v1+zipnn
-  string digest = 3;
-  int64 size = 4;
-  double relative_error = 5;  // 0 for lossless codecs
+  string file = 2;  // file name inside out_dir
 }
 
 message EncodeLayerResponse {
+  // Only tensors that differ from the parent; the rest cost nothing.
   repeated EncodedTensor tensors = 1;
-  string layer_digest = 2;
+  int64 unchanged = 2;  // tensors equal to the parent's
 }
 
 message EvaluateRequest {
@@ -108,6 +116,9 @@ message SquashRequest {
   // Directory the worker writes merged tensors to, one safetensors file per
   // tensor. The daemon creates it and removes it afterwards.
   string out_dir = 3;
+  // XOR layers between the base and the LoRA layers, bottom first. They are
+  // applied to the base's bits first, exactly, before any LoRA math.
+  repeated XORLayer xor_layers = 4;
 }
 
 message MergedTensor {
@@ -116,7 +127,7 @@ message MergedTensor {
 }
 
 message SquashResponse {
-  // Only the base tensors some layer modifies; every other tensor is
-  // unchanged and keeps its blob.
+  // Only the base tensors some layer modifies (XOR or LoRA); every other
+  // tensor is unchanged and keeps its blob.
   repeated MergedTensor tensors = 1;
 }

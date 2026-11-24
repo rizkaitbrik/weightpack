@@ -61,7 +61,9 @@ func (f *File) Config() (*spec.Config, error) {
 
 func weightLayer(l Layer, parent string) spec.Layer {
 	out := spec.Layer{ID: l.ID, Kind: kindForCodec(l.Codec), Parent: parent}
-	if l.Codec != "" && l.Codec != CodecLoRA {
+	// Only lossy layers carry a fidelity record: a lossless one (an adapter,
+	// or an XOR delta) gives its source back exactly.
+	if l.Codec == CodecBit1 || l.Codec == CodecSparse {
 		fid := &spec.Fidelity{Source: l.Source.String(), Codec: l.Codec, Eval: l.Eval}
 		if l.MaxDrop != nil {
 			fid.MaxDrop = *l.MaxDrop

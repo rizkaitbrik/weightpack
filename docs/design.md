@@ -202,7 +202,7 @@ Four rules make composition safe:
 | `router.v1` | Router weights or Arrow prototypes, per block | Yes |
 | `meta.v1` | Tokenizer, chat template, license, model card | Yes |
 
-An entropy coder is a suffix, as OCI does with `+zstd`: `lora.v1+zipnn`. Docker keeps model layers uncompressed so they can be memory-mapped; Weightpack trades that for size and decodes once into a local cache on pull.
+An entropy coder is a suffix, as OCI does with `+zstd`: `lora.v1+zipnn`. Docker keeps model layers uncompressed so they can be memory-mapped; Weightpack trades that for size and decodes once into a local cache on pull. The daemon does the entropy coding, which is byte-level like hashing: it compresses what it stores and decompresses what it hands a worker, so workers only ever see plain safetensors. Compression runs with one encoder goroutine at a fixed level, so the same tensor gives the same blob digest with a given encoder version.
 
 **Blob layout.** Tensor blobs are safetensors files in one canonical byte layout: tensors ordered by name, data packed with no gaps, a compact JSON header with sorted keys and no `__metadata__`, padded with spaces to a multiple of 8 bytes. The same tensors under the same names therefore give the same digest whatever file, shard or writer they came from, which is what makes tensor-level dedup work.
 
@@ -270,6 +270,8 @@ Every tensor goes through the same ingest pipeline:
 3. **Codec.** `xor` (lossless), `bit1` (sign bits plus a calibrated scale per matrix), `sparse` (drop and rescale), or `lora` (already low rank). There is no default low-rank codec for full fine-tunes: their deltas are high rank, so an SVD cut loses too much.
 4. **Entropy coding.** Split float bytes into exponent and mantissa streams and code them separately. Exponents are highly skewed, so they compress well.
 5. **Fidelity record.** Store the relative error per tensor and the eval score against the source model.
+
+**Lossless import.** `codec=xor` (or `wpk import --parent <ref> <dir>`) stores a full fine-tune as a `delta.xor` layer: for each tensor the fine-tune changed, its bits XORed with the parent's, in a `delta.xor.v1+zstd` blob (one canonical single-tensor safetensors file, zstd-compressed). Tensors the fine-tune left alone are not stored. The worker computes the deltas and the daemon checks, canonicalises and compresses them. An XOR layer sits only on the base or on other XOR layers: its parent's bits are then exact, while over a LoRA layer they would come from float math whose rounding can differ between machines, and decoding would no longer be bit-exact. LoRA layers may sit on XOR layers. Squash applies XOR layers to the base's bits first, exactly, then any LoRA math. A lossless layer has no fidelity record; only lossy codecs (`bit1`, `sparse`) carry one.
 
 **Fidelity contract.** A lossy layer carries its codec, parameters, eval suite and measured drop. Each domain has a shared default eval suite; a layer's author can add their own, and the build gates on both. `wpk pull --exact` refuses lossy layers. `wpk build` fails when the drop exceeds `max_drop`. The source digest stays in the record, so a lossless rebuild is possible while the original is still reachable.
 
