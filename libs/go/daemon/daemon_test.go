@@ -3,6 +3,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	ggcr "github.com/google/go-containerregistry/pkg/registry"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build/buildtest"
@@ -122,5 +126,59 @@ func TestClientWithoutDaemon(t *testing.T) {
 	c := api.NewClient(filepath.Join(t.TempDir(), "absent.sock"))
 	if _, err := c.Images(context.Background()); err == nil || !strings.Contains(err.Error(), "is the daemon running") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestTagPushPull(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	reg := httptest.NewServer(ggcr.New(ggcr.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(reg.Close)
+	host := strings.TrimPrefix(reg.URL, "http://")
+
+	dir := t.TempDir()
+	wf := buildtest.Project(t, dir)
+	a, _ := store.Open(filepath.Join(dir, "a"))
+	b, _ := store.Open(filepath.Join(dir, "b"))
+	ca, cb := serveUnix(t, a), serveUnix(t, b)
+	ctx := context.Background()
+
+	built, err := ca.Build(ctx, api.BuildRequest{Weightfile: wf, Tags: []string{"assistant"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteRef := host + "/team/assistant:v1"
+	tagged, err := ca.Tag(ctx, api.TagRequest{Source: "assistant", Target: remoteRef})
+	if err != nil || tagged.Ref != remoteRef || tagged.Digest != built.Manifest.Digest.String() {
+		t.Fatalf("tag = %+v, %v", tagged, err)
+	}
+	if _, err := ca.Tag(ctx, api.TagRequest{Source: "absent", Target: "x"}); err == nil || !strings.Contains(err.Error(), "no such image") {
+		t.Errorf("tag of a missing image: %v", err)
+	}
+
+	var events []api.Event
+	pushed, err := ca.Push(ctx, api.PushRequest{Ref: remoteRef}, func(e api.Event) { events = append(events, e) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pushed.Moved != pushed.Blobs || len(events) == 0 {
+		t.Errorf("push = %+v after %d events", pushed, len(events))
+	}
+	if _, err := ca.Push(ctx, api.PushRequest{Ref: "assistant"}, nil); err == nil || !strings.Contains(err.Error(), "names no registry") {
+		t.Errorf("push without a registry: %v", err)
+	}
+
+	pulled, err := cb.Pull(ctx, api.PullRequest{Ref: remoteRef, Exact: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pulled.Digest != built.Manifest.Digest.String() || pulled.Tag != remoteRef {
+		t.Errorf("pull = %+v", pulled)
+	}
+	detail, err := cb.Inspect(ctx, remoteRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spec.CheckImage(&detail.Manifest, &detail.Config); err != nil {
+		t.Errorf("pulled image: %v", err)
 	}
 }

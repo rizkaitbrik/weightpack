@@ -58,6 +58,18 @@ func (s *Store) ReadBlob(dg string) ([]byte, error) {
 	return b, nil
 }
 
+// ReadJSON reads a small blob and decodes it as JSON into v.
+func (s *Store) ReadJSON(dg string, v any) error {
+	b, err := s.ReadBlob(dg)
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		return fmt.Errorf("blob %s: %w", dg, err)
+	}
+	return nil
+}
+
 // Tag points ref at a manifest, replacing any image it named before. ref is
 // a name with an optional tag ("latest" by default) and no digest.
 func (s *Store) Tag(ref string, manifest ocispec.Descriptor) (string, error) {

@@ -74,13 +74,7 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	res, err := client().Build(ctx, api.BuildRequest{Weightfile: abs, Tags: tags}, func(e api.Event) {
-		if e.Warning {
-			fmt.Fprintf(stderr, "warning: %s: %s\n", e.Step, e.Message)
-			return
-		}
-		fmt.Fprintf(stdout, "%-18s %s\n", e.Step, e.Message)
-	})
+	res, err := client().Build(ctx, api.BuildRequest{Weightfile: abs, Tags: tags}, printEvent(stdout, stderr))
 	if err != nil {
 		fmt.Fprintf(stderr, "wpk build: %v\n", err)
 		return 1
