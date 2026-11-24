@@ -135,6 +135,19 @@ func (c *Client) Build(ctx context.Context, req BuildRequest, onEvent func(Event
 	return last.Result, nil
 }
 
+// Squash bakes an image's layers into a new dense image, reporting progress
+// to onEvent.
+func (c *Client) Squash(ctx context.Context, req SquashRequest, onEvent func(Event)) (*BuildResult, error) {
+	last, err := c.stream(ctx, "/v1/squash", req, onEvent)
+	if err != nil {
+		return nil, err
+	}
+	if last.Result == nil {
+		return nil, errors.New("wpkd ended the squash stream without a result")
+	}
+	return last.Result, nil
+}
+
 // Push sends a local image to its registry, reporting progress to onEvent.
 func (c *Client) Push(ctx context.Context, req PushRequest, onEvent func(Event)) (*TransferResult, error) {
 	return c.transfer(ctx, "/v1/push", req, onEvent)

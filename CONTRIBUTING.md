@@ -22,6 +22,8 @@ Run tasks through Nx so caching and the project graph work:
 npx nx affected -t lint test build   # what CI runs
 npx nx test spec                     # a single project
 npx nx format worker                 # format a Python project
+npx nx run proto:generate            # regenerate Go and Python code after editing proto/
+npx nx run worker:parity             # squash vs PEFT's merge (installs torch, transformers, peft)
 ```
 
 ## Conventions

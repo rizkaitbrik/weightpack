@@ -1,0 +1,13 @@
+{
+  "name": "proto",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "proto",
+  "tags": ["lang:proto"],
+  "targets": {
+    "generate": {
+      "executor": "nx:run-commands",
+      "options": { "command": "proto/generate.sh", "cwd": "{workspaceRoot}" }
+    }
+  }
+}

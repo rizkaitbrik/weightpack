@@ -1,7 +1,14 @@
 // Contract between wpkd (Go) and the Python build workers, over a local
-// gRPC socket. The daemon owns the store; workers read and write blobs
-// through it and do all per-weight work (training, delta extraction,
-// codecs, evals). Code generation is not wired up yet.
+// gRPC socket. The daemon owns the store and does no per-weight work; the
+// workers do all of it (squash, training, delta extraction, codecs, evals).
+//
+// Blob access: the daemon hands the worker the paths of the blobs it needs,
+// which the worker opens read-only, and a staging directory for its output.
+// The daemon then verifies each output file and stores it itself, so only
+// the daemon ever writes to the store.
+//
+// Generated code: libs/go/workerpb (Go) and python/worker/weightpack/worker/v1
+// (Python). Regenerate with: npx nx run proto:generate
 syntax = "proto3";
 
 package weightpack.worker.v1;
@@ -15,6 +22,9 @@ service Worker {
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
   // Report the worker's version and the codecs it supports.
   rpc Info(InfoRequest) returns (InfoResponse);
+  // Bake LoRA layers into the base tensors they modify and write the merged
+  // tensors to out_dir.
+  rpc Squash(SquashRequest) returns (SquashResponse);
 }
 
 enum Codec {
@@ -69,4 +79,44 @@ message InfoRequest {}
 message InfoResponse {
   string version = 1;
   repeated Codec codecs = 2;
+}
+
+// A blob in the daemon's store. The worker opens path read-only.
+message Blob {
+  string digest = 1;      // sha256:<hex>
+  string media_type = 2;  // e.g. application/vnd.weightpack.lora.v1
+  string path = 3;
+}
+
+// A LoRA layer to bake in. Each lora.v1 blob holds one module's
+// <module>.lora_A.weight [r, in] and <module>.lora_B.weight [out, r], which
+// modify the base tensor <module>.weight by scaling * B @ A.
+message LoRALayer {
+  string id = 1;
+  double scaling = 2;  // alpha / rank, or alpha / sqrt(rank) for rsLoRA
+  repeated Blob blobs = 3;
+}
+
+message SquashRequest {
+  // The base layer's tensor.v1 blobs: safetensors files holding one tensor,
+  // or several small ones packed together.
+  repeated Blob base = 1;
+  // Layers in chain order, bottom first. Their deltas are summed in float32
+  // with the base tensor and the result is rounded once, to nearest even, to
+  // the base tensor's dtype.
+  repeated LoRALayer layers = 2;
+  // Directory the worker writes merged tensors to, one safetensors file per
+  // tensor. The daemon creates it and removes it afterwards.
+  string out_dir = 3;
+}
+
+message MergedTensor {
+  string name = 1;  // base tensor name, e.g. model.layers.0.self_attn.q_proj.weight
+  string file = 2;  // file name inside out_dir
+}
+
+message SquashResponse {
+  // Only the base tensors some layer modifies; every other tensor is
+  // unchanged and keeps its blob.
+  repeated MergedTensor tensors = 1;
 }

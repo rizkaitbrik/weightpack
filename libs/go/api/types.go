@@ -8,6 +8,7 @@
 //	POST /v1/push                  PushRequest -> NDJSON stream of Event
 //	POST /v1/pull                  PullRequest -> NDJSON stream of Event
 //	POST /v1/tag                   TagRequest -> TagResponse
+//	POST /v1/squash                SquashRequest -> NDJSON stream of Event
 //	GET  /v1/images                -> []Image
 //	GET  /v1/images/inspect?ref=R  -> ImageDetail
 package api
@@ -44,6 +45,15 @@ type PullRequest struct {
 	Exact bool `json:"exact,omitempty"`
 }
 
+// SquashRequest asks the daemon to bake an image's LoRA layers into its base
+// and store the result as a new image with a single base layer.
+type SquashRequest struct {
+	Ref string `json:"ref"`
+	// Expert picks the one expert to bake in when the image has a MIX.
+	Expert string   `json:"expert,omitempty"`
+	Tags   []string `json:"tags,omitempty"`
+}
+
 // TagRequest points Target at the image Source names.
 type TagRequest struct {
 	Source string `json:"source"`
@@ -56,8 +66,8 @@ type TagResponse struct {
 	Digest string `json:"digest"`
 }
 
-// Event is one line of a build, push or pull NDJSON stream. The last line
-// carries Result (build), Transfer (push, pull) or Error.
+// Event is one line of a build, squash, push or pull NDJSON stream. The last
+// line carries Result (build, squash), Transfer (push, pull) or Error.
 type Event struct {
 	Step     string          `json:"step,omitempty"`
 	Message  string          `json:"message,omitempty"`
@@ -82,7 +92,7 @@ type TransferResult struct {
 	Tag string `json:"tag,omitempty"`
 }
 
-// BuildResult describes a finished build.
+// BuildResult describes a finished build or squash: the image it stored.
 type BuildResult struct {
 	Manifest ocispec.Descriptor `json:"manifest"`
 	Config   *spec.Config       `json:"config"`

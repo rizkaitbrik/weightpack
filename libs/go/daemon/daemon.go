@@ -17,7 +17,9 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/build"
 	"github.com/rizkaitbrik/weightpack/libs/go/registry"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
+	"github.com/rizkaitbrik/weightpack/libs/go/squash"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
+	"github.com/rizkaitbrik/weightpack/libs/go/worker"
 )
 
 const maxRequestBody = 1 << 20
@@ -26,14 +28,25 @@ type server struct {
 	store   *store.Store
 	version string
 	log     *slog.Logger
+	worker  *worker.Client
 }
 
+// Option configures the handler.
+type Option func(*server)
+
+// WithWorker sets the build worker that squash (and later imports and
+// evals) run on. Without one, those endpoints explain how to start one.
+func WithWorker(c *worker.Client) Option { return func(s *server) { s.worker = c } }
+
 // NewHandler returns the daemon's API over s.
-func NewHandler(s *store.Store, version string, logger *slog.Logger) http.Handler {
+func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Option) http.Handler {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	srv := &server{store: s, version: version, log: logger}
+	for _, o := range opts {
+		o(srv)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /v1/blobs/{digest}", srv.blob)
@@ -41,6 +54,7 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger) http.Handle
 	mux.HandleFunc("POST /v1/push", srv.push)
 	mux.HandleFunc("POST /v1/pull", srv.pull)
 	mux.HandleFunc("POST /v1/tag", srv.tag)
+	mux.HandleFunc("POST /v1/squash", srv.squash)
 	mux.HandleFunc("GET /v1/images", srv.images)
 	mux.HandleFunc("GET /v1/images/inspect", srv.inspect)
 	return mux
@@ -156,6 +170,29 @@ func (s *server) finishTransfer(verb, ref string, res *api.TransferResult, err e
 	}
 	s.log.Info(verb+" finished", "ref", ref, "digest", res.Digest, "moved_bytes", res.MovedBytes)
 	send(api.Event{Transfer: res})
+}
+
+// squash streams progress like build; the last line has the new image.
+func (s *server) squash(w http.ResponseWriter, r *http.Request) {
+	var req api.SquashRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if s.worker == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("wpkd has no build worker; restart it with --worker (see wpkd -h)"))
+		return
+	}
+	send := startStream(w)
+	s.log.Info("squash started", "ref", req.Ref, "expert", req.Expert)
+	res, err := squash.Squash(r.Context(), s.store, s.worker, req.Ref, squash.Options{Expert: req.Expert, Tags: req.Tags}, send)
+	if err != nil {
+		err = worker.Explain(err, s.worker.Socket())
+		s.log.Info("squash failed", "ref", req.Ref, "err", err)
+		send(api.Event{Error: err.Error()})
+		return
+	}
+	s.log.Info("squash finished", "ref", req.Ref, "digest", res.Manifest.Digest, "new_bytes", res.NewBytes)
+	send(api.Event{Result: res})
 }
 
 func (s *server) tag(w http.ResponseWriter, r *http.Request) {
