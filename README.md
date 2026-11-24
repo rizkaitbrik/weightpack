@@ -2,7 +2,7 @@
 
 **Docker for neural nets.** Ship a model as a base plus small, content-addressed weight layers. Stack layers, or mix them side by side as experts behind a router, and push the result to any OCI registry.
 
-> **Status: phase 1 in progress.** `wpk build` turns a Weightfile with a local safetensors base and PEFT LoRA adapters into an image in the local store, and `images`, `inspect` and `history` read it back. `push`, `pull`, `squash` and serving do not exist yet. See the [design doc](docs/design.md) and the roadmap below.
+> **Status: early development.** `wpk build` turns a Weightfile with a local safetensors base and PEFT LoRA adapters into an image in the local store; `images`, `inspect` and `history` read it back; `push` and `pull` move it through any OCI registry, sending only the blobs the other side lacks. `squash` and serving do not exist yet. See the [design doc](docs/design.md) and the roadmap below.
 
 ## Why
 
@@ -47,6 +47,7 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `libs/go/build` | `build` | Go | Builder: Weightfile to image (base split into tensor blobs, LoRA layers checked against the base) |
 | `libs/go/safetensors` | `safetensors` | Go | safetensors header reader and canonical writer; never decodes values |
 | `libs/go/reference` | `reference` | Go | OCI image reference parsing |
+| `libs/go/registry` | `registry` | Go | Push and pull to OCI registries; pulls are checked before any tensor is fetched |
 | `libs/go/api` | `api` | Go | `wpk` to `wpkd` wire types and client |
 | `libs/go/daemon` | `daemon` | Go | `wpkd`'s HTTP API over the store |
 | `python/worker` | `worker` | Python | Build worker: training, delta import, codecs, evals |
@@ -78,7 +79,12 @@ npx nx run-many -t build --projects=wpk,wpkd
 ./dist/apps/wpk build -t assistant:v1 path/to/project
 ./dist/apps/wpk images
 ./dist/apps/wpk history assistant:v1
+./dist/apps/wpk tag assistant:v1 registry.example.com/team/assistant:v1
+./dist/apps/wpk push registry.example.com/team/assistant:v1
+./dist/apps/wpk pull --exact registry.example.com/team/assistant:v1
 ```
+
+`push` and `pull` use the credentials `docker login` stores, and talk plain HTTP to registries on localhost (or anywhere with `--plain-http`). `pull` checks the manifest and config, digests and chain IDs included, before fetching any tensor; `--exact` refuses lossy layers.
 
 `wpk` finds the daemon at `$WPK_SOCKET`, else `$WPK_ROOT/wpkd.sock`, else `~/.weightpack/wpkd.sock`.
 

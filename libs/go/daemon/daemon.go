@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sync"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build"
+	"github.com/rizkaitbrik/weightpack/libs/go/registry"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 )
@@ -36,6 +38,9 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger) http.Handle
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /v1/blobs/{digest}", srv.blob)
 	mux.HandleFunc("POST /v1/build", srv.build)
+	mux.HandleFunc("POST /v1/push", srv.push)
+	mux.HandleFunc("POST /v1/pull", srv.pull)
+	mux.HandleFunc("POST /v1/tag", srv.tag)
 	mux.HandleFunc("GET /v1/images", srv.images)
 	mux.HandleFunc("GET /v1/images/inspect", srv.inspect)
 	return mux
@@ -67,32 +72,47 @@ func (s *server) blob(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// decode reads a JSON request body into v, answering 400 on failure.
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("bad request: %w", err))
+		return false
+	}
+	return true
+}
+
+// startStream begins an NDJSON reply and returns a function that writes one
+// event per line. It is safe to call from several goroutines.
+func startStream(w http.ResponseWriter) func(api.Event) {
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	enc := json.NewEncoder(w)
+	var mu sync.Mutex
+	return func(e api.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = enc.Encode(e)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
 // build streams progress as NDJSON. The last line has a result or an error.
 // A client that disconnects cancels the build.
 func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	var req api.BuildRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("bad build request: %w", err))
+	if !decode(w, r, &req) {
 		return
 	}
 	if !filepath.IsAbs(req.Weightfile) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("weightfile must be an absolute path, got %q", req.Weightfile))
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.WriteHeader(http.StatusOK)
-	flusher, _ := w.(http.Flusher)
-	enc := json.NewEncoder(w)
-	send := func(e api.Event) {
-		_ = enc.Encode(e)
-		if flusher != nil {
-			flusher.Flush()
-		}
-	}
-
+	send := startStream(w)
 	s.log.Info("build started", "weightfile", req.Weightfile, "tags", req.Tags)
 	res, err := build.Build(r.Context(), s.store, build.Options{Weightfile: req.Weightfile, Tags: req.Tags}, send)
 	if err != nil {
@@ -102,6 +122,62 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("build finished", "digest", res.Manifest.Digest, "new_bytes", res.NewBytes)
 	send(api.Event{Result: res})
+}
+
+// push and pull stream progress like build. A client that disconnects
+// cancels the transfer.
+func (s *server) push(w http.ResponseWriter, r *http.Request) {
+	var req api.PushRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	send := startStream(w)
+	s.log.Info("push started", "ref", req.Ref)
+	res, err := registry.Push(r.Context(), s.store, req.Ref, registry.Options{PlainHTTP: req.PlainHTTP}, send)
+	s.finishTransfer("push", req.Ref, res, err, send)
+}
+
+func (s *server) pull(w http.ResponseWriter, r *http.Request) {
+	var req api.PullRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	send := startStream(w)
+	s.log.Info("pull started", "ref", req.Ref, "exact", req.Exact)
+	res, err := registry.Pull(r.Context(), s.store, req.Ref, registry.Options{PlainHTTP: req.PlainHTTP, Exact: req.Exact}, send)
+	s.finishTransfer("pull", req.Ref, res, err, send)
+}
+
+func (s *server) finishTransfer(verb, ref string, res *api.TransferResult, err error, send func(api.Event)) {
+	if err != nil {
+		s.log.Info(verb+" failed", "ref", ref, "err", err)
+		send(api.Event{Error: err.Error()})
+		return
+	}
+	s.log.Info(verb+" finished", "ref", ref, "digest", res.Digest, "moved_bytes", res.MovedBytes)
+	send(api.Event{Transfer: res})
+}
+
+func (s *server) tag(w http.ResponseWriter, r *http.Request) {
+	var req api.TagRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	d, err := s.store.Resolve(req.Source)
+	if errors.Is(err, store.ErrUnknownImage) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	name, err := s.store.Tag(req.Target, d)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.TagResponse{Ref: name, Digest: d.Digest.String()})
 }
 
 func (s *server) images(w http.ResponseWriter, _ *http.Request) {
@@ -154,21 +230,13 @@ func (s *server) inspect(w http.ResponseWriter, r *http.Request) {
 
 // load reads a manifest and its config from the store.
 func (s *server) load(manifestDigest string) (*ocispec.Manifest, *spec.Config, error) {
-	raw, err := s.store.ReadBlob(manifestDigest)
-	if err != nil {
-		return nil, nil, err
-	}
 	var m ocispec.Manifest
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, nil, fmt.Errorf("manifest %s: %w", manifestDigest, err)
-	}
-	raw, err = s.store.ReadBlob(m.Config.Digest.String())
-	if err != nil {
+	if err := s.store.ReadJSON(manifestDigest, &m); err != nil {
 		return nil, nil, err
 	}
 	var c spec.Config
-	if err := json.Unmarshal(raw, &c); err != nil {
-		return nil, nil, fmt.Errorf("config %s: %w", m.Config.Digest, err)
+	if err := s.store.ReadJSON(m.Config.Digest.String(), &c); err != nil {
+		return nil, nil, err
 	}
 	return &m, &c, nil
 }

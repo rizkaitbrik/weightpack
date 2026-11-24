@@ -125,9 +125,56 @@ func (c *Client) Inspect(ctx context.Context, ref string) (*ImageDetail, error) 
 // Build runs a build and calls onEvent for each progress event as it
 // arrives. It returns the result, or the build's error.
 func (c *Client) Build(ctx context.Context, req BuildRequest, onEvent func(Event)) (*BuildResult, error) {
-	resp, err := c.do(ctx, http.MethodPost, "/v1/build", req)
+	last, err := c.stream(ctx, "/v1/build", req, onEvent)
 	if err != nil {
 		return nil, err
+	}
+	if last.Result == nil {
+		return nil, errors.New("wpkd ended the build stream without a result")
+	}
+	return last.Result, nil
+}
+
+// Push sends a local image to its registry, reporting progress to onEvent.
+func (c *Client) Push(ctx context.Context, req PushRequest, onEvent func(Event)) (*TransferResult, error) {
+	return c.transfer(ctx, "/v1/push", req, onEvent)
+}
+
+// Pull fetches an image into the daemon's store, reporting progress to
+// onEvent.
+func (c *Client) Pull(ctx context.Context, req PullRequest, onEvent func(Event)) (*TransferResult, error) {
+	return c.transfer(ctx, "/v1/pull", req, onEvent)
+}
+
+// Tag points req.Target at the image req.Source names.
+func (c *Client) Tag(ctx context.Context, req TagRequest) (*TagResponse, error) {
+	resp, err := c.do(ctx, http.MethodPost, "/v1/tag", req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out TagResponse
+	return &out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
+func (c *Client) transfer(ctx context.Context, path string, req any, onEvent func(Event)) (*TransferResult, error) {
+	last, err := c.stream(ctx, path, req, onEvent)
+	if err != nil {
+		return nil, err
+	}
+	if last.Transfer == nil {
+		return nil, errors.New("wpkd ended the stream without a result")
+	}
+	return last.Transfer, nil
+}
+
+// stream posts req and reads the NDJSON reply, passing progress events to
+// onEvent. It returns the final event, which carries a result, or the error
+// that final event reports.
+func (c *Client) stream(ctx context.Context, path string, req any, onEvent func(Event)) (Event, error) {
+	resp, err := c.do(ctx, http.MethodPost, path, req)
+	if err != nil {
+		return Event{}, err
 	}
 	defer resp.Body.Close()
 	sc := bufio.NewScanner(resp.Body)
@@ -135,19 +182,19 @@ func (c *Client) Build(ctx context.Context, req BuildRequest, onEvent func(Event
 	for sc.Scan() {
 		var e Event
 		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
-			return nil, fmt.Errorf("bad event from wpkd: %w", err)
+			return Event{}, fmt.Errorf("bad event from wpkd: %w", err)
 		}
 		switch {
 		case e.Error != "":
-			return nil, errors.New(e.Error)
-		case e.Result != nil:
-			return e.Result, nil
+			return Event{}, errors.New(e.Error)
+		case e.Result != nil || e.Transfer != nil:
+			return e, nil
 		case onEvent != nil:
 			onEvent(e)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		return Event{}, err
 	}
-	return nil, errors.New("wpkd closed the build stream without a result")
+	return Event{}, errors.New("wpkd closed the stream without a result")
 }

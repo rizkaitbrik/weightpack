@@ -5,6 +5,9 @@
 //
 //	GET  /healthz                  daemon status
 //	POST /v1/build                 BuildRequest -> NDJSON stream of Event
+//	POST /v1/push                  PushRequest -> NDJSON stream of Event
+//	POST /v1/pull                  PullRequest -> NDJSON stream of Event
+//	POST /v1/tag                   TagRequest -> TagResponse
 //	GET  /v1/images                -> []Image
 //	GET  /v1/images/inspect?ref=R  -> ImageDetail
 package api
@@ -24,14 +27,59 @@ type BuildRequest struct {
 	Tags       []string `json:"tags,omitempty"`
 }
 
-// Event is one line of a build's NDJSON stream. The last line carries either
-// Result or Error.
+// PushRequest asks the daemon to push a local image. Ref must name a
+// registry host, such as registry.example.com/assistant:v1.
+type PushRequest struct {
+	Ref string `json:"ref"`
+	// PlainHTTP talks to the registry over HTTP instead of HTTPS. Registries
+	// on localhost and 127.0.0.1 always use HTTP.
+	PlainHTTP bool `json:"plain_http,omitempty"`
+}
+
+// PullRequest asks the daemon to pull an image into its store.
+type PullRequest struct {
+	Ref       string `json:"ref"`
+	PlainHTTP bool   `json:"plain_http,omitempty"`
+	// Exact refuses images with lossy layers (delta.bit1, delta.sparse).
+	Exact bool `json:"exact,omitempty"`
+}
+
+// TagRequest points Target at the image Source names.
+type TagRequest struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+}
+
+// TagResponse is the result of a tag.
+type TagResponse struct {
+	Ref    string `json:"ref"`
+	Digest string `json:"digest"`
+}
+
+// Event is one line of a build, push or pull NDJSON stream. The last line
+// carries Result (build), Transfer (push, pull) or Error.
 type Event struct {
-	Step    string       `json:"step,omitempty"`
-	Message string       `json:"message,omitempty"`
-	Warning bool         `json:"warning,omitempty"`
-	Result  *BuildResult `json:"result,omitempty"`
-	Error   string       `json:"error,omitempty"`
+	Step     string          `json:"step,omitempty"`
+	Message  string          `json:"message,omitempty"`
+	Warning  bool            `json:"warning,omitempty"`
+	Result   *BuildResult    `json:"result,omitempty"`
+	Transfer *TransferResult `json:"transfer,omitempty"`
+	Error    string          `json:"error,omitempty"`
+}
+
+// TransferResult describes a finished push or pull.
+type TransferResult struct {
+	Ref    string `json:"ref"`
+	Digest string `json:"digest"`
+	// Blobs and Size count the image's distinct blobs, config and manifest
+	// included; Moved and MovedBytes count those sent or fetched. The other
+	// side already held the rest.
+	Blobs      int   `json:"blobs"`
+	Size       int64 `json:"size"`
+	Moved      int   `json:"moved"`
+	MovedBytes int64 `json:"moved_bytes"`
+	// Tag is the local tag a pull set, if any.
+	Tag string `json:"tag,omitempty"`
 }
 
 // BuildResult describes a finished build.
