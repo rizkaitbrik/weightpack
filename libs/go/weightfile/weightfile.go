@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 )
 
 // Error is a problem at a line of a Weightfile.
@@ -116,11 +118,9 @@ var (
 // ReservedBaseID is the layer id the FROM line gets in the image config.
 const ReservedBaseID = "base"
 
-var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
-
 // ValidID reports whether id is a valid layer id: lowercase letters, digits,
 // '.', '_' and '-', starting with a letter or digit, at most 64 characters.
-func ValidID(id string) bool { return idPattern.MatchString(id) }
+func ValidID(id string) bool { return spec.ValidLayerID(id) }
 
 // ParseFile parses the Weightfile at path.
 func ParseFile(path string) (*File, error) {
@@ -252,7 +252,7 @@ func (p *parser) claimID(line int, id string) bool {
 	case id == ReservedBaseID:
 		p.errorf(line, "layer id %q is reserved for the FROM layer", id)
 		return false
-	case !idPattern.MatchString(id):
+	case !spec.ValidLayerID(id):
 		p.errorf(line, "bad layer id %q: use lowercase letters, digits, '.', '_' or '-' (max 64)", id)
 		return false
 	}

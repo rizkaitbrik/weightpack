@@ -192,6 +192,8 @@ Four rules make composition safe:
 3. **Declared targets.** Every delta lists the tensors it touches. Untouched tensors cost nothing.
 4. **One parent per mix.** All experts in a `MIX` must have the mix's parent chain.
 
+Layer ids are lowercase letters, digits, `.`, `_` and `-`, starting with a letter or digit, at most 64 characters: the same form a Weightfile accepts. Configs with other ids are refused wherever an image is checked, at pull included, so an image from a registry cannot slip path syntax into an id that ends up naming a file or directory.
+
 | Media type (`application/vnd.weightpack.…`) | Holds | Lossless |
 | --- | --- | --- |
 | `tensor.v1` | One base tensor, raw safetensors | Yes |

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"google.golang.org/grpc"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
@@ -217,5 +218,43 @@ func TestXORLayerRefuses(t *testing.T) {
 	// LoRA layers can sit on an XOR layer.
 	if _, err := f.buildXOR(t, "Ok.Weightfile", "FROM ./base\nLAYER finance ./finance codec=xor\nLAYER french ./adapters/french\n", &xorWorker{}); err != nil {
 		t.Errorf("LoRA over XOR: %v", err)
+	}
+}
+
+// A layer id comes from an image's config, which a pulled image controls:
+// decoding must never let it pick where files go.
+func TestDecodeXORLayerStaysInItsDirectory(t *testing.T) {
+	f := newFixture(t)
+	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
+	res, err := f.buildXOR(t, "Weightfile", "FROM ./base\nLAYER finance ./finance codec=xor\n", &xorWorker{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := f.load(t, res.Manifest.Digest.String())
+	var blobs []ocispec.Descriptor
+	for _, d := range m.Layers {
+		if d.Annotations[spec.AnnotationLayer] == "finance" {
+			blobs = append(blobs, d)
+		}
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	x, err := DecodeXORLayer(f.store, "../../escaped", blobs, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(x.Blobs) != len(blobs) {
+		t.Fatalf("decoded %d of %d blobs", len(x.Blobs), len(blobs))
+	}
+	for _, b := range x.Blobs {
+		if filepath.Dir(b.Path) != dir {
+			t.Errorf("decoded file %s is outside %s", b.Path, dir)
+		}
+	}
+	if leaked, _ := filepath.Glob(filepath.Join(root, "escaped*")); len(leaked) > 0 {
+		t.Errorf("files escaped the directory: %v", leaked)
 	}
 }

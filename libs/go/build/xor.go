@@ -169,10 +169,12 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 }
 
 // DecodeXORLayer writes a stored XOR layer's blobs into dir as plain
-// safetensors, for a worker to read, and describes them.
+// safetensors, for a worker to read, and describes them. The files get
+// random names made inside dir: the layer id comes from an image's config,
+// which a pulled image controls, so it never takes part in a path.
 func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir string) (*workerpb.XORLayer, error) {
 	out := &workerpb.XORLayer{Id: id}
-	for i, d := range blobs {
+	for _, d := range blobs {
 		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeDeltaXOR {
 			continue
 		}
@@ -184,12 +186,12 @@ func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir s
 		if err != nil {
 			return nil, err
 		}
-		p := filepath.Join(dir, fmt.Sprintf("%s-%06d.safetensors", id, i))
-		f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		f, err := os.CreateTemp(dir, "xor-*.safetensors")
 		if err != nil {
 			_ = plain.Close()
 			return nil, err
 		}
+		p := f.Name()
 		_, err = io.Copy(f, plain)
 		_ = plain.Close()
 		if cerr := f.Close(); err == nil {

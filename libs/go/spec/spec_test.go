@@ -91,3 +91,21 @@ func TestValidate(t *testing.T) {
 		t.Fatal("two base layers accepted")
 	}
 }
+
+func TestValidateRejectsBadLayerIDs(t *testing.T) {
+	for _, id := range []string{"../escaped", "a/b", "Upper", ".hidden", "-x", strings.Repeat("a", 65)} {
+		c := validConfig()
+		c.Layers[1].ID = id
+		for i := range c.Layers {
+			if c.Layers[i].Parent == "french" {
+				c.Layers[i].Parent = id
+			}
+		}
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "bad layer id") {
+			t.Errorf("id %q: err = %v", id, err)
+		}
+	}
+	if !ValidLayerID("legal-v2.1_x") {
+		t.Error("a well-formed id was rejected")
+	}
+}
