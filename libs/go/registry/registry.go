@@ -46,7 +46,8 @@ type Options struct {
 const concurrency = 4
 
 // Push sends a local image to the registry its reference names, then tags
-// it there. Only blobs the registry lacks are uploaded.
+// it there (latest when the reference has neither tag nor digest). Only
+// blobs the registry lacks are uploaded.
 func Push(ctx context.Context, s *store.Store, ref string, opts Options, progress func(api.Event)) (*api.TransferResult, error) {
 	if progress == nil {
 		progress = func(api.Event) {}
@@ -54,6 +55,11 @@ func Push(ctx context.Context, s *store.Store, ref string, opts Options, progres
 	r, err := remoteRef(ref, "push")
 	if err != nil {
 		return nil, err
+	}
+	// No tag and no digest means latest, as the local store resolves it and
+	// as Pull reads it, so the image is tagged latest on the registry too.
+	if r.Tag == "" && r.Digest == "" {
+		r.Tag = reference.DefaultTag
 	}
 	root, err := s.Resolve(ref)
 	if err != nil {

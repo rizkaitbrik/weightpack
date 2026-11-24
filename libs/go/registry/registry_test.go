@@ -280,3 +280,29 @@ func TestIsLoopback(t *testing.T) {
 		}
 	}
 }
+
+// A reference without a tag means latest on both sides: the local image
+// tagged :latest is pushed under :latest, so pulling the same reference
+// finds it.
+func TestUntaggedPushMeansLatest(t *testing.T) {
+	host := newRegistry(t)
+	ctx := context.Background()
+	ref := host + "/team/model"
+	a := openStore(t)
+	built := buildImage(t, a, buildtest.Project(t, t.TempDir()), ref)
+
+	pushed, err := Push(ctx, a, ref, Options{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pushed.Ref != ref+":latest" {
+		t.Errorf("push ref = %q, want %q", pushed.Ref, ref+":latest")
+	}
+	pulled, err := Pull(ctx, openStore(t), ref, Options{}, nil)
+	if err != nil {
+		t.Fatalf("pull of the pushed reference: %v", err)
+	}
+	if pulled.Digest != built.Digest.String() {
+		t.Errorf("pulled %s, pushed %s", pulled.Digest, built.Digest)
+	}
+}
