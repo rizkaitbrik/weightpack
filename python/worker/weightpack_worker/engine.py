@@ -65,6 +65,46 @@ def check() -> dict:
     }
 
 
+class StopFilter:
+    """Passes streamed text on, holding back any tail that could begin a
+    stop string and dropping everything from the first stop string on, so a
+    stream says exactly what the non-streamed reply does."""
+
+    def __init__(self, stops: list[str], emit):
+        self.stops = [s for s in stops if s]
+        self.emit = emit
+        self.text = ""
+        self.sent = 0
+        self.stopped = False
+
+    def feed(self, piece: str) -> None:
+        if self.stopped or not piece:
+            return
+        self.text += piece
+        hits = [i for i in (self.text.find(s) for s in self.stops) if i >= 0]
+        if hits:
+            self._send(min(hits))
+            self.stopped = True
+            return
+        hold = 0
+        for s in self.stops:
+            for k in range(min(len(s) - 1, len(self.text)), hold, -1):
+                if self.text.endswith(s[:k]):
+                    hold = k
+                    break
+        self._send(len(self.text) - hold)
+
+    def close(self) -> None:
+        """Sends what was held back once no stop string can follow."""
+        if not self.stopped:
+            self._send(len(self.text))
+
+    def _send(self, end: int) -> None:
+        if end > self.sent:
+            self.emit(self.text[self.sent : end])
+            self.sent = end
+
+
 class Engine:
     """One base model and its LoRA adapters, ready to generate."""
 
@@ -191,10 +231,27 @@ class Engine:
                 temperature=temperature,
                 top_p=float(params.get("top_p", 1.0)),
             )
-        stop = params.get("stop")
-        if stop:
-            kwargs["stop_strings"] = [stop] if isinstance(stop, str) else list(stop)
-            kwargs["tokenizer"] = self.tokenizer
+        stop = params.get("stop") or []
+        stops = [x for x in ([stop] if isinstance(stop, str) else stop) if x]
+        tokenizer, prompt_len = self.tokenizer, len(input_ids)
+        cancel = threading.Event()
+
+        class Stop(transformers.StoppingCriteria):
+            """Stops at a stop string in the decoded reply, which works with
+            any tokenizer, or once a streaming caller has gone."""
+
+            def __call__(self, ids, scores, **_):
+                done = cancel.is_set()
+                if stops and not done:
+                    text = tokenizer.decode(
+                        ids[0, prompt_len:].tolist(), skip_special_tokens=True
+                    )
+                    done = any(x in text for x in stops)
+                return torch.full(
+                    (ids.shape[0],), done, dtype=torch.bool, device=ids.device
+                )
+
+        kwargs["stopping_criteria"] = transformers.StoppingCriteriaList([Stop()])
         ids = torch.tensor([input_ids], device=self.device)
         with self.lock:
             model, ctx = self._model_for(name)
@@ -212,18 +269,6 @@ class Engine:
                         self.tokenizer, skip_prompt=True, skip_special_tokens=True
                     )
                     result = {}
-                    cancel = threading.Event()
-
-                    class Cancelled(transformers.StoppingCriteria):
-                        """Stops generation once the caller has gone."""
-
-                        def __call__(self, input_ids, scores, **_):
-                            return torch.full(
-                                (input_ids.shape[0],),
-                                cancel.is_set(),
-                                dtype=torch.bool,
-                                device=input_ids.device,
-                            )
 
                     def run():
                         try:
@@ -231,9 +276,6 @@ class Engine:
                                 input_ids=ids,
                                 attention_mask=torch.ones_like(ids),
                                 streamer=streamer,
-                                stopping_criteria=transformers.StoppingCriteriaList(
-                                    [Cancelled()]
-                                ),
                                 **kwargs,
                             )
                         except BaseException as exc:  # handed to the caller
@@ -243,11 +285,13 @@ class Engine:
                     t = threading.Thread(target=run)
                     t.start()
                     pieces = []
+                    out = StopFilter(stops, on_text)
                     try:
                         for piece in streamer:
                             if piece:
                                 pieces.append(piece)
-                                on_text(piece)
+                                out.feed(piece)
+                        out.close()
                     finally:
                         # If on_text failed (the client went away), stop
                         # generating; either way, finish before releasing
@@ -258,10 +302,9 @@ class Engine:
                         raise result["error"]
                     new = result["out"][0, ids.shape[1] :].tolist()
                     text = "".join(pieces)
-        if stop:
-            for s in kwargs["stop_strings"]:
-                if s in text:
-                    text = text[: text.index(s)]
+        hits = [i for i in (text.find(x) for x in stops) if i >= 0]
+        if hits:
+            return text[: min(hits)], len(new), "stop"
         eos = self.tokenizer.eos_token_id
         finish = (
             "length"
