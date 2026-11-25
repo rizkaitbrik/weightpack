@@ -24,6 +24,7 @@ from pathlib import Path
 
 import numpy as np
 
+from weightpack_worker import lossy
 from weightpack_worker.delta import Parent
 from weightpack_worker.safetensors_io import (
     FLOAT_DTYPES,
@@ -138,26 +139,55 @@ def _ops(
     return out
 
 
+def _lossy_deltas(
+    layers: list[list[str]], base: dict[str, tuple[str, TensorInfo]]
+) -> dict[str, list[str]]:
+    """Each lossy layer's delta files by the base tensor they change, in
+    chain order, checked against the base."""
+    out: dict[str, list[str]] = {}
+    for layer in layers:
+        for path in layer:
+            name, _ = lossy.read_delta(path)
+            want = base.get(name)
+            if want is None:
+                raise ValueError(f"lossy delta {path}: the base has no tensor {name}")
+            if want[1].dtype not in FLOAT_DTYPES:
+                raise ValueError(
+                    f"lossy delta {path}: {name} is {want[1].dtype}, not a float"
+                )
+            out.setdefault(name, []).append(path)
+    return out
+
+
 def squash(
     base_blobs: list[str],
     layers: list[LoRALayer],
     out_dir: str | Path,
     xor_layers: list[list[str]] = (),
+    lossy_layers: list[list[str]] = (),
 ) -> list[tuple[str, str]]:
-    """Merge XOR layers, then ``layers``, into the base tensors they modify.
+    """Merge XOR layers, lossy layers, then ``layers``, into the base tensors
+    they modify.
 
-    XOR layers apply first, exactly, bit for bit; LoRA deltas then add in
-    float32. Writes one safetensors file per merged tensor into ``out_dir``
-    and returns ``(tensor name, file name)`` pairs, sorted by tensor name.
+    XOR layers apply first, exactly, bit for bit; lossy deltas (bit1,
+    sparse) and LoRA deltas then add in float32, and the sum is rounded
+    once. Writes one safetensors file per merged tensor into ``out_dir`` and
+    returns ``(tensor name, file name)`` pairs, sorted by tensor name.
     """
     out_dir = Path(out_dir)
     parent = Parent(base_blobs, xor_layers)
     ops = _ops(layers, parent.base)
+    deltas = _lossy_deltas(lossy_layers, parent.base)
     merged: list[tuple[str, str]] = []
-    for i, target in enumerate(sorted(set(ops) | parent.touched())):
+    for i, target in enumerate(sorted(set(ops) | parent.touched() | set(deltas))):
         info = parent.base[target][1]
         raw = parent.bits(target).view(storage_dtype(info.dtype))
         w = None  # float32 working copy, made when the first delta needs it
+        for path in deltas.get(target, []):
+            if w is None:
+                w = to_float32(info.dtype, raw)
+            _, entries = lossy.read_delta(path)
+            w += lossy.decode(entries, info.shape)
         for op in ops.get(target, []):
             if isinstance(op, _Replace):
                 raw, w = np.asarray(load_raw(op.path, op.info)), None

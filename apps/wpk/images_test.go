@@ -13,6 +13,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build/buildtest"
 	"github.com/rizkaitbrik/weightpack/libs/go/daemon"
+	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 )
 
@@ -95,7 +96,7 @@ func TestBuildReportsErrors(t *testing.T) {
 	if code := run([]string{"build", dir}, &out, &errOut); code != 1 {
 		t.Fatalf("exit %d", code)
 	}
-	if !strings.Contains(errOut.String(), "not supported yet") {
+	if !strings.Contains(errOut.String(), "codec=bit1 runs in the build worker") {
 		t.Errorf("stderr %q", errOut.String())
 	}
 	if code := run([]string{"build", "a", "b"}, &out, &errOut); code != 2 {
@@ -109,6 +110,23 @@ func TestDaemonCommandsWithoutDaemon(t *testing.T) {
 		var out, errOut bytes.Buffer
 		if code := run(args, &out, &errOut); code != 1 || !strings.Contains(errOut.String(), "is the daemon running") {
 			t.Errorf("%v: exit %d, stderr %q", args, code, errOut.String())
+		}
+	}
+}
+
+func TestLayerDetailOfDeltas(t *testing.T) {
+	drop := 0.42
+	for _, c := range []struct {
+		l    spec.Layer
+		want string
+	}{
+		{spec.Layer{Kind: spec.KindDeltaXOR}, "exact"},
+		{spec.Layer{Kind: spec.KindDeltaBit1, Fidelity: &spec.Fidelity{Codec: "bit1", Eval: "self", MaxDrop: 1, MeasuredDrop: &drop}}, "bit1, drop 0.42 points on self (max 1)"},
+		{spec.Layer{Kind: spec.KindDeltaSparse, Fidelity: &spec.Fidelity{Codec: "sparse", Density: 0.1, Eval: "finance", MaxDrop: 2, MeasuredDrop: &drop}}, "sparse 10%, drop 0.42 points on finance (max 2)"},
+		{spec.Layer{Kind: spec.KindDeltaBit1}, "lossy, no measured drop"},
+	} {
+		if got := layerDetail(c.l, spec.Arch{}); got != c.want {
+			t.Errorf("%s: %q, want %q", c.l.Kind, got, c.want)
 		}
 	}
 }

@@ -364,3 +364,24 @@ func TestHFSources(t *testing.T) {
 		}
 	}
 }
+
+func TestDensity(t *testing.T) {
+	f := mustParse(t, "FROM ./b\nLAYER x ./x codec=sparse density=0.25 max_drop=1\nLAYER y ./y codec=sparse max_drop=1\n")
+	if d := f.Layers[0].Density; d == nil || *d != 0.25 || f.Layers[1].Density != nil {
+		t.Errorf("densities %v %v", f.Layers[0].Density, f.Layers[1].Density)
+	}
+	cfg, err := f.Config()
+	if err != nil || cfg.Layers[1].Fidelity.Density != 0.25 || cfg.Layers[2].Fidelity.Density != DefaultDensity {
+		t.Errorf("config: %v %+v", err, cfg.Layers)
+	}
+	for _, bad := range []string{
+		"LAYER x ./x codec=bit1 density=0.2 max_drop=1",
+		"LAYER x ./x codec=sparse density=0 max_drop=1",
+		"LAYER x ./x codec=sparse density=1.5 max_drop=1",
+		"LAYER x ./x density=0.2",
+	} {
+		if _, err := Parse(strings.NewReader("FROM ./b\n" + bad + "\n")); err == nil {
+			t.Errorf("%q parsed", bad)
+		}
+	}
+}

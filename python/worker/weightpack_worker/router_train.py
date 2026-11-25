@@ -134,12 +134,11 @@ def _batch(examples, pad_id, device):
     return ids.to(device), mask.to(device), labels.to(device)
 
 
-def _loss(model, batch, reduction="mean"):
-    """The loss on the learnt tokens. Logits are computed only where some
-    example learns the next token: a vocabulary of 150k makes the rest cost
+def learnt_logits(model, batch):
+    """Logits and targets, flattened, at the positions where some example
+    learns the next token; targets are IGNORE where that example does not.
+    Logits are computed only there: a vocabulary of 150k makes the rest cost
     more than the model."""
-    import torch
-
     ids, mask, labels = batch
     targets = labels[:, 1:]
     where = (targets != IGNORE).any(dim=0).nonzero().flatten()
@@ -147,12 +146,16 @@ def _loss(model, batch, reduction="mean"):
         logits = model(input_ids=ids, attention_mask=mask, logits_to_keep=where).logits
     except TypeError:  # a model without logits_to_keep
         logits = model(input_ids=ids, attention_mask=mask).logits[:, :-1][:, where]
-    targets = targets[:, where]
+    return logits.float().reshape(-1, logits.shape[-1]), targets[:, where].reshape(-1)
+
+
+def _loss(model, batch, reduction="mean"):
+    """The loss on the learnt tokens."""
+    import torch
+
+    logits, targets = learnt_logits(model, batch)
     return torch.nn.functional.cross_entropy(
-        logits.float().reshape(-1, logits.shape[-1]),
-        targets.reshape(-1),
-        ignore_index=IGNORE,
-        reduction=reduction,
+        logits, targets, ignore_index=IGNORE, reduction=reduction
     )
 
 

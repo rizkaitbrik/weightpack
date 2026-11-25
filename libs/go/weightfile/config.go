@@ -71,6 +71,12 @@ func weightLayer(l Layer, parent string) spec.Layer {
 		if l.MaxDrop != nil {
 			fid.MaxDrop = *l.MaxDrop
 		}
+		if l.Codec == CodecSparse {
+			fid.Density = DefaultDensity
+			if l.Density != nil {
+				fid.Density = *l.Density
+			}
+		}
 		out.Fidelity = fid
 	}
 	return out

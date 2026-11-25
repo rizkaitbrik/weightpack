@@ -76,11 +76,22 @@ type Layer struct {
 	Fidelity *Fidelity `json:"fidelity,omitempty"`
 }
 
-// Fidelity records how a lossy layer was produced and what it cost.
+// Fidelity records how a lossy layer was produced and what it cost. Scores
+// are next-token accuracy on the eval suite's learnt tokens, in percent; the
+// drop is SourceScore minus Score, in points.
 type Fidelity struct {
-	Source       string   `json:"source"`
-	Codec        string   `json:"codec,omitempty"`
+	Source string `json:"source"`
+	// SourceDigest is sha256 over the source's weight files, in name order
+	// ("sha256:" + hex of the concatenated hex digests of each file).
+	SourceDigest string  `json:"source_digest,omitempty"`
+	Codec        string  `json:"codec,omitempty"`
+	Density      float64 `json:"density,omitempty"` // codec=sparse
+	// Eval names the suite: a suite file's name, or "self" for the source's
+	// own replies to general prompts. EvalDigest covers its files.
 	Eval         string   `json:"eval,omitempty"`
+	EvalDigest   string   `json:"eval_digest,omitempty"`
+	SourceScore  *float64 `json:"source_score,omitempty"`
+	Score        *float64 `json:"score,omitempty"`
 	MaxDrop      float64  `json:"max_drop,omitempty"`
 	MeasuredDrop *float64 `json:"measured_drop,omitempty"`
 }

@@ -1,4 +1,4 @@
-// Package squash bakes an image's XOR and LoRA layers into its base tensors and
+// Package squash bakes an image's XOR, lossy (bit1, sparse) and LoRA layers into its base tensors and
 // stores the result as a new image with a single base layer: a dense model
 // any engine can load once exported.
 //
@@ -115,20 +115,38 @@ func Squash(ctx context.Context, s *store.Store, w workerpb.WorkerClient, ref st
 	}
 	defer os.RemoveAll(inDir)
 	var ids []string
-	sawLoRA := false
+	sawLoRA, sawLossy := false, false
 	for _, l := range chain {
 		switch l.Kind {
 		case spec.KindDeltaXOR:
 			// XOR layers apply to the base's bits first, exactly; one above a
-			// LoRA layer could not have been built.
-			if sawLoRA {
-				return nil, fmt.Errorf("squash %s: XOR layer %q sits above a LoRA layer", ref, l.ID)
+			// LoRA or lossy layer could not have been built.
+			if sawLoRA || sawLossy {
+				return nil, fmt.Errorf("squash %s: XOR layer %q sits above a LoRA or lossy layer", ref, l.ID)
 			}
 			x, err := build.DecodeXORLayer(s, l.ID, byLayer[l.ID], inDir)
 			if err != nil {
 				return nil, err
 			}
 			req.XorLayers = append(req.XorLayers, x)
+			ids = append(ids, l.ID)
+			continue
+		case spec.KindDeltaBit1, spec.KindDeltaSparse:
+			// Lossy deltas add in float32, as LoRA deltas do; one above a LoRA
+			// layer could not have been built.
+			if sawLoRA {
+				return nil, fmt.Errorf("squash %s: lossy layer %q sits above a LoRA layer", ref, l.ID)
+			}
+			sawLossy = true
+			dl := &workerpb.DeltaLayer{Id: l.ID}
+			for _, d := range byLayer[l.ID] {
+				p, err := s.Path(d.Digest.String())
+				if err != nil {
+					return nil, err
+				}
+				dl.Blobs = append(dl.Blobs, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
+			}
+			req.LossyLayers = append(req.LossyLayers, dl)
 			ids = append(ids, l.ID)
 			continue
 		case spec.KindLoRA:

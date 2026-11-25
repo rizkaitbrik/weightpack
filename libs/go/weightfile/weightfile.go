@@ -66,9 +66,13 @@ type Layer struct {
 	// Codec is "" or "lora" for an adapter. "xor", "bit1" or "sparse" means
 	// the source is a full fine-tune to import as a delta.
 	Codec   string
-	Eval    string   // eval suite for the fidelity gate; "" = domain default
-	MaxDrop *float64 // maximum eval drop a lossy import may cost
+	Eval    string   // eval suite for the fidelity gate; "" = the fine-tune's own replies
+	MaxDrop *float64 // maximum eval drop a lossy import may cost, in points
+	Density *float64 // codec=sparse: the fraction of each matrix's delta kept
 }
+
+// DefaultDensity is codec=sparse's density without density=.
+const DefaultDensity = 0.1
 
 // Mix is a MIX block.
 type Mix struct {
@@ -269,10 +273,10 @@ func (p *parser) claimID(line int, id string) bool {
 	return true
 }
 
-// weightLayer parses "<id> <source> [codec=] [eval=] [max_drop=]".
+// weightLayer parses "<id> <source> [codec=] [eval=] [max_drop=] [density=]".
 func (p *parser) weightLayer(l rawLine, args []string, instr string) (Layer, bool) {
 	if len(args) < 2 {
-		p.errorf(l.no, "usage: %s <id> <source> [codec=lora|xor|bit1|sparse] [eval=<suite>] [max_drop=<n>]", instr)
+		p.errorf(l.no, "usage: %s <id> <source> [codec=lora|xor|bit1|sparse] [eval=<suite>] [max_drop=<n>] [density=<n>]", instr)
 		return Layer{}, false
 	}
 	ok := p.claimID(l.no, args[0])
@@ -288,7 +292,7 @@ func (p *parser) weightLayer(l rawLine, args []string, instr string) (Layer, boo
 	}
 	layer.Source = src
 
-	params, err := parseParams(args[2:], "codec", "eval", "max_drop")
+	params, err := parseParams(args[2:], "codec", "eval", "max_drop", "density")
 	if err != nil {
 		p.errorf(l.no, "%s %s: %v", instr, args[0], err)
 		return layer, false
@@ -308,6 +312,19 @@ func (p *parser) weightLayer(l rawLine, args []string, instr string) (Layer, boo
 			ok = false
 		} else {
 			layer.MaxDrop = &d
+		}
+	}
+	if v, set := params["density"]; set {
+		d, err := strconv.ParseFloat(v, 64)
+		switch {
+		case layer.Codec != CodecSparse:
+			p.errorf(l.no, "%s %s: density applies only to codec=sparse", instr, args[0])
+			ok = false
+		case err != nil || d <= 0 || d > 1:
+			p.errorf(l.no, "%s %s: density must be a number in (0, 1], got %q", instr, args[0], v)
+			ok = false
+		default:
+			layer.Density = &d
 		}
 	}
 	lossy := layer.Codec == CodecBit1 || layer.Codec == CodecSparse

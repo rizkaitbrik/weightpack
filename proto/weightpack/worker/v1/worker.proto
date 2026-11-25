@@ -19,7 +19,8 @@ service Worker {
   // Encode a full fine-tune as a delta over its parent, tensor by tensor,
   // writing one delta file per tensor that changed to out_dir.
   rpc EncodeLayer(EncodeLayerRequest) returns (EncodeLayerResponse);
-  // Run an eval suite against a composition and report the score.
+  // Score models on an eval suite: a fine-tune and the model its lossy
+  // layer gives back, say, so the build can gate on the drop.
   rpc Evaluate(EvaluateRequest) returns (EvaluateResponse);
   // Report the worker's version and the codecs it supports.
   rpc Info(InfoRequest) returns (InfoResponse);
@@ -48,7 +49,9 @@ message XORLayer {
 }
 
 message EncodeLayerRequest {
-  Codec codec = 1;  // only CODEC_XOR so far
+  // CODEC_XOR (exact bits), CODEC_BIT1 or CODEC_SPARSE (lossy; see
+  // weightpack_worker/lossy.py for their files).
+  Codec codec = 1;
   // The parent's tensors: the base layer's tensor.v1 blobs, then the XOR
   // layers between the base and the new layer, bottom first. XOR layers can
   // only sit on the base or on other XOR layers, so the parent's bits are
@@ -59,9 +62,17 @@ message EncodeLayerRequest {
   // shapes must match the base's.
   repeated string target_files = 4;
   // Directory the worker writes deltas to: one safetensors file per tensor
-  // that differs from the parent, holding target XOR parent with the
-  // tensor's name, dtype and shape. The daemon checks and stores them.
+  // that differs from the parent. For XOR it holds target XOR parent with
+  // the tensor's name, dtype and shape; for a lossy codec, the tensor's
+  // encoded delta. The daemon checks and stores them.
   string out_dir = 5;
+  // CODEC_SPARSE: the fraction of each matrix's delta entries kept, in
+  // (0, 1].
+  double density = 6;
+  // A lossy codec, if set: a directory to write the model the layer gives
+  // back into (the parent plus each decoded delta, beside the fine-tune's
+  // config and tokenizer), so it can be evaluated against the fine-tune.
+  string reconstruct_dir = 7;
 }
 
 message EncodedTensor {
@@ -73,16 +84,33 @@ message EncodeLayerResponse {
   // Only tensors that differ from the parent; the rest cost nothing.
   repeated EncodedTensor tensors = 1;
   int64 unchanged = 2;  // tensors equal to the parent's
+  // A lossy codec: ||delta - decoded|| / ||delta|| over every changed
+  // tensor, how much of the fine-tune's change the layer misses.
+  double relative_error = 3;
 }
 
 message EvaluateRequest {
-  string image_ref = 1;
+  // Hugging Face model directories to score, in order. Without a suite the
+  // first writes it: its greedy replies to general prompts.
+  repeated string models = 1;
+  // An eval suite file: JSON Lines of examples ({"messages"}, {"prompt",
+  // "completion"} or {"text"}), or YAML naming them (name, data). "" for the
+  // first model's own replies.
   string suite = 2;
+  string device = 3;         // cuda, mps or cpu; "" picks the best there is
+  string chat_template = 4;  // a Jinja template replacing the tokenizer's
 }
 
 message EvaluateResponse {
-  string suite = 1;
-  double score = 2;
+  string suite = 1;    // its name, or "self"
+  int32 examples = 2;
+  int64 tokens = 3;    // learnt tokens each model is scored on
+  repeated ModelScore scores = 4;  // in the order of models
+}
+
+message ModelScore {
+  double accuracy = 1;  // next-token accuracy on the learnt tokens, percent
+  double loss = 2;      // mean loss per learnt token
 }
 
 message InfoRequest {}
@@ -122,6 +150,17 @@ message SquashRequest {
   // XOR layers between the base and the LoRA layers, bottom first. They are
   // applied to the base's bits first, exactly, before any LoRA math.
   repeated XORLayer xor_layers = 4;
+  // Lossy layers (delta.bit1.v1 or delta.sparse.v1 blobs, one tensor's
+  // delta each), bottom first. Their deltas add in float32 with the LoRA
+  // layers' before the single rounding.
+  repeated DeltaLayer lossy_layers = 5;
+}
+
+// A lossy layer's delta blobs, as the daemon hands them over: plain
+// safetensors files.
+message DeltaLayer {
+  string id = 1;
+  repeated Blob blobs = 2;
 }
 
 message MergedTensor {

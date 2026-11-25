@@ -45,7 +45,8 @@ type WorkerClient interface {
 	// Encode a full fine-tune as a delta over its parent, tensor by tensor,
 	// writing one delta file per tensor that changed to out_dir.
 	EncodeLayer(ctx context.Context, in *EncodeLayerRequest, opts ...grpc.CallOption) (*EncodeLayerResponse, error)
-	// Run an eval suite against a composition and report the score.
+	// Score models on an eval suite: a fine-tune and the model its lossy
+	// layer gives back, say, so the build can gate on the drop.
 	Evaluate(ctx context.Context, in *EvaluateRequest, opts ...grpc.CallOption) (*EvaluateResponse, error)
 	// Report the worker's version and the codecs it supports.
 	Info(ctx context.Context, in *InfoRequest, opts ...grpc.CallOption) (*InfoResponse, error)
@@ -131,7 +132,8 @@ type WorkerServer interface {
 	// Encode a full fine-tune as a delta over its parent, tensor by tensor,
 	// writing one delta file per tensor that changed to out_dir.
 	EncodeLayer(context.Context, *EncodeLayerRequest) (*EncodeLayerResponse, error)
-	// Run an eval suite against a composition and report the score.
+	// Score models on an eval suite: a fine-tune and the model its lossy
+	// layer gives back, say, so the build can gate on the drop.
 	Evaluate(context.Context, *EvaluateRequest) (*EvaluateResponse, error)
 	// Report the worker's version and the codecs it supports.
 	Info(context.Context, *InfoRequest) (*InfoResponse, error)

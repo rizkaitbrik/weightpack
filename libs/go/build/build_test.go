@@ -272,7 +272,7 @@ func TestBuildRejects(t *testing.T) {
 				_ = os.Remove(filepath.Join(dir, "notok/tokenizer.json"))
 			}},
 		{name: "xor without a worker", wf: "FROM ./base\nLAYER x ./base codec=xor\n", want: "start wpkd with --worker"},
-		{name: "lossy import", wf: "FROM ./base\nLAYER x ./base codec=bit1 max_drop=1\n", want: "a lossy import, is not supported yet"},
+		{name: "lossy import without a worker", wf: "FROM ./base\nLAYER x ./base codec=bit1 max_drop=1\n", want: "codec=bit1 runs in the build worker"},
 		{name: "image not stored, no pull", wf: "FROM ./base\nLAYER x oci://r.example.com/x:1\n", want: "not in the local store; pull it first"},
 		{name: "codec on an image layer", wf: "FROM ./base\nLAYER x oci://r.example.com/x:1 codec=xor\n", want: "a layer from an image is stored already"},
 		{name: "hf base without a client", wf: "FROM hf://acme/llama\n", want: "need wpkd's Hugging Face client"},

@@ -181,6 +181,18 @@ func layerDetail(l spec.Layer, arch spec.Arch) string {
 			blocks = "all"
 		}
 		return fmt.Sprintf("top_k %d of %s, router %s, blocks %s", l.TopK, strings.Join(l.Experts, ","), l.Router, blocks)
+	case spec.KindDeltaXOR:
+		return "exact"
+	case spec.KindDeltaBit1, spec.KindDeltaSparse:
+		f := l.Fidelity
+		if f == nil || f.MeasuredDrop == nil {
+			return "lossy, no measured drop"
+		}
+		codec := f.Codec
+		if f.Density > 0 {
+			codec += fmt.Sprintf(" %g%%", 100*f.Density)
+		}
+		return fmt.Sprintf("%s, drop %.2f points on %s (max %g)", codec, *f.MeasuredDrop, orDash(f.Eval), f.MaxDrop)
 	}
 	return ""
 }

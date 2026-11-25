@@ -123,6 +123,19 @@
           "target": "build"
         }
       ]
+    },
+    "import-gate": {
+      "executor": "@nxlv/python:run-commands",
+      "options": {
+        "command": "WPK_IMPORT_GATE=1 uv run --group parity pytest tests/test_import_gate.py -s --no-cov",
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": [
+        {
+          "projects": ["wpk", "wpkd"],
+          "target": "build"
+        }
+      ]
     }
   },
   "tags": ["lang:python", "type:lib"],
