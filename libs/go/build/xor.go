@@ -1,10 +1,14 @@
 package build
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -80,6 +84,16 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 	if len(seen) != len(base.tensors) {
 		return fail("the fine-tune has %d of the base's %d tensors; it must have them all", len(seen), len(base.tensors))
 	}
+	same, supplied, err := b.sameTokenizer(dir, base.tokenizer)
+	switch {
+	case err != nil:
+		return fail("%v", err)
+	case !supplied:
+		b.progress(api.Event{Step: step, Warning: true, Message: "the fine-tune has no tokenizer of its own; the image keeps its parent's"})
+	case !same:
+		return fail("the fine-tune's tokenizer differs from its parent's, so its token ids mean other things; " +
+			"a lossless import keeps the parent's tokenizer, so this fine-tune cannot be imported over it")
+	}
 
 	staging, err := b.store.TempDir("encode-")
 	if err != nil {
@@ -146,6 +160,7 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 			return err
 		}
 		d, err := b.put(zr, xorMediaType, map[string]string{spec.AnnotationLayer: layer.ID, spec.AnnotationTensor: t.Name})
+		_ = zr.Close() // stops the encoder if put gave up before reading it all
 		_ = f.Close()
 		if err != nil {
 			return fail("%s: %v", t.Name, err)
@@ -169,6 +184,60 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 	b.progress(api.Event{Step: step, Message: fmt.Sprintf("XOR delta: %d tensors changed, %d unchanged; %s",
 		len(resp.Tensors), resp.Unchanged, ratio)})
 	return nil
+}
+
+// sameTokenizer compares the tokenizer a fine-tune's directory carries
+// (tokenizer.json, else tokenizer.model) with its parent's, whose digest is
+// want. supplied is false when the directory has no tokenizer. Byte-equal
+// files are the same; two tokenizer.json files are also the same when they
+// differ only in formatting, key order or the fields that do not change
+// tokenization (version, truncation, padding), since fine-tuning tools often
+// re-save the file.
+func (b *builder) sameTokenizer(dir, want string) (same, supplied bool, err error) {
+	var name string
+	for _, n := range []string{"tokenizer.json", "tokenizer.model"} {
+		if info, err := os.Stat(filepath.Join(dir, n)); err == nil && info.Mode().IsRegular() {
+			name = n
+			break
+		}
+	}
+	if name == "" {
+		return false, false, nil
+	}
+	mine, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return false, true, err
+	}
+	sum := sha256.Sum256(mine)
+	if "sha256:"+hex.EncodeToString(sum[:]) == want {
+		return true, true, nil
+	}
+	if name != "tokenizer.json" {
+		return false, true, nil
+	}
+	parent, err := b.store.ReadBlob(want)
+	if err != nil {
+		return false, true, err
+	}
+	a, errA := tokenizerSemantics(mine)
+	p, errB := tokenizerSemantics(parent)
+	if errA != nil || errB != nil {
+		return false, true, nil
+	}
+	return reflect.DeepEqual(a, p), true, nil
+}
+
+// tokenizerSemantics parses a tokenizer.json and drops the fields that do
+// not change how text maps to token ids.
+func tokenizerSemantics(raw []byte) (map[string]any, error) {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, err
+	}
+	for _, k := range []string{"version", "truncation", "padding"} {
+		delete(m, k)
+	}
+	return m, nil
 }
 
 // DecodeXORLayer writes a stored XOR layer's blobs into dir as plain
