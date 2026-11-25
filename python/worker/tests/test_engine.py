@@ -252,3 +252,42 @@ def test_failed_generation_frees_the_engine(tmp_path):
         assert out["choices"][0]["message"]["content"] == direct(base, None, tok)
     finally:
         server.shutdown()
+
+
+def test_stop_filter():
+    from weightpack_worker.engine import StopFilter
+
+    def run(stops, pieces):
+        out = []
+        f = StopFilter(stops, out.append)
+        for p in pieces:
+            f.feed(p)
+        f.close()
+        return out
+
+    # A stop string split across pieces is never partly sent.
+    assert "".join(run(["END"], ["hello E", "N", "D world"])) == "hello "
+    assert run(["END"], ["hello E", "N", "D world"])[0] == "hello "
+    # A held-back tail that turns out not to be a stop string is sent.
+    assert "".join(run(["END"], ["a E", "x", "y"])) == "a Exy"
+    # The first of several stop strings wins.
+    assert "".join(run(["zz", "b"], ["aab", "zz"])) == "aa"
+    # No stop strings: everything passes at once.
+    assert run([], ["a", "b"]) == ["a", "b"]
+
+
+def test_streamed_stop_matches_unstreamed(running):
+    url, *_ = running
+    body = {"model": "tiny", "messages": PROMPT, "max_tokens": 8, "temperature": 0}
+    full = json.loads(post(url + "/v1/chat/completions", body))
+    words = full["choices"][0]["message"]["content"].split()
+    stop = words[len(words) // 2]  # a word the reply reaches
+    plain = json.loads(post(url + "/v1/chat/completions", {**body, "stop": stop}))
+    want = plain["choices"][0]["message"]["content"]
+    assert stop not in want
+    raw = post(url + "/v1/chat/completions", {**body, "stop": stop, "stream": True})
+    chunks = [
+        json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")
+    ]
+    got = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks)
+    assert got == want
