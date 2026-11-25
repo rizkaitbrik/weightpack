@@ -29,13 +29,14 @@ class LoRAExpert:
 
 
 def top_k_gates(logits: np.ndarray, k: int) -> np.ndarray:
-    """Softmax over the top-k logits per token; zeros elsewhere.
+    """Softmax over the top-k logits per token; zeros elsewhere. Equal
+    logits go to the lower index.
 
     ``logits`` has shape (tokens, experts).
     """
     if not 1 <= k <= logits.shape[-1]:
         raise ValueError(f"k={k} out of range for {logits.shape[-1]} experts")
-    idx = np.argpartition(-logits, k - 1, axis=-1)[..., :k]
+    idx = np.argsort(-logits, axis=-1, kind="stable")[..., :k]
     picked = np.take_along_axis(logits, idx, axis=-1)
     picked = np.exp(picked - picked.max(axis=-1, keepdims=True))
     picked /= picked.sum(axis=-1, keepdims=True)

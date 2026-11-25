@@ -13,7 +13,8 @@ coefficient between the two steps gives the mix::
 The router is Arrow, as in weightpack-engine (weightpack_worker.mixing) and
 PEFT: an expert's prototype in a module is the top right singular vector of
 its B_i A_i; a token's logit is |x . v_i|; the top k logits, among the
-experts that touch the module, go through a softmax.
+experts that touch the module, go through a softmax. Equal logits go to the
+expert listed first, so exactly k experts are picked.
 
 This module needs only torch, so it is tested without vLLM; patches.py
 connects it to vLLM.
@@ -199,8 +200,9 @@ class Routing:
         t = x.shape[0]
         slot = token_slots.clamp(min=0)
         mix = self.is_mix[slot] & (token_slots >= 0)
-        k = (self.top_k[slot] - 1).clamp(0, n_exp - 1).view(t, 1)
+        k = self.top_k[slot].view(t, 1)
         experts = self.rank_expert[slot]  # (t, R)
+        positions = torch.arange(n_exp, device=x.device).expand(t, n_exp)
         xf = x.to(torch.float32)
         out = []
         for s in range(n_slices):
@@ -208,8 +210,10 @@ class Routing:
             logits = (xf @ protos.T).abs().view(t, slots, n_exp)
             logits = logits.gather(1, slot.view(t, 1, 1).expand(t, 1, n_exp)).squeeze(1)
             logits = logits.masked_fill(~self.touch[s][slot], float("-inf"))
-            kth = logits.sort(dim=1, descending=True).values.gather(1, k)
-            logits = logits.masked_fill(logits < kth, float("-inf"))
+            # Exactly top_k experts, ties to the lower index, as the engine.
+            order = logits.argsort(dim=1, descending=True, stable=True)
+            place = torch.empty_like(order).scatter_(1, order, positions)
+            logits = logits.masked_fill(place >= k, float("-inf"))
             coeff = torch.softmax(logits, dim=1).nan_to_num(0.0)
             g = coeff.gather(1, experts)
             out.append(torch.where(mix.view(t, 1), g, torch.ones_like(g)))

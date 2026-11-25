@@ -182,3 +182,26 @@ def test_load_mix(tmp_path):
     assert in_domain("model.layers.3.mlp.down_proj", ["down"], "0-1,3")
     assert not in_domain("model.layers.3.mlp.down_proj", ["up"], "")
     assert not in_domain("lm_head", ["lm_head"], "0-31")
+
+
+@pytest.mark.parametrize("n", [2, 3, 8])
+def test_ties_pick_exactly_top_k(n):
+    # Experts with the same A and differently scaled B have the same
+    # prototype, so they tie for every token; top_k of them are picked, the
+    # first ones listed, as weightpack-engine does.
+    rng = np.random.default_rng(0)
+    a = t(rng.standard_normal((1, IN)).astype(np.float32))
+    b = t(rng.standard_normal((4, 1)).astype(np.float32))
+    a_slot = torch.cat([a] * n)
+    b_slot = torch.cat([b * (i + 1) for i in range(n)], dim=1)
+    routing = Routing(1, SLOTS, n, IN, n, "cpu", torch.float32)
+    x = torch.randn(5, IN)
+    for top_k in (1, 2):
+        routing.set_slot(0, [1] * n, top_k, [a_slot], [b_slot])
+        g = routing.gates(x, torch.zeros(5, dtype=torch.long))[0]
+        want = torch.zeros(5, n)
+        want[:, :top_k] = 1 / top_k
+        torch.testing.assert_close(g, want)
+        np.testing.assert_allclose(
+            reference.arrow_gates(x.numpy(), np.ones((n, IN)), top_k), want.numpy()
+        )

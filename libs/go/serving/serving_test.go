@@ -405,6 +405,70 @@ func TestGatewayKey(t *testing.T) {
 	resp.Body.Close()
 }
 
+// A run pins its serving files before it checks they exist; a prune at the
+// same time must not delete them once pinned.
+func TestPruneLeavesPinnedFiles(t *testing.T) {
+	rt := newFixture(t).rt
+	rel := filepath.Join("bases", "abc")
+	file := filepath.Join(rt.dir, rel, "base", "weights")
+	write := func(p string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("w"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A prune's leftovers go; an export's staging directory stays.
+	leftover := filepath.Join(rt.dir, "bases", pruneStaging+"1", "old", "weights")
+	staging := filepath.Join(rt.dir, "bases", ".export-1", "weights")
+	write(leftover)
+	write(staging)
+	write(file)
+	rt.pin([]string{rel}, 1)
+	if _, err := rt.PruneFiles(false); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]bool{file: true, staging: true, leftover: false} {
+		if _, err := os.Stat(p); (err == nil) != want {
+			t.Errorf("%s: exists %v, want %v", p, err == nil, want)
+		}
+	}
+	rt.pin([]string{rel}, -1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 300; i++ {
+			rt.pin([]string{rel}, 1)
+			if _, err := os.Stat(file); err != nil {
+				write(file) // as a run exports what it does not find
+			}
+			for j := 0; j < 3; j++ {
+				time.Sleep(10 * time.Microsecond)
+				if _, err := os.Stat(file); err != nil {
+					t.Errorf("round %d: pinned file pruned: %v", i, err)
+					rt.pin([]string{rel}, -1)
+					return
+				}
+			}
+			rt.pin([]string{rel}, -1)
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			if _, err := rt.PruneFiles(false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestLogsAndPrune(t *testing.T) {
 	f := newFixture(t)
 	f.build(t, "french", "FROM ./base\nLAYER french ./adapters/french\n")

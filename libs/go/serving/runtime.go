@@ -739,11 +739,38 @@ func (rt *Runtime) Close() {
 	wg.Wait()
 }
 
+// pruneStaging prefixes the directories PruneFiles moves files into before
+// deleting them.
+const pruneStaging = ".prune-"
+
 // PruneFiles removes serving files (bases, adapters, and the logs of
 // engines that are gone) that no container, engine or run in progress
 // uses, and returns the bytes freed, or that would be with dryRun.
+//
+// Which files go is decided under rt.mu, the lock pin takes, and each is
+// moved aside there; the slow deletes happen after. A run that pins its
+// files first keeps them, and one that pins after finds them gone and
+// exports them again, so prune never deletes files an engine is loading.
 func (rt *Runtime) PruneFiles(dryRun bool) (int64, error) {
+	doomed, err := rt.pruneable(dryRun)
+	var freed int64
+	for _, p := range doomed {
+		freed += dirSize(p)
+		if !dryRun {
+			if rmErr := os.RemoveAll(p); rmErr != nil && err == nil {
+				err = rmErr
+			}
+		}
+	}
+	return freed, err
+}
+
+// pruneable lists the serving files nothing uses or will use: with dryRun
+// in place, otherwise each moved into a staging directory of its own.
+// Staging directories an earlier prune left behind are listed too.
+func (rt *Runtime) pruneable(dryRun bool) ([]string, error) {
 	rt.mu.Lock()
+	defer rt.mu.Unlock()
 	inUse := map[string]bool{}
 	for r := range rt.pins {
 		inUse[r] = true
@@ -761,33 +788,43 @@ func (rt *Runtime) PruneFiles(dryRun bool) (int64, error) {
 			inUse[r] = true
 		}
 	}
-	rt.mu.Unlock()
-	var freed int64
+	var doomed []string
 	for _, sub := range []string{"bases", "adapters", "mixes", "logs"} {
-		entries, err := os.ReadDir(filepath.Join(rt.dir, sub))
+		dir := filepath.Join(rt.dir, sub)
+		entries, err := os.ReadDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return freed, err
+			return doomed, err
 		}
 		for _, ent := range entries {
-			rel := filepath.Join(sub, ent.Name())
-			// Export stages a directory under a dot name and renames it
-			// into place when done; a staging directory belongs to a run.
-			if strings.HasPrefix(ent.Name(), ".") || inUse[rel] {
+			name := ent.Name()
+			p := filepath.Join(dir, name)
+			if strings.HasPrefix(name, pruneStaging) {
+				doomed = append(doomed, p)
 				continue
 			}
-			p := filepath.Join(rt.dir, rel)
-			freed += dirSize(p)
-			if !dryRun {
-				if err := os.RemoveAll(p); err != nil {
-					return freed, err
-				}
+			// Export stages a directory under another dot name and renames
+			// it into place when done; that one belongs to a run.
+			if strings.HasPrefix(name, ".") || inUse[filepath.Join(sub, name)] {
+				continue
+			}
+			if dryRun {
+				doomed = append(doomed, p)
+				continue
+			}
+			staging, err := os.MkdirTemp(dir, pruneStaging)
+			if err != nil {
+				return doomed, err
+			}
+			doomed = append(doomed, staging)
+			if err := os.Rename(p, filepath.Join(staging, name)); err != nil {
+				return doomed, err
 			}
 		}
 	}
-	return freed, nil
+	return doomed, nil
 }
 
 // adapterName is a LoRA layer's name inside an engine. It is the same for
