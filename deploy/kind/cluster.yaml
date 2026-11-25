@@ -1,0 +1,8 @@
+# Two workers, so the control plane has nodes to choose between. The agent
+# DaemonSet runs on the workers only (the control-plane node is tainted).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker
