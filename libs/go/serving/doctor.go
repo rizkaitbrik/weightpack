@@ -1,10 +1,13 @@
 package serving
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	goruntime "runtime"
 	"strings"
@@ -123,7 +126,37 @@ func (rt *Runtime) checkVLLM(ctx context.Context, device string) api.Check {
 		return c
 	}
 	c.Status, c.Detail = api.CheckOK, "vLLM "+strings.TrimSpace(string(lastLine(out)))+", the default engine on this machine"
+	if v := vllmPlugin(ctx, cmd[0]); v != "" {
+		c.Detail += "; weightpack-vllm " + v + " routes each token of a MIX"
+	} else {
+		c.Detail += "; without weightpack-vllm beside it, a MIX serves its experts one per request"
+	}
 	return c
+}
+
+// vllmPlugin returns the version of weightpack-vllm in vLLM's Python
+// environment, found through the vllm script's interpreter line, or "".
+func vllmPlugin(ctx context.Context, vllm string) string {
+	path, err := exec.LookPath(vllm)
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	line, _ := bufio.NewReader(io.LimitReader(f, 4096)).ReadString('\n')
+	_ = f.Close()
+	interp := strings.Fields(strings.TrimPrefix(line, "#!"))
+	if !strings.HasPrefix(line, "#!") || len(interp) == 0 {
+		return ""
+	}
+	args := append(interp[1:], "-c", "import importlib.metadata as m; print(m.version('weightpack-vllm'))")
+	out, err := exec.CommandContext(ctx, interp[0], args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // lastLine returns the last non-empty line, where tools print their answer

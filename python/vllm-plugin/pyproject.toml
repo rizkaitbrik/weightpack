@@ -36,6 +36,8 @@ allow-direct-references = true
 
 [dependency-groups]
 dev = [
+  # The routing tests run on CPU torch, as vLLM's CPU backend does.
+  "torch>=2.6",
   "autopep8>=2.3.1",
   "ruff>=0.8.2",
   "pytest>=8.3.4",
@@ -43,6 +45,15 @@ dev = [
   "pytest-cov>=6.0.0",
   "pytest-html>=4.1.1",
 ]
+
+# On Linux, CPU-only torch wheels for the tests, not the CUDA builds.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

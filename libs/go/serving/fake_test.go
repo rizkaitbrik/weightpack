@@ -45,8 +45,20 @@ func fakeEngine(args []string) int {
 	device := fs.String("device", "", "")
 	served := fs.String("served-model-name", "base", "")
 	exitWithStdin := fs.Bool("exit-with-stdin", false, "")
+	noPlugin := fs.Bool("no-plugin", false, "as vLLM without weightpack-vllm: refuse mix directories")
+	// vLLM's own flags; its model directory comes first, unflagged.
+	fs.Bool("enable-lora", false, "")
+	maxLoRARank := fs.Int("max-lora-rank", 0, "")
+	fs.Int("max-loras", 0, "")
+	fs.Bool("trust-request-chat-template", false, "")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *model == "" && fs.NArg() > 0 {
+		*model = fs.Arg(0)
+		if err := fs.Parse(fs.Args()[1:]); err != nil {
+			return 2
+		}
 	}
 	if *fail {
 		fmt.Fprintln(os.Stderr, "fake engine: out of memory loading the model")
@@ -121,6 +133,47 @@ func fakeEngine(args []string) int {
 			fail400(w, 400, "no adapter at "+b.LoraPath)
 			return
 		}
+		// A mix directory, as the weightpack-vllm plugin reads it: its
+		// experts' adapters must exist and fit --max-lora-rank.
+		if raw, err := os.ReadFile(filepath.Join(b.LoraPath, "weightpack_mix.json")); err == nil {
+			if *noPlugin {
+				fail400(w, 400, b.LoraPath+" doesn't contain tensors")
+				return
+			}
+			var spec struct {
+				TopK    int      `json:"top_k"`
+				Targets []string `json:"targets"`
+				Blocks  string   `json:"blocks"`
+				Router  string   `json:"router"`
+				Experts []struct {
+					ID   string `json:"id"`
+					Path string `json:"path"`
+				} `json:"experts"`
+			}
+			var cfg struct {
+				R int `json:"r"`
+			}
+			_ = json.Unmarshal(raw, &spec)
+			m := mix{TopK: spec.TopK, Targets: spec.Targets, Blocks: spec.Blocks, Router: spec.Router}
+			for _, e := range spec.Experts {
+				if _, err := os.Stat(filepath.Join(e.Path, "adapter_config.json")); err != nil {
+					fail400(w, 400, "mix expert "+e.ID+": no adapter at "+e.Path)
+					return
+				}
+				m.Experts = append(m.Experts, e.ID)
+			}
+			cfgRaw, _ := os.ReadFile(filepath.Join(b.LoraPath, "adapter_config.json"))
+			_ = json.Unmarshal(cfgRaw, &cfg)
+			if *maxLoRARank > 0 && cfg.R > *maxLoRARank {
+				fail400(w, 400, fmt.Sprintf("LoRA rank %d is greater than max_lora_rank %d", cfg.R, *maxLoRARank))
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			mixes[b.LoraName] = m
+			w.WriteHeader(200)
+			return
+		}
 		mu.Lock()
 		defer mu.Unlock()
 		if _, ok := adapters[b.LoraName]; ok {
@@ -137,6 +190,11 @@ func fakeEngine(args []string) int {
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		mu.Lock()
 		defer mu.Unlock()
+		if _, ok := mixes[b.LoraName]; ok { // a mix loaded as an adapter, as on vLLM
+			delete(mixes, b.LoraName)
+			w.WriteHeader(200)
+			return
+		}
 		if _, ok := adapters[b.LoraName]; !ok {
 			fail400(w, 404, "adapter "+b.LoraName+" is not loaded")
 			return

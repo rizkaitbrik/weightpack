@@ -251,8 +251,13 @@ func (e *engine) loadMix(ctx context.Context, name string, experts []string, mix
 	return nil
 }
 
-// unloadMix drops one user of a mix and unloads it after the last.
+// unloadMix drops one user of a mix and unloads it after the last. On vLLM
+// a mix is an adapter.
 func (e *engine) unloadMix(name string) {
+	if e.kind == EngineVLLM {
+		e.unloadAdapter(name)
+		return
+	}
 	e.amu.Lock()
 	defer e.amu.Unlock()
 	if e.mixes[name]--; e.mixes[name] > 0 {

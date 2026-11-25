@@ -15,9 +15,11 @@
 package serving
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -245,6 +247,10 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	for _, a := range p.adapters {
 		maxRank = max(maxRank, a.Rank)
 	}
+	// On vLLM a MIX is one adapter whose rank is its experts' together.
+	if p.mix != nil && kind == EngineVLLM {
+		maxRank = max(maxRank, mixRank(p))
+	}
 	if kind == EngineVLLM {
 		if _, err := vllmRank(maxRank); err != nil {
 			return nil, err
@@ -263,6 +269,11 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		adapterRels[i] = filepath.Join("adapters", hexOf(a.Chain)+"-"+a.ID)
 	}
 	rels := append([]string{baseRel}, adapterRels...)
+	mixRel := ""
+	if p.mix != nil && kind == EngineVLLM {
+		mixRel = filepath.Join("mixes", hexOf(p.mix.Chain)+"-"+p.mix.ID)
+		rels = append(rels, mixRel)
+	}
 	rt.pin(rels, 1)
 	defer rt.pin(rels, -1)
 
@@ -299,6 +310,9 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	}
 
 	c := &container{engine: e, template: template, files: adapterRels}
+	if mixRel != "" {
+		c.files = append(c.files, mixRel)
+	}
 	c.info = api.Container{
 		Name: name, Image: req.Ref, Digest: digest, Engine: kind, Device: device, EngineID: e.id,
 		Base: p.base.Chain, Created: time.Now().UTC().Truncate(time.Second), Endpoint: rt.cfg.Endpoint, Owner: req.Owner,
@@ -326,25 +340,33 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		upstream[model] = an
 	}
 	if p.mix != nil {
-		// The image's own name routes each token across the experts. Only
-		// the reference engine does that so far; vLLM serves the experts
-		// one per request.
-		if kind == EngineReference {
-			// An engine that cannot mix these experts (one replaces whole
-			// modules, say) still serves them one per request.
-			mn := mixName(*p.mix)
-			if err := e.loadMix(ctx, mn, c.adapters, *p.mix); err != nil {
-				progress(api.Event{Step: step, Warning: true, Message: fmt.Sprintf(
-					"model %s, which would route each token, is not served (%v); the experts are", name, err)})
-			} else {
-				c.mix = mn
-				c.info.Models = append([]string{name}, c.info.Models...)
-				c.info.Router = p.mix.Router
-				upstream[name] = mn
+		// The image's own name routes each token across the experts: the
+		// reference engine mixes its loaded adapters; vLLM, with the
+		// weightpack-vllm plugin, loads the mix as one stacked adapter
+		// described in a directory of its own. An engine that cannot mix
+		// these experts (one replaces whole modules, say, or vLLM lacks
+		// the plugin) still serves them one per request.
+		mn := mixName(*p.mix)
+		var err error
+		if kind == EngineVLLM {
+			var dir string
+			if dir, err = rt.writeMix(p, adapterRels, mixRel); err == nil {
+				err = e.loadAdapter(ctx, mn, dir)
+			}
+			if err != nil {
+				err = fmt.Errorf("%w; vLLM routes tokens with the weightpack-vllm plugin installed beside it", err)
 			}
 		} else {
-			progress(api.Event{Step: step, Message: fmt.Sprintf(
-				"%s serves the experts one per request; for model %s, which routes each token, run with --engine reference", kind, name)})
+			err = e.loadMix(ctx, mn, c.adapters, *p.mix)
+		}
+		if err != nil {
+			progress(api.Event{Step: step, Warning: true, Message: fmt.Sprintf(
+				"model %s, which would route each token, is not served (%v); the experts are", name, err)})
+		} else {
+			c.mix = mn
+			c.info.Models = append([]string{name}, c.info.Models...)
+			c.info.Router = p.mix.Router
+			upstream[name] = mn
 		}
 	}
 
@@ -741,7 +763,7 @@ func (rt *Runtime) PruneFiles(dryRun bool) (int64, error) {
 	}
 	rt.mu.Unlock()
 	var freed int64
-	for _, sub := range []string{"bases", "adapters", "logs"} {
+	for _, sub := range []string{"bases", "adapters", "mixes", "logs"} {
 		entries, err := os.ReadDir(filepath.Join(rt.dir, sub))
 		if errors.Is(err, os.ErrNotExist) {
 			continue
@@ -771,6 +793,91 @@ func (rt *Runtime) PruneFiles(dryRun bool) (int64, error) {
 // adapterName is a LoRA layer's name inside an engine. It is the same for
 // the same layer on the same chain, so containers of one image share it.
 func adapterName(a spec.Layer) string { return "lora-" + short(a.Chain) + "-" + a.ID }
+
+// mixRank is the rank of a MIX as one adapter: its experts' together.
+func mixRank(p *plan) int {
+	n := 0
+	for _, a := range p.adapters {
+		n += a.Rank
+	}
+	return n
+}
+
+// writeMix writes the directory vLLM loads a MIX from, with the
+// weightpack-vllm plugin: an adapter config of the stacked rank, and
+// weightpack_mix.json naming each expert's exported adapter. The plugin
+// stacks the experts' weights; wpkd writes only JSON. It returns the
+// directory.
+func (rt *Runtime) writeMix(p *plan, adapterRels []string, rel string) (string, error) {
+	dir := filepath.Join(rt.dir, rel)
+	if _, err := os.Stat(filepath.Join(dir, mixFile)); err == nil {
+		return dir, nil
+	}
+	var experts []map[string]any
+	targets := map[string]bool{}
+	for i, a := range p.adapters {
+		experts = append(experts, map[string]any{
+			"id": a.ID, "rank": a.Rank, "path": filepath.Join(rt.dir, adapterRels[i], "adapters", a.ID),
+		})
+		for _, t := range a.Targets {
+			if slices.Contains(p.mix.Targets, t) {
+				targets[moduleName(t)] = true
+			}
+		}
+	}
+	modules := make([]string, 0, len(targets))
+	for t := range targets {
+		modules = append(modules, t)
+	}
+	sort.Strings(modules)
+	rank := mixRank(p)
+	config := map[string]any{
+		"peft_type": "LORA", "task_type": "CAUSAL_LM", "r": rank, "lora_alpha": rank,
+		"target_modules": modules, "bias": "none", "use_rslora": false, "fan_in_fan_out": false,
+		"base_model_name_or_path": "",
+	}
+	mix := map[string]any{
+		"version": 1, "router": cmp.Or(p.mix.Router, "arrow"), "top_k": p.mix.TopK,
+		"targets": p.mix.Targets, "blocks": p.mix.Blocks, "experts": experts,
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dir), ".mix-")
+	if err != nil {
+		return "", err
+	}
+	for name, v := range map[string]any{"adapter_config.json": config, mixFile: mix} {
+		raw, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(filepath.Join(tmp, name), raw, 0o644); err != nil {
+			_ = os.RemoveAll(tmp)
+			return "", err
+		}
+	}
+	if err := os.Rename(tmp, dir); err != nil {
+		_ = os.RemoveAll(tmp)
+		if _, statErr := os.Stat(filepath.Join(dir, mixFile)); statErr == nil {
+			return dir, nil // another run wrote it first
+		}
+		return "", err
+	}
+	return dir, nil
+}
+
+// mixFile describes a MIX to the weightpack-vllm plugin.
+const mixFile = "weightpack_mix.json"
+
+// moduleName is the module a canonical target names (q -> q_proj).
+func moduleName(target string) string {
+	switch target {
+	case "q", "k", "v", "o", "gate", "up", "down":
+		return target + "_proj"
+	}
+	return target
+}
 
 // mixName is a MIX's name in the engine: images with the same MIX share it.
 func mixName(m spec.Layer) string { return "mix-" + short(m.Chain) + "-" + m.ID }

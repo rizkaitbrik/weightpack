@@ -62,3 +62,17 @@ def mix_forward(
         if rows.size:
             y[rows] += gates[rows, i : i + 1] * expert.apply(x[rows])
     return y
+
+
+def arrow_prototype(expert: LoRAExpert) -> np.ndarray:
+    """Arrow's prototype: the unit top right singular vector of B @ A."""
+    _, _, vh = np.linalg.svd(expert.b.astype(np.float64) @ expert.a.astype(np.float64))
+    return vh[0]
+
+
+def arrow_gates(x: np.ndarray, prototypes: np.ndarray, k: int) -> np.ndarray:
+    """Arrow's routing weights, (tokens, experts): a softmax over each
+    token's top-k logits |x . v|."""
+    return top_k_gates(
+        np.abs(x.astype(np.float64) @ prototypes.T), min(k, len(prototypes))
+    )
