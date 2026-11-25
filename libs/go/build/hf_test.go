@@ -167,3 +167,38 @@ func TestModulesToSave(t *testing.T) {
 		}
 	}
 }
+
+// A listed module's submodules are saved too: modules_to_save ["mlp"]
+// saves mlp.down_proj.weight, whose parent is mlp.down_proj.
+func TestModulesToSaveCoversSubmodules(t *testing.T) {
+	f := newFixture(t)
+	for name, c := range map[string]struct {
+		save []string
+		ok   bool
+	}{
+		"ancestor":      {[]string{"mlp"}, true},
+		"full path":     {[]string{"model.layers.1.mlp"}, true},
+		"parent":        {[]string{"down_proj"}, true},
+		"name fragment": {[]string{"lp"}, false},
+		"other module":  {[]string{"self_attn"}, false},
+	} {
+		dir := filepath.Join(f.dir, "adapters", "sub-"+strings.ReplaceAll(name, " ", "-"))
+		buildtest.WriteAdapter(t, dir, buildtest.Adapter{Rank: 4, Alpha: 8, Modules: buildtest.Attn, Blocks: []int{0}, Seed: 5,
+			Config: map[string]any{"modules_to_save": c.save}})
+		ts := []buildtest.Tensor{{Name: "base_model.model.model.layers.1.mlp.down_proj.weight", Shape: []int64{buildtest.Hidden, buildtest.Inter}, Seed: 78}}
+		for _, m := range buildtest.Attn {
+			p := "base_model.model.model.layers.0." + m + "."
+			ts = append(ts,
+				buildtest.Tensor{Name: p + "lora_A.weight", Shape: []int64{4, buildtest.Hidden}, Seed: 1},
+				buildtest.Tensor{Name: p + "lora_B.weight", Shape: []int64{buildtest.Hidden, 4}, Seed: 2})
+		}
+		buildtest.WriteSafetensors(t, filepath.Join(dir, "adapter_model.safetensors"), ts)
+		_, err := f.build(t, f.weightfile(t, "Sub", "FROM ./base\nLAYER x "+dir+"\n"))
+		if c.ok && err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+		if !c.ok && (err == nil || !strings.Contains(err.Error(), "module_to_save copy")) {
+			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+}
