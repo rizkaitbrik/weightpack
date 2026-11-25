@@ -49,6 +49,13 @@ type Options struct {
 	// MaxShardSize caps each base weight file; 0 means DefaultMaxShardSize.
 	// A tensor larger than the cap gets a shard of its own.
 	MaxShardSize int64
+	// NoBase and Adapters limit the export to what an engine loads, for
+	// serving. With NoBase the base is not written (its tensor table is
+	// still read, to describe the adapters); a non-nil Adapters writes only
+	// those LoRA layers. A partial export has no Weightfile, since it could
+	// not rebuild the image.
+	NoBase   bool
+	Adapters []string
 }
 
 // Export writes the image ref names to opts.Dir. It writes into a staging
@@ -101,11 +108,25 @@ func Export(ctx context.Context, s *store.Store, ref string, opts Options, progr
 		id := d.Annotations[spec.AnnotationLayer]
 		byLayer[id] = append(byLayer[id], d)
 	}
-	baseTensors, err := e.base(byLayer[plan.base.ID], opts.MaxShardSize)
+	partial := opts.NoBase || opts.Adapters != nil
+	for _, id := range opts.Adapters {
+		if !slices.ContainsFunc(plan.adapters(), func(l spec.Layer) bool { return l.ID == id }) {
+			return nil, fmt.Errorf("export %s: the image has no LoRA layer %q", ref, id)
+		}
+	}
+	var baseTensors map[string]safetensors.Tensor
+	if opts.NoBase {
+		baseTensors, err = e.baseTable(byLayer[plan.base.ID])
+	} else {
+		baseTensors, err = e.base(byLayer[plan.base.ID], opts.MaxShardSize)
+	}
 	if err != nil {
 		return nil, err
 	}
 	for _, l := range plan.adapters() {
+		if opts.Adapters != nil && !slices.Contains(opts.Adapters, l.ID) {
+			continue
+		}
 		if err := e.adapter(l, byLayer[l.ID], baseTensors); err != nil {
 			return nil, err
 		}
@@ -114,8 +135,10 @@ func Export(ctx context.Context, s *store.Store, ref string, opts Options, progr
 	if err != nil {
 		return nil, err
 	}
-	if err := e.weightfile(ref, root.Digest.String(), plan, files, m.Annotations); err != nil {
-		return nil, err
+	if !partial {
+		if err := e.weightfile(ref, root.Digest.String(), plan, files, m.Annotations); err != nil {
+			return nil, err
+		}
 	}
 
 	// An empty target directory is replaced; checkTarget made sure it is
@@ -316,6 +339,20 @@ func closeAll(files []*safetensors.File) {
 	for _, f := range files {
 		_ = f.Close()
 	}
+}
+
+// baseTable reads the base layer's tensor table without writing anything.
+func (e *exporter) baseTable(ds []ocispec.Descriptor) (map[string]safetensors.Tensor, error) {
+	tensors, files, err := e.openTensors(ds, spec.MediaTypeTensor)
+	defer closeAll(files)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]safetensors.Tensor, len(tensors))
+	for n, l := range tensors {
+		out[n] = l.t
+	}
+	return out, nil
 }
 
 // base writes the base layer as a Hugging Face model directory and returns

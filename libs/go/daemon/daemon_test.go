@@ -17,12 +17,13 @@ import (
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build/buildtest"
+	"github.com/rizkaitbrik/weightpack/libs/go/serving"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 )
 
 // serveUnix starts the handler on a Unix socket and returns a client for it.
-func serveUnix(t *testing.T, s *store.Store) *api.Client {
+func serveUnix(t *testing.T, s *store.Store, opts ...Option) *api.Client {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "wpkd") // short path: socket paths are limited
 	if err != nil {
@@ -34,7 +35,7 @@ func serveUnix(t *testing.T, s *store.Store) *api.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewUnstartedServer(NewHandler(s, "test", nil))
+	srv := httptest.NewUnstartedServer(NewHandler(s, "test", nil, opts...))
 	srv.Listener = ln
 	srv.Start()
 	t.Cleanup(srv.Close)
@@ -222,5 +223,63 @@ func TestBuildPullsImagesItLacks(t *testing.T) {
 	}
 	if !pulled {
 		t.Errorf("no pull progress in the build stream: %+v", events)
+	}
+}
+
+func TestServingEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	wf := buildtest.Project(t, dir)
+	s, err := store.Open(filepath.Join(dir, "store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// Without a runtime, serving is off.
+	off := serveUnix(t, s)
+	if _, err := off.Containers(ctx); err == nil || !strings.Contains(err.Error(), "serving is off") {
+		t.Errorf("containers without a runtime: %v", err)
+	}
+
+	// An engine command that exits at once: the run fails with its output.
+	rt := serving.New(serving.Config{
+		Store: s, Device: "cpu",
+		Engines: map[string][]string{serving.EngineReference: {"/bin/sh", "-c", "echo engine broke >&2; exit 3", "sh"}},
+	})
+	t.Cleanup(rt.Close)
+	c := serveUnix(t, s, WithRuntime(rt))
+	if err := os.WriteFile(wf, []byte("FROM ./base\nLAYER french ./adapters/french\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Build(ctx, api.BuildRequest{Weightfile: wf, Tags: []string{"french"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var steps []string
+	_, err = c.Run(ctx, api.RunRequest{Ref: "french"}, func(e api.Event) { steps = append(steps, e.Message) })
+	if err == nil || !strings.Contains(err.Error(), "engine broke") {
+		t.Errorf("run with a broken engine: %v", err)
+	}
+	if len(steps) == 0 || !strings.Contains(steps[0], "french as an adapter") {
+		t.Errorf("progress = %q", steps)
+	}
+	if _, err := c.Run(ctx, api.RunRequest{Ref: "missing"}, nil); err == nil {
+		t.Error("running an unknown image succeeded")
+	}
+	if _, err := c.Run(ctx, api.RunRequest{Ref: "french", Device: "tpu"}, nil); err == nil || !strings.Contains(err.Error(), "unknown device") {
+		t.Errorf("bad device: %v", err)
+	}
+	if cs, err := c.Containers(ctx); err != nil || len(cs) != 0 {
+		t.Errorf("containers = %v, %v", cs, err)
+	}
+	if _, err := c.Stop(ctx, api.StopRequest{Names: []string{"nope"}}); err == nil || !strings.Contains(err.Error(), "no such container") {
+		t.Errorf("stop unknown: %v", err)
+	}
+	if _, err := c.Logs(ctx, "nope", false); err == nil || !strings.Contains(err.Error(), "no such container") {
+		t.Errorf("logs unknown: %v", err)
+	}
+	// The failed run left a serving base behind, which prune removes.
+	res, err := c.Prune(ctx, api.PruneRequest{})
+	if err != nil || res.ServingBytes == 0 {
+		t.Errorf("prune: %+v, %v", res, err)
 	}
 }

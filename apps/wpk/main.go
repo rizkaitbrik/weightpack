@@ -29,7 +29,6 @@ type command struct {
 // planned commands from the design doc; they exist so the CLI surface is
 // visible from day one and fail clearly until implemented.
 var planned = map[string]string{
-	"run":    "Serve an image through the local engine",
 	"diff":   "Show which tensors differ between two images",
 	"rebase": "Move layers onto a new base (transfer, gate, distil)",
 }
@@ -50,6 +49,10 @@ func commands() map[string]command {
 		"import":   {"Store a full fine-tune as a lossless delta over a parent", runImport},
 		"rm":       {"Untag images (their blobs stay until prune)", runRm},
 		"prune":    {"Delete blobs no tagged image reaches", runPrune},
+		"run":      {"Serve an image on the OpenAI-compatible gateway", runRun},
+		"ps":       {"List running containers", runPs},
+		"stop":     {"Stop containers", runStop},
+		"logs":     {"Print a container's engine log", runLogs},
 	}
 	for name, summary := range planned {
 		cmds[name] = command{summary, notImplemented(name)}

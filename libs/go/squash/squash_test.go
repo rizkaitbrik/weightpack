@@ -328,3 +328,20 @@ func TestSquashRejectsBadWorkerOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestSquashThroughALayer(t *testing.T) {
+	f := newFixture(t)
+	f.build(t, "Weightfile", buildtest.Assistant, "assistant")
+	w := &fakeWorker{}
+	if _, err := Squash(context.Background(), f.store, w, "assistant", Options{Through: "french", Tags: []string{"base-french"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.req.Layers) != 1 || w.req.Layers[0].Id != "french" {
+		t.Errorf("baked %+v, want french alone", w.req.Layers)
+	}
+	for _, bad := range []Options{{Through: "domain"}, {Through: "nope"}, {Through: "french", Expert: "legal"}} {
+		if _, err := Squash(context.Background(), f.store, &fakeWorker{}, "assistant", bad, nil); err == nil {
+			t.Errorf("%+v accepted", bad)
+		}
+	}
+}

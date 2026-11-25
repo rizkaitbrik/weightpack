@@ -29,8 +29,15 @@ dependencies = [
     "protobuf>=7.35.1",
 ]
 
+[project.optional-dependencies]
+# The reference serving engine (weightpack-engine): transformers + PEFT on
+# cuda, mps or cpu. On Linux, install torch from the CUDA or CPU index you
+# want; vLLM is a separate install for NVIDIA serving.
+serve = ["torch>=2.6", "transformers>=4.56", "peft>=0.17"]
+
 [project.scripts]
 weightpack-worker = "weightpack_worker.server:main"
+weightpack-engine = "weightpack_worker.engine:main"
 
 [tool.hatch.build.targets.wheel]
 # weightpack/worker/v1 is the generated gRPC code (npx nx run proto:generate).

@@ -88,7 +88,7 @@
     "parity": {
       "executor": "@nxlv/python:run-commands",
       "options": {
-        "command": "uv run --group parity pytest tests/test_peft_parity.py -s --no-cov",
+        "command": "uv run --group parity pytest tests/test_peft_parity.py tests/test_engine.py tests/test_e2e_serve.py -s --no-cov",
         "cwd": "{projectRoot}"
       },
       "dependsOn": [

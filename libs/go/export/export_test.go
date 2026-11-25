@@ -257,3 +257,53 @@ func TestExportRefuses(t *testing.T) {
 		t.Error("cancelled export created its directory")
 	}
 }
+
+func TestPartialExport(t *testing.T) {
+	f := newFixture(t)
+	f.build(t, filepath.Join(f.dir, "Weightfile"), "assistant")
+
+	// Only one adapter: no base, no other adapter, no Weightfile.
+	out := filepath.Join(f.dir, "legal")
+	if _, err := Export(context.Background(), f.store, "assistant", Options{Dir: out, NoBase: true, Adapters: []string{"legal"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]bool{
+		"adapters/legal/adapter_config.json": true, "adapters/legal/adapter_model.safetensors": true,
+		"adapters/french": false, "base": false, "Weightfile": false,
+	} {
+		if _, err := os.Stat(filepath.Join(out, p)); (err == nil) != want {
+			t.Errorf("%s: exists %v, want %v", p, err == nil, want)
+		}
+	}
+	// The adapter is described against the base all the same.
+	full := filepath.Join(f.dir, "full")
+	if _, err := Export(context.Background(), f.store, "assistant", Options{Dir: full}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"adapter_config.json", "adapter_model.safetensors"} {
+		a, _ := os.ReadFile(filepath.Join(out, "adapters/legal", name))
+		b, _ := os.ReadFile(filepath.Join(full, "adapters/legal", name))
+		if string(a) != string(b) || len(a) == 0 {
+			t.Errorf("partial %s differs from the full export's", name)
+		}
+	}
+
+	// Only the base: an empty adapter list.
+	base := filepath.Join(f.dir, "base-only")
+	if _, err := Export(context.Background(), f.store, "assistant", Options{Dir: base, Adapters: []string{}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "base", "model.safetensors")); err != nil {
+		t.Error("base missing")
+	}
+	if _, err := os.Stat(filepath.Join(base, "adapters")); !os.IsNotExist(err) {
+		t.Error("an empty adapter list exported adapters")
+	}
+	if _, err := os.Stat(filepath.Join(base, "chat_template.jinja")); err != nil {
+		t.Error("the chat template is missing")
+	}
+
+	if _, err := Export(context.Background(), f.store, "assistant", Options{Dir: filepath.Join(f.dir, "x"), Adapters: []string{"nope"}}, nil); err == nil || !strings.Contains(err.Error(), `no LoRA layer "nope"`) {
+		t.Errorf("unknown adapter: %v", err)
+	}
+}
