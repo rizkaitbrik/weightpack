@@ -37,7 +37,11 @@ func TestServiceDryRun(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errOut.String())
 	}
-	for _, want := range []string{"/opt/bin/wpkd", "uv run weightpack-worker", root, "0.0.0.0:8090", "/opt/bin:/usr/bin", filepath.Join(root, "wpkd.log")} {
+	want := []string{"/opt/bin/wpkd", "uv run weightpack-worker", root, "0.0.0.0:8090", "/opt/bin:/usr/bin"}
+	if goruntime.GOOS == "darwin" {
+		want = append(want, filepath.Join(root, "wpkd.log")) // systemd logs to the journal instead
+	}
+	for _, want := range want {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("dry run lacks %q:\n%s", want, out.String())
 		}
