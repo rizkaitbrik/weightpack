@@ -114,6 +114,9 @@ func Export(ctx context.Context, s *store.Store, ref string, opts Options, progr
 			return nil, fmt.Errorf("export %s: the image has no LoRA layer %q", ref, id)
 		}
 	}
+	if err := plan.check(opts.Adapters); err != nil {
+		return nil, fmt.Errorf("export %s: %w", ref, err)
+	}
 	var baseTensors map[string]safetensors.Tensor
 	if opts.NoBase {
 		baseTensors, err = e.baseTable(byLayer[plan.base.ID])
@@ -237,12 +240,22 @@ func planLayers(c *spec.Config) (*layerPlan, error) {
 		p.stack = append(p.stack, l)
 		top = l
 	}
+	return p, nil
+}
+
+// check refuses layers the export would write that have no PEFT form:
+// every adapter for a full export, only the named ones for a partial one,
+// whose caller (serving) has baked the rest into a base already.
+func (p *layerPlan) check(only []string) error {
 	for _, l := range p.adapters() {
+		if only != nil && !slices.Contains(only, l.ID) {
+			continue
+		}
 		if l.Kind != spec.KindLoRA {
-			return nil, fmt.Errorf("layer %q is %s, which has no PEFT form; wpk squash the image and export the result to get dense weights", l.ID, l.Kind)
+			return fmt.Errorf("layer %q is %s, which has no PEFT form; wpk squash the image and export the result to get dense weights", l.ID, l.Kind)
 		}
 	}
-	return p, nil
+	return nil
 }
 
 func ids(ls []spec.Layer) string {

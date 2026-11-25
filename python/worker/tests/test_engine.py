@@ -190,6 +190,12 @@ def test_endpoints_and_runtime_adapters(running):
         )
     assert err.value.code == 400  # the name is taken
 
+    # Bad parameters are refused before a stream starts.
+    for bad in ({"max_tokens": -1}, {"temperature": -0.5}, {"top_p": 5}):
+        with pytest.raises(urllib.error.HTTPError) as err:
+            chat("tiny", **bad, stream=True)
+        assert err.value.code == 400, bad
+
     post(url + "/v1/unload_lora_adapter", {"lora_name": "styled"})
     assert [m["id"] for m in get(url + "/v1/models")["data"]] == ["tiny"]
 
@@ -215,3 +221,34 @@ def test_generates_on_metal(tmp_path):
     text, n, _ = engine.generate("styled", ids, {"max_tokens": 6, "temperature": 0})
     assert n == 6 and text
     assert next(engine.peft.parameters()).device.type == "mps"
+
+
+def test_failed_generation_frees_the_engine(tmp_path):
+    """A generation that fails mid-stream ends the stream with an error,
+    and the engine serves the next request: the lock is released."""
+    base, _, tok = tiny_model(tmp_path)
+    engine = Engine(str(base), device="cpu", served_name="tiny")
+    server = serve(engine)
+    url = "http://{}:{}".format(*server.server_address[:2])
+    real = engine.model.generate
+
+    def failing(*args, streamer=None, **kwargs):
+        streamer.put(torch.tensor([[5]]))  # the prompt, which is skipped
+        streamer.put(torch.tensor([7]))
+        raise RuntimeError("CUDA out of memory (simulated)")
+
+    try:
+        engine.model.generate = failing
+        body = {"model": "tiny", "messages": PROMPT, "max_tokens": 8, "temperature": 0}
+        raw = post(url + "/v1/chat/completions", {**body, "stream": True})
+        events = [line[6:] for line in raw.splitlines() if line.startswith("data: ")]
+        assert events[-1] == "[DONE]", events
+        assert "out of memory" in json.loads(events[-2])["error"]["message"]
+        with pytest.raises(urllib.error.HTTPError) as err:
+            post(url + "/v1/chat/completions", body)
+        assert err.value.code == 500
+        engine.model.generate = real
+        out = json.loads(post(url + "/v1/chat/completions", body))
+        assert out["choices"][0]["message"]["content"] == direct(base, None, tok)
+    finally:
+        server.shutdown()
