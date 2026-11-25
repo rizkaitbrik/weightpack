@@ -13,4 +13,6 @@ What it does today:
 - **safetensors I/O on NumPy** (`weightpack_worker.safetensors_io`), BF16 included, with round-to-nearest-even conversion.
 - **Reference codecs** (`weightpack_worker.codecs`): `xor_encode` / `xor_decode`, a lossless XOR delta against the parent tensor, and `bit1_encode` / `bit1_decode`, a lossy 1-bit delta (sign bits plus one scale per matrix).
 
+`npx nx run worker:smoke` runs the whole flow on a real model: Qwen2.5-0.5B-Instruct and three public LoRA adapters from the Hub, built into a mix, pushed to a local registry, pulled into a second store, squashed and exported, then checked against transformers and PEFT (weights and greedy generations). It downloads about 1 GB into `tmp/smoke` and prints sizes and timings.
+
 `npx nx test worker` builds `wpk` and `wpkd` first, because the end-to-end tests drive the real binaries with this worker behind them.
