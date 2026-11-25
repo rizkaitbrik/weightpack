@@ -154,6 +154,19 @@ class Engine:
     def encode_text(self, prompt: str) -> list[int]:
         return self.tokenizer(prompt)["input_ids"]
 
+    @staticmethod
+    def check_params(params: dict) -> None:
+        """Rejects sampling parameters generation would fail on, before a
+        streamed response has started."""
+        max_tokens = params.get("max_tokens") or params.get("max_completion_tokens")
+        if max_tokens is not None and int(max_tokens) < 1:
+            raise ValueError("max_tokens must be at least 1")
+        if float(params.get("temperature", 1.0)) < 0:
+            raise ValueError("temperature must not be negative")
+        top_p = float(params.get("top_p", 1.0))
+        if not 0 < top_p <= 1:
+            raise ValueError("top_p must be in (0, 1]")
+
     def generate(self, name: str, input_ids: list[int], params: dict, on_text=None):
         """Generate a completion. Returns (text, completion tokens, finish
         reason). With on_text, text pieces are passed to it as they come."""
@@ -199,23 +212,50 @@ class Engine:
                         self.tokenizer, skip_prompt=True, skip_special_tokens=True
                     )
                     result = {}
+                    cancel = threading.Event()
+
+                    class Cancelled(transformers.StoppingCriteria):
+                        """Stops generation once the caller has gone."""
+
+                        def __call__(self, input_ids, scores, **_):
+                            return torch.full(
+                                (input_ids.shape[0],),
+                                cancel.is_set(),
+                                dtype=torch.bool,
+                                device=input_ids.device,
+                            )
 
                     def run():
-                        result["out"] = model.generate(
-                            input_ids=ids,
-                            attention_mask=torch.ones_like(ids),
-                            streamer=streamer,
-                            **kwargs,
-                        )
+                        try:
+                            result["out"] = model.generate(
+                                input_ids=ids,
+                                attention_mask=torch.ones_like(ids),
+                                streamer=streamer,
+                                stopping_criteria=transformers.StoppingCriteriaList(
+                                    [Cancelled()]
+                                ),
+                                **kwargs,
+                            )
+                        except BaseException as exc:  # handed to the caller
+                            result["error"] = exc
+                            streamer.end()  # unblocks the loop below
 
                     t = threading.Thread(target=run)
                     t.start()
                     pieces = []
-                    for piece in streamer:
-                        if piece:
-                            pieces.append(piece)
-                            on_text(piece)
-                    t.join()
+                    try:
+                        for piece in streamer:
+                            if piece:
+                                pieces.append(piece)
+                                on_text(piece)
+                    finally:
+                        # If on_text failed (the client went away), stop
+                        # generating; either way, finish before releasing
+                        # the lock.
+                        cancel.set()
+                        t.join()
+                    if "error" in result:
+                        raise result["error"]
                     new = result["out"][0, ids.shape[1] :].tolist()
                     text = "".join(pieces)
         if stop:
@@ -311,6 +351,10 @@ def make_handler(engine: Engine):
                 return self._error(404, f"unknown model or field {exc}")
             except (ValueError, OSError) as exc:
                 return self._error(400, str(exc))
+            except Exception as exc:  # out of memory, a model error, ...
+                return self._json(
+                    500, {"error": {"message": str(exc), "type": "server_error"}}
+                )
             self._error(404, f"no route {self.path}")
 
         def _complete(self, body: dict, chat: bool) -> None:
@@ -319,6 +363,7 @@ def make_handler(engine: Engine):
                 return self._error(
                     404, f"model {name!r} is not loaded (have {engine.models()})"
                 )
+            engine.check_params(body)
             ids = (
                 engine.encode_chat(body["messages"], body.get("chat_template"))
                 if chat
@@ -361,6 +406,12 @@ def make_handler(engine: Engine):
             self.end_headers()
             self.close_connection = True
 
+            def send_error(exc):
+                body = {"error": {"message": str(exc), "type": "server_error"}}
+                self.wfile.write(b"data: " + json.dumps(body).encode() + b"\n\n")
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
             def send(choice):
                 chunk = {
                     "id": rid,
@@ -372,20 +423,35 @@ def make_handler(engine: Engine):
                 self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
                 self.wfile.flush()
 
-            if chat:
-                send(
-                    {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+            try:
+                if chat:
+                    send(
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant"},
+                            "finish_reason": None,
+                        }
+                    )
+                _, _, finish = engine.generate(
+                    name,
+                    ids,
+                    body,
+                    on_text=lambda piece: send(
+                        {
+                            "index": 0,
+                            "delta": {"content": piece},
+                            "finish_reason": None,
+                        }
+                        if chat
+                        else {"index": 0, "text": piece, "finish_reason": None}
+                    ),
                 )
-            _, _, finish = engine.generate(
-                name,
-                ids,
-                body,
-                on_text=lambda piece: send(
-                    {"index": 0, "delta": {"content": piece}, "finish_reason": None}
-                    if chat
-                    else {"index": 0, "text": piece, "finish_reason": None}
-                ),
-            )
+            except (BrokenPipeError, ConnectionResetError):
+                return  # the client went away; generation has stopped
+            except Exception as exc:  # headers are sent: report in the stream
+                with contextlib.suppress(OSError):
+                    send_error(exc)
+                return
             send(
                 {"index": 0, "delta": {}, "finish_reason": finish}
                 if chat

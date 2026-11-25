@@ -250,9 +250,12 @@ func TestImagesOnOneBaseShareAnEngine(t *testing.T) {
 	}
 
 	// Stopping a container unloads its adapter; the engine stays for the
-	// others, and stops with the last.
-	if _, err := f.rt.Stop([]string{"fr"}); err != nil {
-		t.Fatal(err)
+	// others, and stops with the last. A name given twice counts once.
+	if stopped, err := f.rt.Stop([]string{"fr", "fr"}); err != nil || !slices.Equal(stopped, []string{"fr"}) {
+		t.Fatalf("stop fr fr: %v %v", stopped, err)
+	}
+	if e.hasExited() {
+		t.Fatal("stopping one container twice stopped the shared engine")
 	}
 	if got := f.loaded(t, e); len(got) != 3 || slices.ContainsFunc(got, func(n string) bool { return strings.HasSuffix(n, "-french") }) {
 		t.Errorf("after stopping fr the engine has %v", got)
