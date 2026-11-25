@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -52,7 +53,12 @@ func fakeEngine(args []string) int {
 	}
 	if *hang {
 		fmt.Fprintln(os.Stderr, "fake engine: loading the model")
-		select {}
+		// A sleep, not select {}: with no other goroutine, Go takes an
+		// empty select for a deadlock and exits, and the engine would die
+		// at once instead of loading forever.
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(*model, "model.safetensors")); err != nil {
 		fmt.Fprintf(os.Stderr, "fake engine: no model in %s\n", *model)
