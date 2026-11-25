@@ -12,7 +12,8 @@
 # Needs uv and jq, and either docker (vLLM's CPU image; IMAGE picks it:
 # default the arm64 CPU release, on x86 public.ecr.aws/q9t5s3a7/vllm-cpu-
 # release-repo) or VLLM=<path to a vllm executable> whose environment has
-# this plugin installed, such as a CUDA machine's.
+# this plugin installed, such as a CUDA machine's. VLLM_ARGS adds
+# arguments to vllm serve.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -121,6 +122,12 @@ assert len(set(want.values())) == len(want), "replies are not all different"
 PY
 
 serve_args=(--served-model-name base --enable-lora --max-lora-rank 16 --max-loras 4 --dtype float32 --max-model-len 128)
+# VLLM_ARGS adds arguments, such as --gpu-memory-utilization 0.4 on a GPU
+# shared with other work.
+if [ -n "${VLLM_ARGS:-}" ]; then
+  read -r -a extra <<<"$VLLM_ARGS"
+  serve_args+=("${extra[@]}")
+fi
 if [ -n "$VLLM" ]; then
   echo "== vLLM ($VLLM) with weightpack-vllm"
   VLLM_ALLOW_RUNTIME_LORA_UPDATING=True "$VLLM" serve "$work/base" --port "$PORT" "${serve_args[@]}" \
