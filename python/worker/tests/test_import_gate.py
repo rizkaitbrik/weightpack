@@ -41,7 +41,7 @@ EVAL = 100
 def full_finetune(base: str, out, examples, steps: int):
     """Every weight trained on examples, saved in the base's dtype with the
     base's own config and tokenizer files (the fine-tune changes neither)."""
-    from weightpack_worker.router_train import IGNORE, _batch, _encode
+    from weightpack_worker.router_train import IGNORE, _batch, _encode, learnt_logits
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     tok = transformers.AutoTokenizer.from_pretrained(base)
@@ -57,16 +57,12 @@ def full_finetune(base: str, out, examples, steps: int):
     pad = tok.pad_token_id or tok.eos_token_id
     for step in range(steps):
         batch = _batch(order.sample(encoded, 8), pad, device)
-        with torch.autocast(
-            device_type=device, dtype=torch.bfloat16, enabled=device == "cuda"
-        ):
-            out_ = model(input_ids=batch[0], attention_mask=batch[1])
-        logits = out_.logits[:, :-1].float()
-        loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]),
-            batch[2][:, 1:].reshape(-1),
-            ignore_index=IGNORE,
-        )
+        cuda = device == "cuda"
+        with torch.autocast(device_type=device, dtype=torch.bfloat16, enabled=cuda):
+            # Logits only where an answer token is learnt: all of them, over
+            # a 150k vocabulary, would take gigabytes.
+            logits, targets = learnt_logits(model, batch)
+        loss = torch.nn.functional.cross_entropy(logits, targets, ignore_index=IGNORE)
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -95,9 +91,10 @@ def test_lossy_imports_stay_within_max_drop(models, tmp_path):  # noqa: F811
         "".join(json.dumps(ex) + "\n" for ex in test[:EVAL])
     )
 
+    suite = tmp_path / "gsm8k.jsonl"
     builds = {
-        "bit1": f"codec=bit1 eval=./gsm8k.jsonl max_drop={MAX_DROP}",
-        "sparse": f"codec=sparse eval=./gsm8k.jsonl max_drop={MAX_DROP}",
+        "bit1": f"codec=bit1 eval={suite} max_drop={MAX_DROP}",
+        "sparse": f"codec=sparse eval={suite} max_drop={MAX_DROP}",
         "bit1-self": f"codec=bit1 max_drop={MAX_DROP}",
         "xor": "codec=xor",
     }
