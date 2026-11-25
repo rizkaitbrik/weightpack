@@ -277,7 +277,9 @@ Every tensor goes through the same ingest pipeline:
 
 **Fidelity contract.** A lossy layer carries its codec, parameters, eval suite and measured drop. Each domain has a shared default eval suite; a layer's author can add their own, and the build gates on both. `wpk pull --exact` refuses lossy layers. `wpk build` fails when the drop exceeds `max_drop`. The source digest stays in the record, so a lossless rebuild is possible while the original is still reachable.
 
-**Garbage collection.** Blobs are reference-counted by manifests. `wpk prune` removes blobs no tag reaches, as `docker image prune` does.
+**Garbage collection.** Blobs are reference-counted by manifests. `wpk rm` untags images and `wpk prune` removes every blob no tag reaches, as `docker image prune` does, along with stale build-cache entries and old temporary files (`--downloads` also clears the `hf://` cache, `--dry-run` only counts). The daemon holds builds, pulls, pushes, squashes, exports and tag changes off while it prunes, so nothing in use is deleted.
+
+**Build cache.** A rebuild of unchanged sources reads nothing. The builder remembers which blob each set of source tensors (or each meta file, or each XOR import over a given parent chain) became, keyed by file identity: device, inode, size, and modification and change times, as git's index does. The change time moves on any write and cannot be set back, so an edited file never looks unchanged, and an entry only counts while its blob is still in the store. `wpk build --no-cache` reads everything again.
 
 ## Runtime
 

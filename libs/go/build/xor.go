@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -95,6 +96,19 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 			"a lossless import keeps the parent's tokenizer, so this fine-tune cannot be imported over it")
 	}
 
+	// The cache remembers the deltas these exact files gave over this exact
+	// parent chain; a hit needs no worker at all.
+	xorKey := b.cache.xorKey(parent.Chain, req.TargetFiles)
+	if hit, ok := b.cache.getXOR(b.store, xorKey); ok {
+		for _, e := range hit.Tensors {
+			b.blobs[layer.ID] = append(b.blobs[layer.ID], ocispec.Descriptor{
+				MediaType: xorMediaType, Digest: digest.Digest(e.Digest), Size: e.Size,
+				Annotations: map[string]string{spec.AnnotationLayer: layer.ID, spec.AnnotationTensor: e.Tensor},
+			})
+		}
+		return b.finishXOR(step, layer, parent, len(hit.Tensors), hit.Unchanged, hit.Raw, true)
+	}
+
 	staging, err := b.store.TempDir("encode-")
 	if err != nil {
 		return err
@@ -131,7 +145,9 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 		return fail("%s", WorkerError(err))
 	}
 
-	var raw, stored int64
+	var raw int64
+	var entry cachedXOR
+	entry.Unchanged = resp.Unchanged
 	for _, t := range resp.Tensors {
 		want := base.tensors[t.Name]
 		if t.File == "" || t.File != filepath.Base(t.File) || strings.HasPrefix(t.File, ".") {
@@ -167,9 +183,22 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 		}
 		b.blobs[layer.ID] = append(b.blobs[layer.ID], d)
 		raw += size
+		entry.Tensors = append(entry.Tensors, cachedTensor{Tensor: t.Name, Digest: d.Digest.String(), Size: d.Size})
+	}
+	entry.Raw = raw
+	if entry.Tensors == nil {
+		entry.Tensors = []cachedTensor{}
+	}
+	b.cache.store(xorKey, entry)
+	return b.finishXOR(step, layer, parent, len(resp.Tensors), resp.Unchanged, raw, false)
+}
+
+// finishXOR seals an XOR layer once its blobs are in place.
+func (b *builder) finishXOR(step string, layer, parent *spec.Layer, changed int, unchanged, raw int64, cached bool) error {
+	var stored int64
+	for _, d := range b.blobs[layer.ID] {
 		stored += d.Size
 	}
-
 	var refs []spec.BlobRef
 	for _, d := range b.blobs[layer.ID] {
 		refs = append(refs, spec.BlobRefFromDescriptor(d))
@@ -181,8 +210,12 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 	if raw > 0 {
 		ratio = fmt.Sprintf("%s of deltas stored in %s (%.0f%%)", api.FormatSize(raw), api.FormatSize(stored), 100*float64(stored)/float64(raw))
 	}
-	b.progress(api.Event{Step: step, Message: fmt.Sprintf("XOR delta: %d tensors changed, %d unchanged; %s",
-		len(resp.Tensors), resp.Unchanged, ratio)})
+	note := ""
+	if cached {
+		note = " (from the build cache)"
+	}
+	b.progress(api.Event{Step: step, Message: fmt.Sprintf("XOR delta: %d tensors changed, %d unchanged; %s%s",
+		changed, unchanged, ratio, note)})
 	return nil
 }
 

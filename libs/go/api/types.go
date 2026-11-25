@@ -10,6 +10,8 @@
 //	POST /v1/tag                   TagRequest -> TagResponse
 //	POST /v1/squash                SquashRequest -> NDJSON stream of Event
 //	POST /v1/export                ExportRequest -> NDJSON stream of Event
+//	POST /v1/rm                    RmRequest -> RmResponse
+//	POST /v1/prune                 PruneRequest -> PruneResponse
 //	GET  /v1/images                -> []Image
 //	GET  /v1/images/inspect?ref=R  -> ImageDetail
 package api
@@ -27,6 +29,35 @@ import (
 type BuildRequest struct {
 	Weightfile string   `json:"weightfile"`
 	Tags       []string `json:"tags,omitempty"`
+	// NoCache reads and hashes every source again.
+	NoCache bool `json:"no_cache,omitempty"`
+}
+
+// RmRequest untags images.
+type RmRequest struct {
+	Refs []string `json:"refs"`
+}
+
+// RmResponse lists the tags removed.
+type RmResponse struct {
+	Removed []string `json:"removed"`
+}
+
+// PruneRequest asks the daemon to delete blobs no tagged image reaches.
+type PruneRequest struct {
+	DryRun bool `json:"dry_run,omitempty"`
+	// Downloads also removes the hf:// download cache.
+	Downloads bool `json:"downloads,omitempty"`
+}
+
+// PruneResponse says what a prune removed, or would remove.
+type PruneResponse struct {
+	Blobs         int   `json:"blobs"`
+	Bytes         int64 `json:"bytes"`
+	KeptBlobs     int   `json:"kept_blobs"`
+	KeptBytes     int64 `json:"kept_bytes"`
+	CacheEntries  int   `json:"cache_entries"`
+	DownloadBytes int64 `json:"download_bytes"`
 }
 
 // PushRequest asks the daemon to push a local image. Ref must name a

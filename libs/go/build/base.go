@@ -148,7 +148,7 @@ func (b *builder) ingestBase(from weightfile.From, layer *spec.Layer) (*baseMode
 	// small ones.
 	base := &baseModel{tensors: make(map[string]safetensors.Tensor, len(all)), tokenizer: tokenizer}
 	infos := make([]spec.TensorInfo, 0, len(all))
-	var small []safetensors.Entry
+	var small []tensorRef
 	// Report about every tenth of the base, and never more often than every
 	// 256 MB, so small models stay quiet.
 	reportEvery := max(total/10, 256<<20)
@@ -157,12 +157,12 @@ func (b *builder) ingestBase(from weightfile.From, layer *spec.Layer) (*baseMode
 		t := lt.t
 		base.tensors[t.Name] = t
 		infos = append(infos, spec.TensorInfo{Name: t.Name, DType: t.DType, Shape: t.Shape})
-		entry := safetensors.Entry{Name: t.Name, DType: t.DType, Shape: t.Shape, Data: lt.file.Data(t)}
+		r := tensorRef{file: lt.file, t: t, name: t.Name}
 		if t.Size < PackThreshold {
-			small = append(small, entry)
+			small = append(small, r)
 			continue
 		}
-		d, err := b.putTensors([]safetensors.Entry{entry}, spec.MediaTypeTensor,
+		d, err := b.putTensors([]tensorRef{r}, spec.MediaTypeTensor,
 			map[string]string{spec.AnnotationLayer: layer.ID, spec.AnnotationTensor: t.Name})
 		if err != nil {
 			return nil, fail("tensor %s: %v", t.Name, err)
@@ -197,13 +197,36 @@ func (b *builder) ingestBase(from weightfile.From, layer *spec.Layer) (*baseMode
 	return base, nil
 }
 
-// putTensors stores entries as one canonical safetensors blob.
-func (b *builder) putTensors(entries []safetensors.Entry, mediaType string, annotations map[string]string) (ocispec.Descriptor, error) {
-	r, _, err := safetensors.NewReader(entries, nil)
+// tensorRef is a tensor to store: its bytes in an open safetensors file,
+// and the name it is stored under.
+type tensorRef struct {
+	file *safetensors.File
+	t    safetensors.Tensor
+	name string
+}
+
+// putTensors stores tensors as one canonical safetensors blob. The build
+// cache remembers which blob these exact source bytes became, so a rebuild
+// of unchanged files does not read them again.
+func (b *builder) putTensors(refs []tensorRef, mediaType string, annotations map[string]string) (ocispec.Descriptor, error) {
+	key := b.cache.tensorsKey(refs, mediaType)
+	if d, ok := b.cache.get(b.store, key); ok {
+		d.MediaType, d.Annotations = mediaType, annotations
+		return d, nil
+	}
+	entries := make([]safetensors.Entry, len(refs))
+	for i, r := range refs {
+		entries[i] = safetensors.Entry{Name: r.name, DType: r.t.DType, Shape: r.t.Shape, Data: r.file.Data(r.t)}
+	}
+	rd, _, err := safetensors.NewReader(entries, nil)
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	return b.put(r, mediaType, annotations)
+	d, err := b.put(rd, mediaType, annotations)
+	if err == nil {
+		b.cache.set(key, d)
+	}
+	return d, err
 }
 
 // weightFiles lists a model directory's safetensors files: the ones named by
