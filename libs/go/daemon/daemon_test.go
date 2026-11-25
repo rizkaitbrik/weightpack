@@ -283,3 +283,43 @@ func TestServingEndpoints(t *testing.T) {
 		t.Errorf("prune: %+v, %v", res, err)
 	}
 }
+
+func TestDoctor(t *testing.T) {
+	s, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt := serving.New(serving.Config{
+		Store: s, Device: "cpu", Endpoint: "http://127.0.0.1:8090/v1",
+		Engines: map[string][]string{serving.EngineReference: {"no-such-engine-binary"}},
+	})
+	c := serveUnix(t, s, WithRuntime(rt))
+	report, err := c.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]api.Check{}
+	for _, ch := range report.Checks {
+		got[ch.Name] = ch
+	}
+	for name, want := range map[string]string{
+		"wpkd": api.CheckOK, "build worker": api.CheckFail, "device": api.CheckOK,
+		"reference engine": api.CheckFail, "vllm": api.CheckSkip, "gateway": api.CheckOK,
+		"store": "", "hugging face": api.CheckSkip,
+	} {
+		ch, ok := got[name]
+		if !ok {
+			t.Errorf("no %s check in %+v", name, report.Checks)
+			continue
+		}
+		if want != "" && ch.Status != want {
+			t.Errorf("%s: %s (%s), want %s", name, ch.Status, ch.Detail, want)
+		}
+		if (ch.Status == api.CheckFail || ch.Status == api.CheckWarn) && ch.Fix == "" {
+			t.Errorf("%s fails without a fix", name)
+		}
+	}
+	if !strings.Contains(got["device"].Detail, "cpu (set with wpkd --device)") {
+		t.Errorf("device: %s", got["device"].Detail)
+	}
+}

@@ -215,3 +215,15 @@ def test_generates_on_metal(tmp_path):
     text, n, _ = engine.generate("styled", ids, {"max_tokens": 6, "temperature": 0})
     assert n == 6 and text
     assert next(engine.peft.parameters()).device.type == "mps"
+
+
+def test_check(capsys):
+    from weightpack_worker.engine import main
+
+    assert main(["--check"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["torch"] == torch.__version__
+    assert report["mps"] == torch.backends.mps.is_available()
+    assert report["cuda"] == torch.cuda.is_available()
+    with pytest.raises(SystemExit):
+        main([])  # --model is required to serve

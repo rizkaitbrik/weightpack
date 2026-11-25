@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import time
+import urllib.request
 
 import numpy as np
 import pytest
@@ -154,6 +155,16 @@ class Timer:
         return out
 
 
+def post_json(url, body):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=600) as r:
+        return json.loads(r.read())
+
+
 def store_bytes(wp):
     return sum(p.stat().st_size for p in (wp.root / "blobs").rglob("*") if p.is_file())
 
@@ -272,6 +283,7 @@ def test_real_model_end_to_end(models, registry, stores, tmp_path):
     timer("export mix", b.wpk, "export", "-o", str(split), ref)
     base_exported = load(split / "base")
     base_original = load(models["base"])
+    want_tokens = {}
     share, worst = compare(base_exported.state_dict(), base_original.state_dict())
     assert share == 1.0, "the exported base must be the original, bit for bit"
     for name in ADAPTERS:
@@ -288,10 +300,59 @@ def test_real_model_end_to_end(models, registry, stores, tmp_path):
             f" {tok.decode(g1)!r}"
         )
         assert g1 == g2, name
+        want_tokens[name] = g2
 
     # 5. The export rebuilds to the same image.
     rebuilt = timer("rebuild from export", b.wpk, "build", str(split))
     assert mix["digest"] in rebuilt
+
+    # 6. Serve the mix: one engine holds the base, each expert is an adapter
+    #    in it, and the gateway answers what PEFT generates with the
+    #    original adapters. CPU, so the numbers match PEFT's exactly.
+    out = timer(
+        "wpk run (cpu)", b.wpk, "run", "--device", "cpu", "--name", "tasks", ref
+    )
+    endpoint = re.search(r"endpoint\s+(\S+)", out).group(1)
+    for name in ADAPTERS:
+        body = {
+            "model": f"tasks/{name}",
+            "messages": [{"role": "user", "content": PROMPTS[name]}],
+            "max_tokens": 32,
+            "temperature": 0,
+        }
+        t = time.monotonic()
+        got = post_json(endpoint + "/chat/completions", body)
+        secs = time.monotonic() - t
+        text = got["choices"][0]["message"]["content"]
+        report.append(f"  served tasks/{name} in {secs:.1f} s: {text!r}")
+        assert text == tok.decode(want_tokens[name], skip_special_tokens=True), name
+    b.wpk("stop", "tasks")
+
+    # 6b. The same on this machine's GPU, if it has one: Metal or CUDA
+    #     kernels round differently, so only check that it generates.
+    gpu = "mps" if torch.backends.mps.is_available() else None
+    gpu = "cuda" if torch.cuda.is_available() else gpu
+    if gpu:
+        out = timer(
+            f"wpk run ({gpu})", b.wpk, "run", "--device", gpu, "--name", "tasks", ref
+        )
+        endpoint = re.search(r"endpoint\s+(\S+)", out).group(1)
+        t = time.monotonic()
+        got = post_json(
+            endpoint + "/chat/completions",
+            {
+                "model": "tasks/sql",
+                "messages": [{"role": "user", "content": PROMPTS["sql"]}],
+                "max_tokens": 32,
+                "temperature": 0,
+            },
+        )
+        text = got["choices"][0]["message"]["content"]
+        report.append(
+            f"  served tasks/sql on {gpu} in {time.monotonic() - t:.1f} s: {text!r}"
+        )
+        assert text
+        b.wpk("stop", "tasks")
 
     report.append("  timings:")
     report += [f"    {label:24s} {secs:6.1f} s" for label, secs in timer.rows]

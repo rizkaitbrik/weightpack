@@ -41,6 +41,30 @@ def pick_device(device: str = "auto") -> str:
     return "cpu"
 
 
+def check() -> dict:
+    """What this engine can run on: its libraries and the devices torch
+    sees. wpk doctor reports it."""
+    import peft
+    import torch
+    import transformers
+
+    cuda = torch.cuda.is_available()
+    return {
+        "engine": __version__,
+        "python": sys.version.split()[0],
+        "torch": torch.__version__,
+        "transformers": transformers.__version__,
+        "peft": peft.__version__,
+        "cuda": cuda,
+        "cuda_devices": [
+            torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())
+        ]
+        if cuda
+        else [],
+        "mps": torch.backends.mps.is_available(),
+    }
+
+
 class Engine:
     """One base model and its LoRA adapters, ready to generate."""
 
@@ -386,9 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="weightpack-engine", description=__doc__.splitlines()[0]
     )
-    p.add_argument(
-        "--model", required=True, help="base model directory (Hugging Face layout)"
-    )
+    p.add_argument("--model", help="base model directory (Hugging Face layout)")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "mps", "cpu"])
@@ -409,7 +431,17 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="exit when stdin closes: the engine never outlives its wpkd",
     )
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="print, as JSON, what this engine can run on, and exit",
+    )
     args = p.parse_args(argv)
+    if args.check:
+        print(json.dumps(check()))
+        return 0
+    if not args.model:
+        p.error("--model is required")
 
     engine = Engine(
         args.model, args.device, args.dtype, args.served_model_name, args.chat_template

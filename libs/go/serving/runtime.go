@@ -711,3 +711,6 @@ func (rt *Runtime) Has(name string) bool {
 	defer rt.mu.Unlock()
 	return rt.containers[name] != nil
 }
+
+// Endpoint is the gateway's OpenAI base URL.
+func (rt *Runtime) Endpoint() string { return rt.cfg.Endpoint }

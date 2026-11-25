@@ -53,6 +53,8 @@ func commands() map[string]command {
 		"ps":       {"List running containers", runPs},
 		"stop":     {"Stop containers", runStop},
 		"logs":     {"Print a container's engine log", runLogs},
+		"doctor":   {"Check that wpkd, the worker, the device and the engines work", runDoctor},
+		"service":  {"Install wpkd as a login service (launchd or systemd)", runService},
 	}
 	for name, summary := range planned {
 		cmds[name] = command{summary, notImplemented(name)}

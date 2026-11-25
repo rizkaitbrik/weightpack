@@ -53,14 +53,17 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `libs/go/entropy` | `entropy` | Go | Entropy coders named by media-type suffixes (`+zstd`) |
 | `libs/go/export` | `export` | Go | Export: Hugging Face base, PEFT adapters and a Weightfile that rebuilds the image |
 | `libs/go/squash` | `squash` | Go | Squash: picks the layers, hands blobs to the worker, stores the dense image |
-| `libs/go/serving` | `serving` | Go | Runtime: serving bases, engine processes, adapters, and the gateway that routes by model |
+| `libs/go/serving` | `serving` | Go | Runtime: serving bases, engine processes, adapters, the gateway that routes by model, and doctor's device checks |
+| `libs/go/service` | `service` | Go | `wpk service`: wpkd as a launchd agent or systemd user unit |
 | `libs/go/worker`, `libs/go/workerpb` | `worker-client` | Go | gRPC client for the build worker; generated contract code |
 | `python/worker` | `worker` | Python | Build worker (squash, delta import, codecs) and `weightpack-engine`, the reference serving engine |
 | `python/vllm-plugin` | `vllm-plugin` | Python | vLLM plugin: composition loading, expert pool, routers |
 | `proto/` | `proto` | Protobuf | gRPC contract between `wpkd` and the workers (`npx nx run proto:generate`) |
-| `docs/` | | | Design doc, Weightfile reference |
+| `docs/` | | | Quickstart, design doc, Weightfile reference |
 
 ## Getting started
+
+To use Weightpack, follow the [quickstart](docs/quickstart.md): install, check the machine with `wpk doctor`, build a mix of fine-tunes from the Hugging Face Hub and serve it behind one OpenAI endpoint. To work on it:
 
 Requirements: Node.js 22+, Go 1.24+, Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 

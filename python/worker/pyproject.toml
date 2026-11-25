@@ -99,10 +99,15 @@ fixable = ["ALL"]
 unfixable = []
 
 # The parity dependency group (torch, transformers, peft) is only for the
-# PEFT parity test (npx nx run worker:parity). On Linux, take CPU-only torch
-# wheels instead of the CUDA builds.
+# PEFT parity and serving tests (npx nx run worker:parity). On Linux it takes
+# CPU-only torch wheels instead of the CUDA builds; the serve extra keeps
+# PyPI's torch, which runs on NVIDIA GPUs.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'", group = "parity" }]
+
+[tool.uv]
+# The two want different torch builds on Linux, so they resolve apart.
+conflicts = [[{ extra = "serve" }, { group = "parity" }]]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
