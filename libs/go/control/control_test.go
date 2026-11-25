@@ -352,3 +352,82 @@ func TestCatalogueAndDiscovery(t *testing.T) {
 		}
 	}
 }
+
+func TestPlacementPullsTheTagItRuns(t *testing.T) {
+	reg := newRegistry()
+	reg.set("reg.example/chat:v1", fakeImage{digest: "sha256:c2", base: "b", servingBase: "sb"})
+	a := newFakeAgent(t, "gpu-a", reg)
+	cl := newCluster(t, []*fakeAgent{a}, reg)
+	m := Model{Name: "chat", Image: "reg.example/chat:v1"}
+	ctx := context.Background()
+	for _, c := range []struct {
+		name   string
+		images []api.Image
+		pulls  int
+	}{
+		{"the digest under another name", []api.Image{{Ref: "reg.example/old:v1", Digest: "sha256:c2"}}, 1},
+		{"an older digest under this name", []api.Image{{Ref: "reg.example/chat:v1", Digest: "sha256:c1"}}, 1},
+		{"this name at this digest", []api.Image{{Ref: "reg.example/chat:v1", Digest: "sha256:c2"}}, 0},
+	} {
+		a.mu.Lock()
+		a.images, a.containers, a.pulls = c.images, nil, 0
+		a.mu.Unlock()
+		cl.c.Sync(ctx)
+		if err := cl.c.place(ctx, m, ""); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		ct := a.running()["chat"]
+		if a.pulls != c.pulls || ct.Digest != "sha256:c2" {
+			t.Errorf("%s: %d pulls, running %s", c.name, a.pulls, ct.Digest)
+		}
+	}
+	if !current([]api.Image{{Ref: "reg.example/chat:latest", Digest: "sha256:c2"}}, "reg.example/chat", "sha256:c2") ||
+		!current([]api.Image{{Ref: "x", Digest: "sha256:" + strings.Repeat("a", 64)}}, "reg.example/chat@sha256:"+strings.Repeat("a", 64), "") {
+		t.Error("current misreads a reference without a tag, or with a digest")
+	}
+}
+
+func TestEngineChangeReplacesReplicas(t *testing.T) {
+	reg := newRegistry()
+	reg.set("reg.example/chat:v1", fakeImage{digest: "sha256:c1", base: "b", servingBase: "sb"})
+	a, b := newFakeAgent(t, "gpu-a", reg), newFakeAgent(t, "gpu-b", reg)
+	cl := newCluster(t, []*fakeAgent{a, b}, reg, Model{Name: "chat", Image: "reg.example/chat:v1", Replicas: 1})
+	engineOf := func() []string {
+		var out []string
+		for _, ag := range []*fakeAgent{a, b} {
+			if ct, ok := ag.running()["chat"]; ok {
+				out = append(out, ct.Engine)
+			}
+		}
+		return out
+	}
+	cl.sync(t)
+	if got := engineOf(); len(got) != 1 || got[0] != "reference" {
+		t.Fatalf("engines = %v", got)
+	}
+	cl.setCatalogue(t, Model{Name: "chat", Image: "reg.example/chat:v1", Replicas: 1, Engine: "vllm"})
+	for i := 0; i < 4; i++ {
+		cl.sync(t)
+	}
+	if got := engineOf(); len(got) != 1 || got[0] != "vllm" {
+		t.Errorf("after pinning vllm, engines = %v", got)
+	}
+}
+
+func TestFindPrefersTheExactName(t *testing.T) {
+	cat := Catalogue{Models: []Model{
+		{Name: "foo", Image: "reg.example/foo"},
+		{Name: "foo/bar", Image: "reg.example/foo-bar"},
+		{Name: "foo/bar/baz", Image: "reg.example/baz"},
+	}}
+	for model, want := range map[string]string{
+		"foo": "foo", "foo/x": "foo", "foo/bar": "foo/bar", "foo/bar/x": "foo/bar", "foo/bar/baz": "foo/bar/baz",
+	} {
+		if m, ok := cat.find(model); !ok || m.Name != want {
+			t.Errorf("find(%q) = %q, %v; want %q", model, m.Name, ok, want)
+		}
+	}
+	if _, ok := cat.find("bar"); ok {
+		t.Error("found a model for bar")
+	}
+}

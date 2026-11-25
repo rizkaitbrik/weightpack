@@ -92,13 +92,19 @@ func (c *Catalogue) Check() error {
 	return nil
 }
 
-// find returns the catalogue model a request's model name belongs to:
-// the model itself, or the MIX whose expert it names.
+// find returns the catalogue model a request's model name belongs to: the
+// model of that exact name, or else the MIX whose expert it names. Names
+// may nest (foo and foo/bar), so the longest matching prefix wins.
 func (c *Catalogue) find(model string) (Model, bool) {
+	var best Model
+	found := false
 	for _, m := range c.Models {
-		if model == m.Name || strings.HasPrefix(model, m.Name+"/") {
+		if model == m.Name {
 			return m, true
 		}
+		if strings.HasPrefix(model, m.Name+"/") && (!found || len(m.Name) > len(best.Name)) {
+			best, found = m, true
+		}
 	}
-	return Model{}, false
+	return best, found
 }

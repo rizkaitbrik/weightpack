@@ -128,7 +128,13 @@ func (a *fakeAgent) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.pulls++
-		a.images = append(a.images, api.Image{Ref: req.Ref, Digest: img.digest, Base: img.base})
+		kept := a.images[:0]
+		for _, im := range a.images {
+			if im.Ref != req.Ref {
+				kept = append(kept, im)
+			}
+		}
+		a.images = append(kept, api.Image{Ref: req.Ref, Digest: img.digest, Base: img.base})
 		stream(api.Event{Transfer: &api.TransferResult{Ref: req.Ref, Digest: img.digest}})
 	case "POST /v1/run":
 		var req api.RunRequest
@@ -152,7 +158,25 @@ func (a *fakeAgent) handle(w http.ResponseWriter, r *http.Request) {
 			stream(api.Event{Error: "this machine already runs its most engines"})
 			return
 		}
-		c := api.Container{Name: req.Name, Image: req.Ref, Digest: img.digest, Base: img.servingBase, Engine: "reference", Device: "cpu", Status: "running", Owner: req.Owner}
+		// The run resolves the reference in the store, as the runtime does.
+		digest := ""
+		for _, im := range a.images {
+			if im.Ref == req.Ref {
+				digest = im.Digest
+			}
+		}
+		if digest == "" {
+			stream(api.Event{Error: "no such image: " + req.Ref})
+			return
+		}
+		engine, device := req.Engine, req.Device
+		if engine == "" {
+			engine = "reference"
+		}
+		if device == "" {
+			device = "cpu"
+		}
+		c := api.Container{Name: req.Name, Image: req.Ref, Digest: digest, Base: img.servingBase, Engine: engine, Device: device, Status: "running", Owner: req.Owner}
 		c.Models = []string{req.Name}
 		if len(img.experts) > 0 {
 			c.Models = nil

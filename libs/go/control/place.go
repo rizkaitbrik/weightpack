@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
+	"github.com/rizkaitbrik/weightpack/libs/go/reference"
 )
 
 // Placement scores. Reusing a running engine beats everything: only the
@@ -157,11 +158,11 @@ func (c *Controller) place(ctx context.Context, m Model, on string) (err error) 
 		return fmt.Errorf("agent %s is gone", target.URL)
 	}
 	c.cfg.Logger.Info("placing", "model", m.Name, "image", m.Image, "digest", res.Digest, "node", target.Node.Name, "agent", a.url)
-	have := false
-	for _, img := range target.Images {
-		have = have || img.Digest == res.Digest
-	}
-	if !have {
+	// The run resolves m.Image in the node's store, so that name must
+	// point at the digest: holding it under another name, or an older
+	// digest under this one, is not enough. A pull of blobs the node holds
+	// moves only the manifest and retags.
+	if !current(target.Images, m.Image, res.Digest) {
 		if _, err := a.client.Pull(ctx, api.PullRequest{Ref: m.Image}, nil); err != nil {
 			return fmt.Errorf("node %s: %w", target.Node.Name, err)
 		}
@@ -172,6 +173,35 @@ func (c *Controller) place(ctx context.Context, m Model, on string) (err error) 
 	a.refresh(ctx)
 	c.cfg.Logger.Info("placed", "model", m.Name, "node", target.Node.Name, "took", time.Since(start).Round(time.Second))
 	return nil
+}
+
+// current reports whether a node's store resolves image to digest: by its
+// own digest when image names one, else by its tag (latest when it has
+// none).
+func current(images []api.Image, image, digest string) bool {
+	r, err := reference.Parse(image)
+	if err != nil {
+		return false
+	}
+	if r.Digest != "" {
+		digest = r.Digest
+	} else if r.Tag == "" {
+		r.Tag = reference.DefaultTag
+	}
+	for _, img := range images {
+		if img.Digest == digest && (r.Digest != "" || img.Ref == r.String()) {
+			return true
+		}
+	}
+	return false
+}
+
+// fresh reports whether a running replica is what the catalogue asks for:
+// its image reference at the digest it resolves to now, on the engine
+// and device the model pins, if it pins them.
+func fresh(ct api.Container, m Model, digest string) bool {
+	return ct.Image == m.Image && ct.Digest == digest &&
+		(m.Engine == "" || ct.Engine == m.Engine) && (m.Device == "" || ct.Device == m.Device)
 }
 
 // reconcile moves each catalogue model one step toward its replicas:
@@ -226,12 +256,12 @@ func (c *Controller) reconcileModel(ctx context.Context, m Model, states []agent
 		c.setStatus(m.Name, fmt.Errorf("resolve %s: %w", m.Image, err))
 		return
 	}
-	// A replica is stale when the catalogue names another image, or its
-	// tag has moved to another digest.
-	var fresh, stale []agentState
+	// A replica is stale when the catalogue names another image, engine or
+	// device, or its tag has moved to another digest.
+	var good, stale []agentState
 	for _, s := range running {
-		if ct, _ := s.container(m.Name); ct.Digest == res.Digest && ct.Image == m.Image {
-			fresh = append(fresh, s)
+		if ct, _ := s.container(m.Name); fresh(ct, m, res.Digest) {
+			good = append(good, s)
 		} else {
 			stale = append(stale, s)
 		}
@@ -241,7 +271,7 @@ func (c *Controller) reconcileModel(ctx context.Context, m Model, states []agent
 		target = len(running) // on demand: keep as many as run
 	}
 	switch {
-	case len(fresh) < target:
+	case len(good) < target:
 		_, err := choose(states, m, res)
 		switch {
 		case err == nil:
@@ -255,9 +285,9 @@ func (c *Controller) reconcileModel(ctx context.Context, m Model, states []agent
 		}
 	case len(stale) > 0:
 		c.stop(ctx, stale[0].URL, m.Name)
-	case len(fresh) > target:
-		sort.Slice(fresh, func(i, j int) bool { return fresh[i].Inflight < fresh[j].Inflight })
-		c.stop(ctx, fresh[0].URL, m.Name)
+	case len(good) > target:
+		sort.Slice(good, func(i, j int) bool { return good[i].Inflight < good[j].Inflight })
+		c.stop(ctx, good[0].URL, m.Name)
 	}
 }
 
