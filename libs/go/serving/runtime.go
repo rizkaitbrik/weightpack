@@ -94,7 +94,18 @@ type container struct {
 	engine   *engine
 	template string   // the image's chat template, sent with chat requests
 	adapters []string // engine-side adapter names to unload on stop
+	mix      string   // engine-side name of its per-token MIX, if any
 	files    []string // its adapter directories, relative to run/
+}
+
+// unload drops what the container loaded into its engine.
+func (c *container) unload() {
+	if c.mix != "" {
+		c.engine.unloadMix(c.mix)
+	}
+	for _, an := range c.adapters {
+		c.engine.unloadAdapter(an)
+	}
 }
 
 // route is where the gateway sends a model's requests.
@@ -313,14 +324,31 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		c.info.Models = append(c.info.Models, model)
 		upstream[model] = an
 	}
+	if p.mix != nil {
+		// The image's own name routes each token across the experts. Only
+		// the reference engine does that so far; vLLM serves the experts
+		// one per request.
+		if kind == EngineReference {
+			mn := mixName(*p.mix)
+			if err := e.loadMix(ctx, mn, c.adapters, *p.mix); err != nil {
+				c.unload()
+				return nil, fmt.Errorf("run %s: %w", req.Ref, err)
+			}
+			c.mix = mn
+			c.info.Models = append([]string{name}, c.info.Models...)
+			c.info.Router = p.mix.Router
+			upstream[name] = mn
+		} else {
+			progress(api.Event{Step: step, Message: fmt.Sprintf(
+				"%s serves the experts one per request; for model %s, which routes each token, run with --engine reference", kind, name)})
+		}
+	}
 
 	rt.mu.Lock()
 	for _, m := range c.info.Models {
 		if r, taken := rt.routes[m]; taken {
 			rt.mu.Unlock()
-			for _, an := range c.adapters {
-				e.unloadAdapter(an)
-			}
+			c.unload()
 			return nil, fmt.Errorf("model name %q is taken by container %q; pick another name with --name", m, r.c.info.Name)
 		}
 	}
@@ -466,7 +494,8 @@ func (rt *Runtime) acquire(p *plan, kind, device string, maxRank int, modelDir s
 	e := &engine{
 		id: id, key: key, kind: kind, device: device, base: p.base.Chain,
 		served: "base-" + short(p.base.Chain), logPath: filepath.Join(rt.dir, "logs", id+".log"),
-		ready: make(chan struct{}), exited: make(chan struct{}), abort: make(chan struct{}), adapters: map[string]int{}, refs: 1,
+		ready: make(chan struct{}), exited: make(chan struct{}), abort: make(chan struct{}),
+		adapters: map[string]int{}, mixes: map[string]int{}, refs: 1,
 	}
 	if kind == EngineVLLM {
 		// Headroom for adapters that later images on this base bring.
@@ -538,9 +567,7 @@ func (rt *Runtime) Stop(names []string) ([]string, error) {
 	rt.mu.Unlock()
 	var stopped []string
 	for _, c := range cs {
-		for _, an := range c.adapters {
-			c.engine.unloadAdapter(an)
-		}
+		c.unload()
 		rt.release(c.engine)
 		stopped = append(stopped, c.info.Name)
 		rt.cfg.Logger.Info("container stopped", "name", c.info.Name)
@@ -718,6 +745,9 @@ func (rt *Runtime) PruneFiles(dryRun bool) (int64, error) {
 // adapterName is a LoRA layer's name inside an engine. It is the same for
 // the same layer on the same chain, so containers of one image share it.
 func adapterName(a spec.Layer) string { return "lora-" + short(a.Chain) + "-" + a.ID }
+
+// mixName is a MIX's name in the engine: images with the same MIX share it.
+func mixName(m spec.Layer) string { return "mix-" + short(m.Chain) + "-" + m.ID }
 
 func hexOf(d string) string {
 	_, h, ok := strings.Cut(d, ":")

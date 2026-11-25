@@ -80,6 +80,14 @@ func fakeEngine(args []string) int {
 
 	var mu sync.Mutex
 	adapters := map[string]string{} // name -> path
+	type mix struct {
+		Experts []string `json:"experts"`
+		TopK    int      `json:"top_k"`
+		Targets []string `json:"targets"`
+		Blocks  string   `json:"blocks"`
+		Router  string   `json:"router"`
+	}
+	mixes := map[string]mix{}
 	answer := func(w http.ResponseWriter, status int, v any) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -95,6 +103,9 @@ func fakeEngine(args []string) int {
 		defer mu.Unlock()
 		ids := []string{*served}
 		for n := range adapters {
+			ids = append(ids, n)
+		}
+		for n := range mixes {
 			ids = append(ids, n)
 		}
 		answer(w, 200, map[string]any{"data": ids})
@@ -129,7 +140,50 @@ func fakeEngine(args []string) int {
 			fail400(w, 404, "adapter "+b.LoraName+" is not loaded")
 			return
 		}
+		for n, m := range mixes {
+			for _, e := range m.Experts {
+				if e == b.LoraName {
+					fail400(w, 400, "adapter "+b.LoraName+" is an expert of mix "+n)
+					return
+				}
+			}
+		}
 		delete(adapters, b.LoraName)
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("POST /v1/load_mix", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Name string `json:"mix_name"`
+			mix
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range b.Experts {
+			if _, ok := adapters[e]; !ok {
+				fail400(w, 404, "unknown model or field '"+e+"'")
+				return
+			}
+		}
+		if _, ok := mixes[b.Name]; ok || b.TopK < 1 || len(b.Targets) == 0 || b.Router != "arrow" {
+			fail400(w, 400, "bad mix "+b.Name)
+			return
+		}
+		mixes[b.Name] = b.mix
+		w.WriteHeader(200)
+	})
+	mux.HandleFunc("POST /v1/unload_mix", func(w http.ResponseWriter, r *http.Request) {
+		var b struct {
+			Name string `json:"mix_name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&b)
+		mu.Lock()
+		defer mu.Unlock()
+		if _, ok := mixes[b.Name]; !ok {
+			fail400(w, 404, "mix "+b.Name+" is not loaded")
+			return
+		}
+		delete(mixes, b.Name)
 		w.WriteHeader(200)
 	})
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
@@ -141,12 +195,16 @@ func fakeEngine(args []string) int {
 		_ = json.NewDecoder(r.Body).Decode(&b)
 		mu.Lock()
 		path, isAdapter := adapters[b.Model]
+		m, isMix := mixes[b.Model]
 		mu.Unlock()
-		if b.Model != *served && !isAdapter {
+		if b.Model != *served && !isAdapter && !isMix {
 			fail400(w, 404, "model "+b.Model+" does not exist")
 			return
 		}
 		content := b.Model + "|" + filepath.Base(path) + "|" + b.ChatTemplate
+		if isMix {
+			content = fmt.Sprintf("%s|top%d of %s on %s|%s", b.Model, m.TopK, strings.Join(m.Experts, ","), strings.Join(m.Targets, ","), b.ChatTemplate)
+		}
 		if !b.Stream {
 			answer(w, 200, map[string]any{"id": "c1", "object": "chat.completion", "model": b.Model,
 				"choices": []any{map[string]any{"index": 0, "message": map[string]string{"role": "assistant", "content": content}}}})

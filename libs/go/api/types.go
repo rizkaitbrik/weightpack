@@ -127,6 +127,9 @@ type Container struct {
 	Base string `json:"base"`
 	// Adapters are the layers served as LoRA adapters on that base.
 	Adapters []string `json:"adapters,omitempty"`
+	// Router is set ("arrow") when the model named Name routes each token
+	// across a MIX's experts; Name/<expert> still picks one expert.
+	Router string `json:"router,omitempty"`
 	// Status is "running", or "exited" when the engine died (Error says
 	// why; wpk logs shows its output).
 	Status  string    `json:"status"`

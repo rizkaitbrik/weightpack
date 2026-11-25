@@ -16,6 +16,8 @@ torch = pytest.importorskip("torch")
 peft = pytest.importorskip("peft")
 transformers = pytest.importorskip("transformers")
 
+from weightpack_worker.engine import Engine  # noqa: E402
+
 from .test_engine import PROMPT, direct, tiny_model  # noqa: E402
 
 
@@ -34,6 +36,20 @@ def chat(endpoint, model, **extra):
     )
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read())
+
+
+def direct_mix(base, experts, top_k, targets, max_tokens=8):
+    """What the engine's per-token routing generates for these experts,
+    without wpkd."""
+    engine = Engine(str(base), device="cpu")
+    for name, path in experts.items():
+        engine.load_adapter(name, str(path))
+    engine.load_mix("mix", list(experts), top_k, targets)
+    ids = engine.encode_chat(PROMPT)
+    text, _, _ = engine.generate(
+        "mix", ids, {"max_tokens": max_tokens, "temperature": 0}
+    )
+    return text
 
 
 def test_run_serves_images_on_one_engine(weightpack, tmp_path):
@@ -62,6 +78,7 @@ def test_run_serves_images_on_one_engine(weightpack, tmp_path):
     weightpack.wpk("run", "--device", "cpu", "plain")
     out = weightpack.wpk("run", "--device", "cpu", "domains")
     assert "domains/one" in out and "domains/two" in out
+    assert "domains  (routes each token across the experts: arrow)" in out, out
 
     ps = weightpack.wpk("ps")
     rows = [line.split() for line in ps.splitlines()[1:]]
@@ -82,10 +99,16 @@ def test_run_serves_images_on_one_engine(weightpack, tmp_path):
     assert chat(endpoint, "domains/two")["choices"][0]["message"]["content"] == direct(
         base, tmp_path / "adapter2", tok
     )
+    # The image's own name routes each token between the two experts.
+    mixed = chat(endpoint, "domains")
+    assert mixed["model"] == "domains"
+    assert mixed["choices"][0]["message"]["content"] == direct_mix(
+        base, {"one": adapter, "two": tmp_path / "adapter2"}, 1, ["q", "k", "v", "o"]
+    )
 
     with urllib.request.urlopen(endpoint + "/models") as r:
         ids = [m["id"] for m in json.loads(r.read())["data"]]
-    assert ids == ["domains/one", "domains/two", "plain", "styled"]
+    assert ids == ["domains", "domains/one", "domains/two", "plain", "styled"]
     with pytest.raises(urllib.error.HTTPError) as err:
         chat(endpoint, "nope")
     assert err.value.code == 404

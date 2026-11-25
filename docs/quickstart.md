@@ -89,12 +89,13 @@ wpk run qwen-tasks
 ```text
 Running qwen-tasks on the reference engine (mps)
   endpoint  http://127.0.0.1:8090/v1
+  model     qwen-tasks  (routes each token across the experts: arrow)
   model     qwen-tasks/python
   model     qwen-tasks/sql
   model     qwen-tasks/math
 ```
 
-Each expert is its own model name, so a request picks one:
+`qwen-tasks` itself picks experts token by token, with the Arrow router: a prompt that mixes SQL and arithmetic can use both experts in one reply. Arrow needs no training, but it routes coarsely; when you know the domain, name the expert. Each expert is its own model name, so a request picks one:
 
 ```bash
 curl http://127.0.0.1:8090/v1/chat/completions -H 'Content-Type: application/json' -d '{

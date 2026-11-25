@@ -47,6 +47,10 @@ func runRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "  endpoint  %s\n", c.Endpoint)
 	}
 	for _, m := range c.Models {
+		if m == c.Name && c.Router != "" {
+			fmt.Fprintf(stdout, "  model     %s  (routes each token across the experts: %s)\n", m, c.Router)
+			continue
+		}
 		fmt.Fprintf(stdout, "  model     %s\n", m)
 	}
 	if c.Endpoint != "" && len(c.Models) > 0 {
