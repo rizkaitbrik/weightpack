@@ -10,7 +10,7 @@
 #     affinity), and one on another base goes to the other node,
 #   - chat requests (plain and streamed) are answered.
 #
-# Needs docker, kind, helm, kubectl, go and uv. KEEP=1 leaves the cluster.
+# Needs docker, kind, helm, kubectl, go, uv and jq. KEEP=1 leaves the cluster.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
@@ -96,7 +96,7 @@ auth=(-H "Authorization: Bearer e2e-key")
 for _ in $(seq 50); do curl -sf "${auth[@]}" "$api/healthz" >/dev/null && break; sleep 0.2; done
 
 cluster() { curl -sf "${auth[@]}" "$api/v1/cluster"; }
-node_of() { cluster | python3 -c "import json,sys; m={x['name']: x['running'] for x in json.load(sys.stdin)['models']}; print(','.join(m.get('$1') or []))"; }
+node_of() { cluster | jq -r --arg m "$1" '[.models[]? | select(.name == $m) | .running[]?] | join(",")'; }
 chat() {
   curl -sf "${auth[@]}" "$api/v1/chat/completions" -H 'Content-Type: application/json' \
     -d "{\"model\": \"$1\", \"messages\": [{\"role\": \"user\", \"content\": \"t1 t2 t3\"}], \"max_tokens\": 4, \"temperature\": 0 ${2:-}}"
@@ -107,10 +107,12 @@ for _ in $(seq 150); do [ -n "$(node_of styled)" ] && break; sleep 2; done
 styled_node=$(node_of styled)
 [ -n "$styled_node" ] || { echo "styled never started"; cluster; exit 1; }
 echo "styled runs on $styled_node"
-chat styled | python3 -c "import json,sys; r=json.load(sys.stdin); assert r['model'] == 'styled', r; print('styled answered:', repr(r['choices'][0]['message']['content']))"
+chat styled | jq -e '.model == "styled"' >/dev/null || { echo "styled did not answer"; exit 1; }
+echo "styled answered"
 
 log "an on-demand model on the same base joins its engine"
-chat domains/two | python3 -c "import json,sys; r=json.load(sys.stdin); assert r['model'] == 'domains/two', r; print('domains/two answered')"
+chat domains/two | jq -e '.model == "domains/two"' >/dev/null || { echo "domains/two did not answer"; exit 1; }
+echo "domains/two answered"
 [ "$(node_of domains)" = "$styled_node" ] || { echo "domains went to $(node_of domains), not $styled_node"; exit 1; }
 echo "domains runs on $styled_node too"
 
