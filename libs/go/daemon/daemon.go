@@ -25,6 +25,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/squash"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
+	"github.com/rizkaitbrik/weightpack/libs/go/trust"
 	"github.com/rizkaitbrik/weightpack/libs/go/worker"
 )
 
@@ -38,6 +39,9 @@ type server struct {
 	hf      *hf.Client
 	runtime *serving.Runtime
 	ops     sync.RWMutex // shared by store operations, exclusive for prune
+
+	sigstore *trust.Sigstore
+	trustMu  sync.Mutex // serializes trust policy writes
 }
 
 // shared runs h holding the store lock shared.
@@ -72,6 +76,9 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	for _, o := range opts {
 		o(srv)
 	}
+	if srv.sigstore == nil {
+		srv.sigstore = &trust.Sigstore{CacheDir: filepath.Join(s.Root(), "sigstore")}
+	}
 	if srv.runtime != nil {
 		srv.runtime.SetStoreLock(srv.ops.RLocker())
 	}
@@ -98,6 +105,12 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	mux.HandleFunc("POST /v1/stop", srv.serving(srv.stop))
 	mux.HandleFunc("GET /v1/containers/logs", srv.serving(srv.logs))
 	mux.HandleFunc("GET /v1/doctor", srv.doctor)
+	// Signatures live in registries, not the store.
+	mux.HandleFunc("POST /v1/resolve", srv.resolve)
+	mux.HandleFunc("POST /v1/signatures", srv.attach)
+	mux.HandleFunc("POST /v1/verify", srv.verify)
+	mux.HandleFunc("GET /v1/trust", srv.getTrust)
+	mux.HandleFunc("PUT /v1/trust", srv.putTrust)
 	return mux
 }
 
@@ -185,11 +198,11 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 }
 
 // pullForBuild fetches an image a Weightfile names when the store lacks it,
-// as docker build pulls a missing FROM image. Registries on loopback
-// addresses use plain HTTP; for another insecure registry, wpk pull
-// --plain-http the image first.
+// as docker build pulls a missing FROM image, under the same trust policy
+// as wpk pull. Registries on loopback addresses use plain HTTP; for another
+// insecure registry, wpk pull --plain-http the image first.
 func (s *server) pullForBuild(ctx context.Context, ref string, progress func(api.Event)) error {
-	_, err := registry.Pull(ctx, s.store, ref, registry.Options{}, progress)
+	_, err := registry.Pull(ctx, s.store, ref, s.pullOptions(false, false), progress)
 	return err
 }
 
@@ -213,7 +226,7 @@ func (s *server) pull(w http.ResponseWriter, r *http.Request) {
 	}
 	send := startStream(w)
 	s.log.Info("pull started", "ref", req.Ref, "exact", req.Exact)
-	res, err := registry.Pull(r.Context(), s.store, req.Ref, registry.Options{PlainHTTP: req.PlainHTTP, Exact: req.Exact}, send)
+	res, err := registry.Pull(r.Context(), s.store, req.Ref, s.pullOptions(req.PlainHTTP, req.Exact), send)
 	s.finishTransfer("pull", req.Ref, res, err, send)
 }
 

@@ -171,6 +171,41 @@ func (c *Client) Pull(ctx context.Context, req PullRequest, onEvent func(Event))
 	return c.transfer(ctx, "/v1/pull", req, onEvent)
 }
 
+// Resolve asks which manifest a remote reference names.
+func (c *Client) Resolve(ctx context.Context, req ResolveRequest) (*ResolveResponse, error) {
+	var out ResolveResponse
+	return &out, c.postJSON(ctx, "/v1/resolve", req, &out)
+}
+
+// Attach stores a signature bundle next to a remote image.
+func (c *Client) Attach(ctx context.Context, req AttachRequest) (*AttachResponse, error) {
+	var out AttachResponse
+	return &out, c.postJSON(ctx, "/v1/signatures", req, &out)
+}
+
+// Verify checks a remote image's signatures.
+func (c *Client) Verify(ctx context.Context, req VerifyRequest) (*VerifyResponse, error) {
+	var out VerifyResponse
+	return &out, c.postJSON(ctx, "/v1/verify", req, &out)
+}
+
+// Trust returns the daemon's trust policy.
+func (c *Client) Trust(ctx context.Context) (*TrustPolicy, error) {
+	var out TrustPolicy
+	return &out, c.getJSON(ctx, "/v1/trust", &out)
+}
+
+// SetTrust replaces the daemon's trust policy and returns it as stored.
+func (c *Client) SetTrust(ctx context.Context, p TrustPolicy) (*TrustPolicy, error) {
+	resp, err := c.do(ctx, http.MethodPut, "/v1/trust", p)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	var out TrustPolicy
+	return &out, json.NewDecoder(resp.Body).Decode(&out)
+}
+
 // Rm untags images.
 func (c *Client) Rm(ctx context.Context, req RmRequest) (*RmResponse, error) {
 	var out RmResponse

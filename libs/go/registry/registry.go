@@ -40,6 +40,11 @@ type Options struct {
 	PlainHTTP bool
 	// Exact makes a pull refuse images with lossy layers.
 	Exact bool
+	// Verify, when set, runs on every pull once the reference resolves and
+	// before anything else is fetched. It checks the manifest's signatures
+	// and returns who signed, or "" for an image it takes unsigned; an
+	// error refuses the image.
+	Verify func(ctx context.Context, r reference.Reference, repo *remote.Repository, root ocispec.Descriptor) (string, error)
 }
 
 // concurrency is how many blobs move at once.
@@ -103,24 +108,19 @@ func Pull(ctx context.Context, s *store.Store, ref string, opts Options, progres
 	if progress == nil {
 		progress = func(api.Event) {}
 	}
-	r, err := remoteRef(ref, "pull")
+	r, repo, root, err := Resolve(ctx, ref, "pull", opts)
 	if err != nil {
 		return nil, err
 	}
-	if r.Tag == "" && r.Digest == "" {
-		r.Tag = reference.DefaultTag
-	}
-	repo, err := newRepository(r, opts)
-	if err != nil {
-		return nil, err
-	}
-	target := r.Digest
-	if target == "" {
-		target = r.Tag
-	}
-	root, err := repo.Resolve(ctx, target)
-	if err != nil {
-		return nil, fmt.Errorf("pull %s: %w", r, err)
+	var verified string
+	if opts.Verify != nil {
+		verified, err = opts.Verify(ctx, r, repo, root)
+		if err != nil {
+			return nil, fmt.Errorf("pull %s: %w", r, err)
+		}
+		if verified != "" {
+			progress(api.Event{Step: "verify " + r.String(), Message: "signed by " + verified})
+		}
 	}
 
 	// Check the manifest and config before fetching any tensor.
@@ -153,6 +153,7 @@ func Pull(ctx context.Context, s *store.Store, ref string, opts Options, progres
 
 	step := "pull " + r.String()
 	res := newResult(r.String(), root, m)
+	res.Verified = verified
 	progress(api.Event{Step: step, Message: fmt.Sprintf("%d blobs, %s, %s base", res.Blobs, api.FormatSize(res.Size), orUnknown(cfg.Arch.Family))})
 	if err := oras.CopyGraph(ctx, repo, local{s}, root, res.copyOptions(step, progress)); err != nil {
 		return nil, fmt.Errorf("pull %s: %w", r, err)
@@ -167,6 +168,42 @@ func Pull(ctx context.Context, s *store.Store, ref string, opts Options, progres
 	}
 	progress(api.Event{Step: step, Message: fmt.Sprintf("fetched %d blobs, %s; the store had the rest", res.Moved, api.FormatSize(res.MovedBytes))})
 	return &res.TransferResult, nil
+}
+
+// Open parses a reference that names a registry host and returns it, with
+// the latest tag when it has neither tag nor digest, and its repository.
+// verb names the operation in errors.
+func Open(ref, verb string, opts Options) (reference.Reference, *remote.Repository, error) {
+	r, err := remoteRef(ref, verb)
+	if err != nil {
+		return reference.Reference{}, nil, err
+	}
+	if r.Tag == "" && r.Digest == "" {
+		r.Tag = reference.DefaultTag
+	}
+	repo, err := newRepository(r, opts)
+	if err != nil {
+		return reference.Reference{}, nil, err
+	}
+	return r, repo, nil
+}
+
+// Resolve opens ref's repository and finds the manifest it names, by
+// digest when it has one, else by tag.
+func Resolve(ctx context.Context, ref, verb string, opts Options) (reference.Reference, *remote.Repository, ocispec.Descriptor, error) {
+	r, repo, err := Open(ref, verb, opts)
+	if err != nil {
+		return reference.Reference{}, nil, ocispec.Descriptor{}, err
+	}
+	target := r.Digest
+	if target == "" {
+		target = r.Tag
+	}
+	root, err := repo.Resolve(ctx, target)
+	if err != nil {
+		return reference.Reference{}, nil, ocispec.Descriptor{}, fmt.Errorf("%s %s: %w", verb, r, err)
+	}
+	return r, repo, root, nil
 }
 
 // remoteRef parses a reference that must name a registry host.

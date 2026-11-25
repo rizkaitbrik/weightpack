@@ -16,7 +16,7 @@
 # 127.0.0.1 as above, or set WPK_GATEWAY_KEY when it is reachable from
 # other machines.
 
-ARG GO_VERSION=1.24
+ARG GO_VERSION=1.27
 ARG PYTHON_VERSION=3.12
 # The CUDA image starts from vLLM's, which brings CUDA, torch and vLLM.
 ARG VLLM_IMAGE=vllm/vllm-openai:latest
