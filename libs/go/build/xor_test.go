@@ -206,14 +206,32 @@ func TestXORLayerRefuses(t *testing.T) {
 	other := filepath.Join(f.dir, "other")
 	buildtest.WriteBase(t, other, 1)
 	buildtest.WriteSafetensors(t, filepath.Join(other, "model.safetensors"), []buildtest.Tensor{{Name: "model.norm.weight", Shape: []int64{7}, Seed: 1}})
+	// A fine-tune that changes how the model computes, not only its weights.
+	rope := filepath.Join(f.dir, "rope")
+	writeFinetune(t, rope, 8)
+	buildtest.WriteJSON(t, filepath.Join(rope, "config.json"), map[string]any{
+		"model_type": "llama", "num_hidden_layers": buildtest.Blocks, "hidden_size": buildtest.Hidden,
+		"rope_theta": 500000.0, "rope_scaling": map[string]any{"type": "linear", "factor": 4},
+	})
 	cases := map[string]struct{ body, want string }{
-		"over a LoRA":   {"FROM ./base\nLAYER french ./adapters/french\nLAYER finance ./finance codec=xor\n", "french is a lora layer"},
-		"another model": {"FROM ./base\nLAYER x ./other codec=xor\n", "which the base does not have"},
+		"over a LoRA":    {"FROM ./base\nLAYER french ./adapters/french\nLAYER finance ./finance codec=xor\n", "french is a lora layer"},
+		"another model":  {"FROM ./base\nLAYER x ./other codec=xor\n", "which the base does not have"},
+		"another config": {"FROM ./base\nLAYER x ./rope codec=xor\n", "config.json differs from its parent's in rope_scaling, rope_theta"},
 	}
 	for name, c := range cases {
 		if _, err := f.buildXOR(t, "Bad.Weightfile", c.body, &xorWorker{}); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want %q", name, err, c.want)
 		}
+	}
+	// How a checkpoint was saved is not how it computes.
+	saved := filepath.Join(f.dir, "saved")
+	writeFinetune(t, saved, 9)
+	buildtest.WriteJSON(t, filepath.Join(saved, "config.json"), map[string]any{
+		"model_type": "llama", "num_hidden_layers": buildtest.Blocks, "hidden_size": float64(buildtest.Hidden),
+		"_name_or_path": "/tmp/run-7", "transformers_version": "5.24.1", "torch_dtype": "bfloat16",
+	})
+	if _, err := f.buildXOR(t, "Saved.Weightfile", "FROM ./base\nLAYER x ./saved codec=xor\n", &xorWorker{}); err != nil {
+		t.Errorf("metadata-only config changes: %v", err)
 	}
 	// LoRA layers can sit on an XOR layer.
 	if _, err := f.buildXOR(t, "Ok.Weightfile", "FROM ./base\nLAYER finance ./finance codec=xor\nLAYER french ./adapters/french\n", &xorWorker{}); err != nil {

@@ -63,7 +63,7 @@ Without `codec=`, or with `codec=lora`, the source is an adapter and is stored a
 
 `eval=` names the suite the build gates on; without it the domain's shared default suite applies. `eval` and `max_drop` are rejected on lossless codecs.
 
-`codec=xor` is supported: the source is a directory of safetensors weights with exactly the base's tensor names, dtypes and shapes, and the layer must sit on the base or on other `xor` layers (LoRA layers can go on top of it). The build needs `wpkd`'s build worker. `wpk import --parent <image | dir> [--id name] -t name <dir>` is shorthand for `FROM <parent>` plus one such layer. `bit1` and `sparse` are not supported yet.
+`codec=xor` is supported: the source is a directory of safetensors weights with exactly the base's tensor names, dtypes and shapes, and the layer must sit on the base or on other `xor` layers (LoRA layers can go on top of it). The image keeps its parent's tokenizer and `config.json`, so the build refuses a fine-tune whose tokenizer or config differs from them in anything but metadata (`_name_or_path`, `transformers_version`, `torch_dtype` and the like): a changed `rope_theta`, say, would otherwise be silently dropped. Build such a fine-tune as a base of its own (`FROM`). The build needs `wpkd`'s build worker. `wpk import --parent <image | dir> [--id name] -t name <dir>` is shorthand for `FROM <parent>` plus one such layer. `bit1` and `sparse` are not supported yet.
 
 ## MIX parameters
 
