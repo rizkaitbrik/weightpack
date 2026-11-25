@@ -95,6 +95,16 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 		return fail("the fine-tune's tokenizer differs from its parent's, so its token ids mean other things; " +
 			"a lossless import keeps the parent's tokenizer, so this fine-tune cannot be imported over it")
 	}
+	differs, supplied, err := b.configDiff(dir, b.blobs[baseLayer.ID])
+	switch {
+	case err != nil:
+		return fail("%v", err)
+	case !supplied:
+		b.progress(api.Event{Step: step, Warning: true, Message: "the fine-tune has no config.json of its own; the image keeps its parent's"})
+	case len(differs) > 0:
+		return fail("the fine-tune's config.json differs from its parent's in %s; a lossless import keeps the parent's config, "+
+			"so the model would run with the parent's settings: build the fine-tune as a base of its own (FROM) instead", strings.Join(differs, ", "))
+	}
 
 	// The cache remembers the deltas these exact files gave over this exact
 	// parent chain; a hit needs no worker at all.
@@ -258,6 +268,64 @@ func (b *builder) sameTokenizer(dir, want string) (same, supplied bool, err erro
 		return false, true, nil
 	}
 	return reflect.DeepEqual(a, p), true, nil
+}
+
+// configMetadata are config.json keys that record how a checkpoint was saved,
+// not how the model computes; a fine-tune may differ from its base in them.
+var configMetadata = []string{
+	"_name_or_path", "transformers_version", "torch_dtype", "dtype", "use_cache",
+	"_attn_implementation", "_attn_implementation_autoset", "attn_implementation",
+}
+
+// configDiff compares the fine-tune's config.json in dir with the base's
+// config.json blob among baseBlobs, and returns the keys whose values
+// differ, metadata aside. supplied is false when dir has no config.json.
+func (b *builder) configDiff(dir string, baseBlobs []ocispec.Descriptor) (differs []string, supplied bool, err error) {
+	mine, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, true, err
+	}
+	var parentDigest string
+	for _, d := range baseBlobs {
+		if spec.BaseMediaType(d.MediaType) == spec.MediaTypeMeta && d.Annotations[spec.AnnotationTitle] == "config.json" {
+			parentDigest = d.Digest.String()
+		}
+	}
+	if parentDigest == "" {
+		return nil, true, fmt.Errorf("the base has no config.json to compare the fine-tune's with")
+	}
+	parent, err := b.store.ReadBlob(parentDigest)
+	if err != nil {
+		return nil, true, err
+	}
+	var a, p map[string]any
+	if err := json.Unmarshal(mine, &a); err != nil {
+		return nil, true, fmt.Errorf("the fine-tune's config.json: %w", err)
+	}
+	if err := json.Unmarshal(parent, &p); err != nil {
+		return nil, true, fmt.Errorf("the base's config.json: %w", err)
+	}
+	for _, k := range configMetadata {
+		delete(a, k)
+		delete(p, k)
+	}
+	keys := map[string]bool{}
+	for k := range a {
+		keys[k] = true
+	}
+	for k := range p {
+		keys[k] = true
+	}
+	for k := range keys {
+		if !reflect.DeepEqual(a[k], p[k]) {
+			differs = append(differs, k)
+		}
+	}
+	slices.Sort(differs)
+	return differs, true, nil
 }
 
 // tokenizerSemantics parses a tokenizer.json and drops the fields that do
