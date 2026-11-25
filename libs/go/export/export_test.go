@@ -13,6 +13,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/build"
 	"github.com/rizkaitbrik/weightpack/libs/go/build/buildtest"
 	"github.com/rizkaitbrik/weightpack/libs/go/safetensors"
+	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 )
 
@@ -305,5 +306,28 @@ func TestPartialExport(t *testing.T) {
 
 	if _, err := Export(context.Background(), f.store, "assistant", Options{Dir: filepath.Join(f.dir, "x"), Adapters: []string{"nope"}}, nil); err == nil || !strings.Contains(err.Error(), `no LoRA layer "nope"`) {
 		t.Errorf("unknown adapter: %v", err)
+	}
+}
+
+// Serving exports the LoRA layer on top of an XOR layer it has already baked
+// into its base; a full export still refuses the XOR layer.
+func TestPartialExportOverAnXORLayer(t *testing.T) {
+	c := &spec.Config{Schema: spec.SchemaV1, Layers: []spec.Layer{
+		{ID: "base", Kind: spec.KindBase},
+		{ID: "finance", Kind: spec.KindDeltaXOR, Parent: "base"},
+		{ID: "style", Kind: spec.KindLoRA, Parent: "finance"},
+	}}
+	p, err := planLayers(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.check(nil); err == nil || !strings.Contains(err.Error(), `"finance" is delta.xor`) {
+		t.Errorf("full export: %v", err)
+	}
+	if err := p.check([]string{"style"}); err != nil {
+		t.Errorf("adapter-only export: %v", err)
+	}
+	if err := p.check([]string{"finance"}); err == nil {
+		t.Error("exporting the XOR layer as an adapter was accepted")
 	}
 }

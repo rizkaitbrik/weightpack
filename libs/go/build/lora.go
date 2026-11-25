@@ -234,9 +234,11 @@ func checkModule(m *loraModule, r int, base *baseModel) error {
 const peftPrefix = "base_model.model."
 
 // isSavedModule reports whether t is a modules_to_save copy: a full tensor,
-// named base_model.model.<base tensor>, of a module the adapter config
-// lists (PEFT matches module names by suffix), with the base tensor's dtype
-// and shape.
+// named base_model.model.<base tensor>, with the base tensor's dtype and
+// shape, inside a module the adapter config lists. PEFT matches module
+// names by suffix and saves every parameter of a listed module, so the
+// module may be the tensor's parent or any ancestor: modules_to_save
+// ["classifier"] saves classifier.dense.weight.
 func isSavedModule(t *safetensors.Tensor, modulesToSave []string, base *baseModel) bool {
 	name, ok := strings.CutPrefix(t.Name, peftPrefix)
 	if !ok {
@@ -246,10 +248,12 @@ func isSavedModule(t *safetensors.Tensor, modulesToSave []string, base *baseMode
 	if !ok || w.DType != t.DType || !slices.Equal(w.Shape, t.Shape) {
 		return false
 	}
-	module := name[:max(strings.LastIndex(name, "."), 0)]
-	for _, m := range modulesToSave {
-		if module == m || strings.HasSuffix(module, "."+m) {
-			return true
+	for module := name; strings.Contains(module, "."); {
+		module = module[:strings.LastIndex(module, ".")]
+		for _, m := range modulesToSave {
+			if module == m || strings.HasSuffix(module, "."+m) {
+				return true
+			}
 		}
 	}
 	return false

@@ -508,13 +508,19 @@ func waitReady(ctx context.Context, e *engine, step string, progress func(api.Ev
 func (rt *Runtime) Stop(names []string) ([]string, error) {
 	rt.mu.Lock()
 	var cs []*container
+	seen := map[string]bool{}
 	for _, n := range names {
 		c := rt.containers[n]
 		if c == nil {
 			rt.mu.Unlock()
 			return nil, fmt.Errorf("%w: %s", ErrNoContainer, n)
 		}
-		cs = append(cs, c)
+		// A name given twice stops its container once: releasing it twice
+		// would stop an engine other containers still use.
+		if !seen[n] {
+			seen[n] = true
+			cs = append(cs, c)
+		}
 	}
 	for _, c := range cs {
 		delete(rt.containers, c.info.Name)
