@@ -1,0 +1,50 @@
+# GoReleaser builds wpk and wpkd for each target and publishes a GitHub
+# release with the archives, checksums.txt, the worker wheel and the install
+# script. The release workflow builds the wheel first (python/worker/dist).
+#
+#   go run github.com/goreleaser/goreleaser/v2@latest release --snapshot --clean
+version: 2
+project_name: weightpack
+
+builds:
+  - &binary
+    id: wpk
+    main: ./apps/wpk
+    binary: wpk
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ignore:
+      # torch publishes no Intel macOS wheels, so the engine cannot run there.
+      - goos: darwin
+        goarch: amd64
+  - <<: *binary
+    id: wpkd
+    main: ./apps/wpkd
+    binary: wpkd
+
+archives:
+  - ids: [wpk, wpkd]
+    formats: [tar.gz]
+    name_template: "weightpack_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md, docs/quickstart.md]
+
+checksum:
+  name_template: checksums.txt
+  extra_files:
+    - glob: ./python/worker/dist/*.whl
+
+release:
+  github:
+    owner: rizkaitbrik
+    name: weightpack
+  extra_files:
+    - glob: ./python/worker/dist/*.whl
+    - glob: ./scripts/install.sh
+
+changelog:
+  use: github
+  filters:
+    exclude: ["^Merge "]

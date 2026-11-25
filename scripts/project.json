@@ -1,0 +1,11 @@
+{
+  "name": "scripts",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "scripts",
+  "tags": ["lang:go", "type:lib"],
+  "targets": {
+    "test": { "executor": "@nx-go/nx-go:test", "options": { "race": true }, "cache": true, "inputs": ["{projectRoot}/**/*"] },
+    "lint": { "executor": "@nx-go/nx-go:lint", "options": { "linter": "go", "args": ["vet"] }, "cache": true }
+  }
+}

@@ -4,7 +4,15 @@ From a fresh machine to a mix of three fine-tunes served behind one OpenAI endpo
 
 ## 1. Install
 
-Until releases are published, install from source. You need Go 1.24+ and [uv](https://docs.astral.sh/uv/).
+Install the latest release, on macOS (Apple Silicon) or Linux. It needs [uv](https://docs.astral.sh/uv/) for the Python parts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rizkaitbrik/weightpack/main/scripts/install.sh | sh
+```
+
+The script puts `wpk` and `wpkd` in `~/.local/bin` (`WPK_INSTALL_DIR` changes that), and installs `weightpack-worker[serve]`, the build worker and the reference engine, with `uv tool install`. It checks every download against the release's `checksums.txt`. `WPK_VERSION=0.2.0` pins a release, and `WPK_SERVICE=1` also runs step 2's `wpk service install`.
+
+Or build from source, with Go 1.24+ and uv:
 
 ```bash
 git clone https://github.com/rizkaitbrik/weightpack
@@ -12,6 +20,16 @@ cd weightpack
 go build -o ~/.local/bin/ ./apps/wpk ./apps/wpkd     # or any directory on your PATH
 uv tool install "./python/worker[serve]"             # weightpack-worker and weightpack-engine
 ```
+
+Or run everything in a container (the store lives in the volume):
+
+```bash
+docker run -d --name wpkd -p 127.0.0.1:8090:8090 -v weightpack:/var/lib/weightpack ghcr.io/rizkaitbrik/weightpack:cpu
+docker run -d --name wpkd --gpus all -p 127.0.0.1:8090:8090 -v weightpack:/var/lib/weightpack ghcr.io/rizkaitbrik/weightpack:cuda
+docker exec wpkd wpk doctor     # then docker exec wpkd wpk … for every command below
+```
+
+`docker/Dockerfile` builds both images from a checkout. The CUDA image starts from vLLM's.
 
 On a machine with an NVIDIA GPU, also install vLLM, which serves many adapters at once and batches requests:
 
