@@ -13,12 +13,15 @@
 # default the arm64 CPU release, on x86 public.ecr.aws/q9t5s3a7/vllm-cpu-
 # release-repo) or VLLM=<path to a vllm executable> whose environment has
 # this plugin installed, such as a CUDA machine's. VLLM_ARGS adds
-# arguments to vllm serve.
+# arguments to vllm serve. DTYPE (default float32) is the dtype vLLM and
+# weightpack-engine run in: vLLM's CUDA LoRA kernels take float16 or
+# bfloat16 only, and with those the engine runs on CUDA too.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 IMAGE=${IMAGE:-public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v0.29.0}
 VLLM=${VLLM:-}
+DTYPE=${DTYPE:-float32}
 NAME=wpk-vllm-e2e
 PORT=${PORT:-18011}
 work=$PWD/tmp/vllm-e2e
@@ -45,7 +48,7 @@ finish() {
 trap finish EXIT
 
 echo "== tiny model, experts and what weightpack-engine generates"
-uv run --project python/worker --group parity python - "$work" "$srv" <<'PY'
+uv run --project python/worker --group parity python - "$work" "$srv" "$DTYPE" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -58,7 +61,7 @@ from tests.test_engine import PROMPT, tiny_model
 from weightpack_worker import router_train
 from weightpack_worker.engine import Engine
 
-work, srv = Path(sys.argv[1]), sys.argv[2]
+work, srv, dtype = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 # The worker's tiny model and tokenizer, with a head size vLLM's CPU
 # attention supports (64, not 16).
 base, _, tok = tiny_model(work)
@@ -105,7 +108,8 @@ for name, top_k in (("mix", 1), ("mix2", 2), ("mix3", 1)):
         desc.update(router="trained", router_file=f"{srv}/router.safetensors")
     (mix / "weightpack_mix.json").write_text(json.dumps(desc))
 
-engine = Engine(str(base), device="cpu", served_name="base")
+device = "cpu" if dtype == "float32" else "cuda"
+engine = Engine(str(base), device=device, dtype=dtype, served_name="base")
 engine.load_adapter("one", str(work / "one"))
 engine.load_adapter("two", str(work / "two"))
 engine.load_mix("mix", ["one", "two"], 1, ["q", "k", "v", "o"])
@@ -121,7 +125,7 @@ print(json.dumps(want, indent=1))
 assert len(set(want.values())) == len(want), "replies are not all different"
 PY
 
-serve_args=(--served-model-name base --enable-lora --max-lora-rank 16 --max-loras 4 --dtype float32 --max-model-len 128)
+serve_args=(--served-model-name base --enable-lora --max-lora-rank 16 --max-loras 4 --dtype "$DTYPE" --max-model-len 128)
 # VLLM_ARGS adds arguments, such as --gpu-memory-utilization 0.4 on a GPU
 # shared with other work.
 if [ -n "${VLLM_ARGS:-}" ]; then
