@@ -110,6 +110,7 @@ func TestSignVerifyTrust(t *testing.T) {
 	mustRun("pull", unsigned)
 	mustRun("trust", "rm", host)
 	mustFail(1, "rejects images from *", "pull", signed)
+	mustFail(1, "rejects images from *", "verify", signed)
 	mustFail(1, "no rule for", "trust", "rm", host)
 	mustFail(2, "give signers", "trust", "set", host, "--accept", "--reject")
 }

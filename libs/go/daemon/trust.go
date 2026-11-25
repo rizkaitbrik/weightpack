@@ -124,6 +124,12 @@ func (s *server) verify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rule := trust.Match(policy, ref)
+		if rule != nil && rule.Action == api.TrustReject {
+			// As pull refuses it (checkPolicy): a check before deploying
+			// must not pass an image the policy forbids.
+			writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("verify %s: the trust policy rejects images from %s (wpk trust ls shows the rules)", ref, rule.Scope))
+			return
+		}
 		if rule == nil || rule.Action != api.TrustSigned {
 			if rule != nil {
 				out.Rule, out.Action = rule.Scope, rule.Action
