@@ -16,6 +16,11 @@ rank and targets, a module routing only among the experts that touch it;
 and the prototypes are exact (an SVD of r x r factors), not power-iterated
 from a random start, so they do not depend on a seed.
 
+A trained router (ROUTER train, router_train.py) keeps Arrow's form and
+starts from it: a token's logit for an expert is |<w_i, x>| + b_i, with a
+weight vector and a bias per expert and module, stored in a router file
+(see load_router). Arrow is the case w_i = prototype_i, b_i = 0.
+
 Modules an expert touches outside the MIX's targets and blocks are not
 applied when it is mixed; the build warns about them. An expert that
 replaces whole modules (PEFT's modules_to_save) cannot be mixed: there is
@@ -83,34 +88,82 @@ def arrow_prototype(a, b):
     return v / v.norm()
 
 
-def arrow_coefficients(x, prototypes, top_k: int):
-    """Per-token expert weights, (tokens, experts) in float32: a softmax over
-    each token's top_k logits |x . prototype|, zero elsewhere. Equal logits
-    go to the expert listed first (torch.topk leaves that order unspecified),
-    so weightpack-vllm picks the same experts."""
+def router_logits(x, weight, bias=None):
+    """Per-token logits, (tokens, experts) in float32: |x . w_i| + b_i."""
     import torch
 
-    sim = (x.to(torch.float32) @ prototypes.T).abs()
-    k = min(top_k, prototypes.shape[0])
-    idx = sim.argsort(dim=1, descending=True, stable=True)[:, :k]
-    top = sim.gather(1, idx)
-    full = torch.full_like(sim, float("-inf")).scatter(1, idx, top)
+    sim = (x.to(torch.float32) @ weight.T).abs()
+    return sim if bias is None else sim + bias
+
+
+def top_k_coefficients(logits, top_k: int):
+    """A softmax over each token's top_k logits, zero elsewhere. Equal
+    logits go to the expert listed first (torch.topk leaves that order
+    unspecified), so weightpack-vllm picks the same experts."""
+    import torch
+
+    k = min(top_k, logits.shape[1])
+    idx = logits.argsort(dim=1, descending=True, stable=True)[:, :k]
+    top = logits.gather(1, idx)
+    full = torch.full_like(logits, float("-inf")).scatter(1, idx, top)
     return torch.softmax(full / TEMPERATURE, dim=1)
 
 
-class Route:
-    """One mixed module: the experts that touch it and their prototypes."""
+def arrow_coefficients(x, prototypes, top_k: int):
+    """Per-token expert weights, (tokens, experts) in float32: Arrow's
+    softmax over each token's top_k logits |x . prototype|, zero elsewhere."""
+    return top_k_coefficients(router_logits(x, prototypes), top_k)
 
-    def __init__(self, name: str, module, experts: list[str]):
+
+# A router file holds, per routed module (in the base's naming, such as
+# model.layers.0.mlp.up_proj), these two float32 tensors, one row per expert
+# of the mix in mix order. A row of an expert that does not touch the module
+# is zero and unused.
+ROUTER_WEIGHT = ".router.weight"  # (experts, in_features)
+ROUTER_BIAS = ".router.bias"  # (experts,)
+PEFT_PREFIX = "base_model.model."
+
+
+def load_router(path: str) -> dict:
+    """A router file's tensors, by name, on the CPU."""
+    from safetensors.torch import load_file
+
+    return load_file(path)
+
+
+class Route:
+    """One mixed module: the experts that touch it and their router rows,
+    Arrow's prototypes unless rows (weight (n, in), bias (n)) are given."""
+
+    def __init__(self, name: str, module, experts: list[str], rows=None):
         import torch
 
         self.name, self.module, self.experts = name, module, experts
-        protos = [
-            arrow_prototype(module.lora_A[e].weight, module.lora_B[e].weight)
-            for e in experts
-        ]
-        weight = module.lora_A[experts[0]].weight
-        self.prototypes = torch.stack(protos).to(weight.device)
+        device = module.lora_A[experts[0]].weight.device
+        if rows is None:
+            protos = [
+                arrow_prototype(module.lora_A[e].weight, module.lora_B[e].weight)
+                for e in experts
+            ]
+            rows = (torch.stack(protos), torch.zeros(len(experts)))
+        self.weight = rows[0].to(device, torch.float32)
+        self.bias = rows[1].to(device, torch.float32)
+        # Set while a router trains: see coefficients.
+        self.training = False
+
+    def coefficients(self, tokens, top_k: int):
+        """Each token's expert weights. While training, the values are the
+        served ones and the gradient is the full softmax's (a straight-
+        through estimator), so experts the top k leave out still learn,
+        including with top_k 1, whose served weight is a constant 1."""
+        import torch
+
+        logits = router_logits(tokens, self.weight, self.bias)
+        served = top_k_coefficients(logits, top_k)
+        if not self.training:
+            return served
+        soft = torch.softmax(logits, dim=1)
+        return served.detach() + soft - soft.detach()
 
     def delta(self, x, top_k: int):
         """The routed sum of the experts' updates for input x."""
@@ -118,7 +171,7 @@ class Route:
         dtype = m.lora_A[self.experts[0]].weight.dtype
         shape = x.shape
         tokens = x.reshape(-1, shape[-1])
-        coeff = arrow_coefficients(tokens, self.prototypes, top_k)
+        coeff = self.coefficients(tokens, top_k)
         tokens = tokens.to(dtype)
         out = None
         for j, e in enumerate(self.experts):
@@ -159,9 +212,12 @@ class Mix:
         targets: list[str],
         blocks: str = "",
         router: str = "arrow",
+        router_file: str = "",
     ):
-        if router not in ("", "arrow"):
-            raise ValueError(f"router {router!r}: only arrow is supported")
+        if router not in ("", "arrow", "trained"):
+            raise ValueError(f"router {router!r}: want arrow or trained")
+        if router == "trained" and not router_file:
+            raise ValueError("a trained router needs its router file")
         if not experts:
             raise ValueError("a mix needs experts")
         if not 1 <= top_k <= len(experts):
@@ -173,6 +229,7 @@ class Mix:
         self.experts, self.top_k = list(experts), top_k
         self.targets, self.blocks = list(targets), blocks
         refuse_saved_modules(peft_model, self.experts)
+        trained = load_router(router_file) if router == "trained" else None
         self.routes: list[Route] = []
         for name, module in peft_model.named_modules():
             lora_a = getattr(module, "lora_A", None)
@@ -180,12 +237,47 @@ class Mix:
                 continue
             touching = [e for e in self.experts if e in lora_a]
             if touching and in_domain(name, self.targets, self.blocks):
-                self.routes.append(Route(name, module, touching))
+                rows = None
+                if trained is not None:
+                    rows = self._rows(trained, name, module, touching)
+                self.routes.append(Route(name, module, touching, rows))
         if not self.routes:
             raise ValueError(
                 "no expert has a LoRA module in the mix's targets "
                 f"({','.join(targets)}) and blocks ({blocks or 'all'})"
             )
+
+    def _rows(self, trained: dict, name: str, module, touching: list[str]):
+        """A route's rows of a trained router: its touching experts'."""
+        key = name.removeprefix(PEFT_PREFIX)
+        weight, bias = trained.get(key + ROUTER_WEIGHT), trained.get(key + ROUTER_BIAS)
+        if weight is None or bias is None:
+            raise ValueError(f"the router file has no weights for {key}")
+        n, in_features = len(self.experts), module.lora_A[touching[0]].weight.shape[1]
+        if tuple(weight.shape) != (n, in_features) or tuple(bias.shape) != (n,):
+            raise ValueError(
+                f"{key}: router weight {tuple(weight.shape)} and bias "
+                f"{tuple(bias.shape)}, want ({n}, {in_features}) and ({n},)"
+            )
+        rows = [self.experts.index(e) for e in touching]
+        return weight[rows], bias[rows]
+
+    def router_tensors(self) -> dict:
+        """This mix's router as a router file's tensors, on the CPU."""
+        import torch
+
+        out = {}
+        for r in self.routes:
+            key = r.name.removeprefix(PEFT_PREFIX)
+            weight = torch.zeros(len(self.experts), r.weight.shape[1])
+            bias = torch.zeros(len(self.experts))
+            for j, e in enumerate(r.experts):
+                i = self.experts.index(e)
+                weight[i] = r.weight[j].detach().float().cpu()
+                bias[i] = r.bias[j].detach().float().cpu()
+            out[key + ROUTER_WEIGHT] = weight.contiguous()
+            out[key + ROUTER_BIAS] = bias.contiguous()
+        return out
 
     def hooks(self):
         """Forward hooks that add each mixed module's routed update to its

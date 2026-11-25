@@ -117,6 +117,29 @@ func TestRouterTrain(t *testing.T) {
 	if r := f.Mix.Router; r.Kind != "train" || r.Steps != 500 {
 		t.Errorf("router = %+v", r)
 	}
+	cfg, err := f.Config()
+	if err != nil || cfg.Layers[1].Router != spec.RouterTrained {
+		t.Errorf("config router = %q (%v)", cfg.Layers[1].Router, err)
+	}
+}
+
+func TestRouterFile(t *testing.T) {
+	f := mustParse(t, "FROM ./b\nMIX m\nEXPERT x ./x\nROUTER ./routers/m.safetensors\n")
+	if r := f.Mix.Router; r.Kind != "file" || r.Path != "./routers/m.safetensors" || !r.Trained() {
+		t.Errorf("router = %+v", r)
+	}
+	cfg, err := f.Config()
+	if err != nil || cfg.Layers[1].Router != spec.RouterTrained {
+		t.Errorf("config router = %q (%v)", cfg.Layers[1].Router, err)
+	}
+	if f := mustParse(t, "FROM ./b\nMIX m\nEXPERT x ./x\n"); f.Mix.Router.Trained() {
+		t.Error("arrow counted as trained")
+	}
+	for _, bad := range []string{"ROUTER ./r.safetensors steps=3", "ROUTER r.safetensors"} {
+		if _, err := Parse(strings.NewReader("FROM ./b\nMIX m\nEXPERT x ./x\n" + bad + "\n")); err == nil {
+			t.Errorf("%q parsed", bad)
+		}
+	}
 }
 
 func TestTargetsAndBlocks(t *testing.T) {

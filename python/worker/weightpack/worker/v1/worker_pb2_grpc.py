@@ -54,6 +54,11 @@ class WorkerStub:
                 request_serializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.SquashRequest.SerializeToString,
                 response_deserializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.SquashResponse.FromString,
                 _registered_method=True)
+        self.TrainRouter = channel.unary_stream(
+                '/weightpack.worker.v1.Worker/TrainRouter',
+                request_serializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.TrainRouterRequest.SerializeToString,
+                response_deserializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.TrainRouterProgress.FromString,
+                _registered_method=True)
 
 
 class WorkerServicer:
@@ -89,6 +94,14 @@ class WorkerServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def TrainRouter(self, request, context):
+        """Train a MIX's router with its experts frozen (ROUTER train), reporting
+        progress as it goes; the last message carries the result.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_WorkerServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -111,6 +124,11 @@ def add_WorkerServicer_to_server(servicer, server):
                     servicer.Squash,
                     request_deserializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.SquashRequest.FromString,
                     response_serializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.SquashResponse.SerializeToString,
+            ),
+            'TrainRouter': grpc.unary_stream_rpc_method_handler(
+                    servicer.TrainRouter,
+                    request_deserializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.TrainRouterRequest.FromString,
+                    response_serializer=weightpack_dot_worker_dot_v1_dot_worker__pb2.TrainRouterProgress.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -221,6 +239,33 @@ class Worker:
             '/weightpack.worker.v1.Worker/Squash',
             weightpack_dot_worker_dot_v1_dot_worker__pb2.SquashRequest.SerializeToString,
             weightpack_dot_worker_dot_v1_dot_worker__pb2.SquashResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def TrainRouter(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(
+            request,
+            target,
+            '/weightpack.worker.v1.Worker/TrainRouter',
+            weightpack_dot_worker_dot_v1_dot_worker__pb2.TrainRouterRequest.SerializeToString,
+            weightpack_dot_worker_dot_v1_dot_worker__pb2.TrainRouterProgress.FromString,
             options,
             channel_credentials,
             insecure,

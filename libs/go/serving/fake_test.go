@@ -99,8 +99,17 @@ func fakeEngine(args []string) int {
 		Targets []string `json:"targets"`
 		Blocks  string   `json:"blocks"`
 		Router  string   `json:"router"`
+		// RouterFile holds a trained router; it must exist.
+		RouterFile string `json:"router_file"`
 	}
 	mixes := map[string]mix{}
+	routerOK := func(m mix) bool {
+		if m.Router == "trained" {
+			_, err := os.Stat(m.RouterFile)
+			return err == nil
+		}
+		return m.Router == "arrow" && m.RouterFile == ""
+	}
 	answer := func(w http.ResponseWriter, status int, v any) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
@@ -141,11 +150,12 @@ func fakeEngine(args []string) int {
 				return
 			}
 			var spec struct {
-				TopK    int      `json:"top_k"`
-				Targets []string `json:"targets"`
-				Blocks  string   `json:"blocks"`
-				Router  string   `json:"router"`
-				Experts []struct {
+				TopK       int      `json:"top_k"`
+				Targets    []string `json:"targets"`
+				Blocks     string   `json:"blocks"`
+				Router     string   `json:"router"`
+				RouterFile string   `json:"router_file"`
+				Experts    []struct {
 					ID   string `json:"id"`
 					Path string `json:"path"`
 				} `json:"experts"`
@@ -154,7 +164,11 @@ func fakeEngine(args []string) int {
 				R int `json:"r"`
 			}
 			_ = json.Unmarshal(raw, &spec)
-			m := mix{TopK: spec.TopK, Targets: spec.Targets, Blocks: spec.Blocks, Router: spec.Router}
+			m := mix{TopK: spec.TopK, Targets: spec.Targets, Blocks: spec.Blocks, Router: spec.Router, RouterFile: spec.RouterFile}
+			if !routerOK(m) {
+				fail400(w, 400, "mix router "+spec.Router+" in "+b.LoraPath)
+				return
+			}
 			for _, e := range spec.Experts {
 				if _, err := os.Stat(filepath.Join(e.Path, "adapter_config.json")); err != nil {
 					fail400(w, 400, "mix expert "+e.ID+": no adapter at "+e.Path)
@@ -228,7 +242,7 @@ func fakeEngine(args []string) int {
 			fail400(w, 400, "expert 'x' replaces whole modules (lm_head); token routing mixes LoRA updates only")
 			return
 		}
-		if _, ok := mixes[b.Name]; ok || b.TopK < 1 || len(b.Targets) == 0 || b.Router != "arrow" {
+		if _, ok := mixes[b.Name]; ok || b.TopK < 1 || len(b.Targets) == 0 || !routerOK(b.mix) {
 			fail400(w, 400, "bad mix "+b.Name)
 			return
 		}
@@ -266,7 +280,11 @@ func fakeEngine(args []string) int {
 		}
 		content := b.Model + "|" + filepath.Base(path) + "|" + b.ChatTemplate
 		if isMix {
-			content = fmt.Sprintf("%s|top%d of %s on %s|%s", b.Model, m.TopK, strings.Join(m.Experts, ","), strings.Join(m.Targets, ","), b.ChatTemplate)
+			routed := fmt.Sprintf("top%d of %s on %s", m.TopK, strings.Join(m.Experts, ","), strings.Join(m.Targets, ","))
+			if m.Router == "trained" {
+				routed += " by " + filepath.Base(m.RouterFile)
+			}
+			content = b.Model + "|" + routed + "|" + b.ChatTemplate
 		}
 		if !b.Stream {
 			answer(w, 200, map[string]any{"id": "c1", "object": "chat.completion", "model": b.Model,

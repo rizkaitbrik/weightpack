@@ -98,7 +98,8 @@ func isMeta(mediaType string) bool { return BaseMediaType(mediaType) == MediaTyp
 //   - the manifest has the Weightpack artifact and config media types;
 //   - the config passes Validate;
 //   - every layer blob names a layer of the config (meta blobs may name
-//     none, which makes them image-level);
+//     none, which makes them image-level), and a mix holds one router blob
+//     when its router is trained and none otherwise;
 //   - each layer's digest matches its kind, parameters, blobs and experts;
 //   - each chain ID matches its parent's chain ID and its own digest.
 func CheckImage(m *ocispec.Manifest, c *Config) error {
@@ -128,10 +129,22 @@ func CheckImage(m *ocispec.Manifest, c *Config) error {
 		if !known {
 			return fmt.Errorf("blob %s names unknown layer %q", d.Digest, id)
 		}
-		if l.Kind == KindMix {
-			return fmt.Errorf("blob %s belongs to mix %q, which holds no blobs", d.Digest, id)
+		if l.Kind == KindMix && BaseMediaType(d.MediaType) != MediaTypeRouter {
+			return fmt.Errorf("blob %s (%s) belongs to mix %q, which holds only its router", d.Digest, d.MediaType, id)
 		}
 		blobs[id] = append(blobs[id], BlobRefFromDescriptor(d))
+	}
+	for _, l := range c.Layers {
+		if l.Kind != KindMix {
+			continue
+		}
+		want := 0
+		if l.Router == RouterTrained {
+			want = 1
+		}
+		if n := len(blobs[l.ID]); n != want {
+			return fmt.Errorf("mix %q has router %q and %d router blobs, want %d", l.ID, l.Router, n, want)
+		}
 	}
 	for _, l := range c.Layers {
 		if l.Digest == "" || l.Chain == "" {

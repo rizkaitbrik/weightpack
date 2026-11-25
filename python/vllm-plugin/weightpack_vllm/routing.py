@@ -14,7 +14,9 @@ The router is Arrow, as in weightpack-engine (weightpack_worker.mixing) and
 PEFT: an expert's prototype in a module is the top right singular vector of
 its B_i A_i; a token's logit is |x . v_i|; the top k logits, among the
 experts that touch the module, go through a softmax. Equal logits go to the
-expert listed first, so exactly k experts are picked.
+expert listed first, so exactly k experts are picked. A trained router
+(ROUTER train) has the same form with a bias, |x . w_i| + b_i, its w and b
+read from the router file wpkd names.
 
 This module needs only torch, so it is tested without vLLM; patches.py
 connects it to vLLM.
@@ -69,11 +71,36 @@ def load_mix(lora_dir: str) -> dict | None:
         return None
     with open(path) as f:
         mix = json.load(f)
-    if mix.get("version") != 1 or mix.get("router", "arrow") != "arrow":
-        raise ValueError(f"{path}: want version 1 and the arrow router")
+    router = mix.get("router", "arrow")
+    if mix.get("version") != 1 or router not in ("arrow", "trained"):
+        raise ValueError(f"{path}: want version 1 and the arrow or trained router")
+    if router == "trained" and not mix.get("router_file"):
+        raise ValueError(f"{path}: a trained router needs router_file")
     if not mix.get("experts") or not 1 <= int(mix["top_k"]) <= len(mix["experts"]):
         raise ValueError(f"{path}: needs experts and top_k in 1..len(experts)")
     return mix
+
+
+# A router file holds these per routed module, one row per expert.
+ROUTER_WEIGHT = ".router.weight"  # (experts, in_features), float32
+ROUTER_BIAS = ".router.bias"  # (experts,), float32
+
+
+def load_router(path: str) -> dict:
+    """A router file's rows by module: name -> (weight (experts, in), bias
+    (experts)), float32 on the CPU, one row per expert in mix order."""
+    from safetensors.torch import load_file
+
+    tensors = load_file(path)
+    out = {}
+    for name, w in tensors.items():
+        if name.endswith(ROUTER_WEIGHT):
+            module = name.removesuffix(ROUTER_WEIGHT)
+            bias = tensors.get(module + ROUTER_BIAS)
+            if bias is None:
+                raise ValueError(f"{path}: {module} has a router weight, no bias")
+            out[module] = (w.float(), bias.float())
+    return out
 
 
 def arrow_prototype(a, b):
@@ -139,17 +166,25 @@ class Routing:
     later.
     """
 
-    def __init__(
-        self, n_slices, slots, max_rank, in_features, max_experts, device, dtype
-    ):
+    def __init__(self, n_slices, slots, max_rank, in_features, max_experts, device):
         import torch
 
         self.max_experts = max_experts
+        # Float32 whatever the weights' dtype, so routing reads the same
+        # values weightpack-engine does.
         self.protos = torch.zeros(
-            n_slices, slots, max_experts, in_features, device=device, dtype=dtype
+            n_slices,
+            slots,
+            max_experts,
+            in_features,
+            device=device,
+            dtype=torch.float32,
         )
         self.touch = torch.zeros(
             n_slices, slots, max_experts, device=device, dtype=torch.bool
+        )
+        self.bias = torch.zeros(
+            n_slices, slots, max_experts, device=device, dtype=torch.float32
         )
         self.rank_expert = torch.zeros(slots, max_rank, device=device, dtype=torch.long)
         self.top_k = torch.ones(slots, device=device, dtype=torch.long)
@@ -159,11 +194,13 @@ class Routing:
         self.is_mix[slot] = False
 
     def set_slot(
-        self, slot: int, ranks: list[int], top_k: int, a_slices, b_slices
+        self, slot: int, ranks: list[int], top_k: int, a_slices, b_slices, rows=None
     ) -> None:
         """Routes the tokens of an adapter slot that holds a mix. a_slices and
         b_slices are the slot's stacked weights, (R, in) and (out, R) per
-        slice; an expert touches a slice when its blocks are not zero."""
+        slice; an expert touches a slice when its blocks are not zero. rows,
+        for a trained router, gives each slice's (weight, bias) rows, one
+        per expert; without it the router is Arrow's."""
         import torch
 
         if len(ranks) > self.max_experts:
@@ -174,14 +211,24 @@ class Routing:
         offsets = [sum(ranks[:i]) for i in range(len(ranks))]
         for s, (a, b) in enumerate(zip(a_slices, b_slices, strict=True)):
             self.protos[s, slot].zero_()
+            self.bias[s, slot].zero_()
             self.touch[s, slot].zero_()
+            trained = rows[s] if rows is not None else None
             for e, (o, r) in enumerate(zip(offsets, ranks, strict=True)):
                 ae, be = a[o : o + r], b[:, o : o + r]
-                if bool(ae.abs().sum() > 0) and bool(be.abs().sum() > 0):
-                    self.touch[s, slot, e] = True
-                    self.protos[s, slot, e] = arrow_prototype(ae, be).to(
-                        self.protos.device, self.protos.dtype
+                if not (bool(ae.abs().sum() > 0) and bool(be.abs().sum() > 0)):
+                    continue
+                if rows is not None and trained is None:
+                    raise ValueError(
+                        "the trained router has no rows for a module the mix routes in"
                     )
+                self.touch[s, slot, e] = True
+                if trained is None:
+                    v, bias = arrow_prototype(ae, be), 0.0
+                else:
+                    v, bias = trained[0][e], float(trained[1][e])
+                self.protos[s, slot, e] = v.to(self.protos.device, self.protos.dtype)
+                self.bias[s, slot, e] = bias
         experts = torch.zeros(self.rank_expert.shape[1], dtype=torch.long)
         for e, (o, r) in enumerate(zip(offsets, ranks, strict=True)):
             experts[o : o + r] = e
@@ -209,6 +256,7 @@ class Routing:
             protos = self.protos[s].reshape(slots * n_exp, in_f).to(torch.float32)
             logits = (xf @ protos.T).abs().view(t, slots, n_exp)
             logits = logits.gather(1, slot.view(t, 1, 1).expand(t, 1, n_exp)).squeeze(1)
+            logits = logits + self.bias[s][slot]
             logits = logits.masked_fill(~self.touch[s][slot], float("-inf"))
             # Exactly top_k experts, ties to the lower index, as the engine.
             order = logits.argsort(dim=1, descending=True, stable=True)

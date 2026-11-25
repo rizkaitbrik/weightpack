@@ -2,10 +2,11 @@
 # End to end: token routing through real vLLM, with this plugin installed,
 # against weightpack-engine's routing.
 #
-# It makes a tiny Llama and two LoRA experts (the worker's test model),
-# asks weightpack-engine what the base, each expert and their mix
-# generate, then serves the same files with vLLM's CPU image in Docker,
-# loads the experts and a mix directory as wpkd writes it, and compares.
+# It makes a tiny Llama, two LoRA experts and a router trained on them,
+# asks weightpack-engine what the base, each expert and three mixes of
+# them (Arrow top_k 1 and 2, and the trained router) generate, then serves
+# the same files with vLLM's CPU image in Docker, loads the experts and the
+# mix directories as wpkd writes them, and compares.
 #
 # Needs docker, uv and jq. IMAGE picks the vLLM image (default: vLLM's
 # arm64 CPU release; on x86, public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo).
@@ -38,6 +39,7 @@ import peft
 import torch
 import transformers
 from tests.test_engine import PROMPT, tiny_model
+from weightpack_worker import router_train
 from weightpack_worker.engine import Engine
 
 work = Path(sys.argv[1])
@@ -56,9 +58,22 @@ for seed, name in ((0, "one"), (1, "two")):
     cfg = peft.LoraConfig(r=4, lora_alpha=16, target_modules=["q_proj", "v_proj"], init_lora_weights=False)
     peft.get_peft_model(model, cfg).save_pretrained(work / name)
 
+# A router trained on text that counts, so it has something to learn.
+data = work / "mix.jsonl"
+data.write_text("".join(
+    json.dumps({"text": " ".join(f"t{(s + step * i) % 60}" for i in range(12))}) + "\n"
+    for step in (1, -2) for s in range(0, 60, 2)
+))
+router_train.train(
+    str(base), [("one", str(work / "one")), ("two", str(work / "two"))], ["q", "k", "v", "o"],
+    "", 1, str(data), str(work / "router.safetensors"),
+    router_train.Options(steps=30, batch_size=8, learning_rate=0.05), device="cpu",
+)
+
 # Mix directories, as wpkd writes them, with the container's paths: the
-# same experts routed to the top one (mix) and blended over both (mix2).
-for name, top_k in (("mix", 1), ("mix2", 2)):
+# same experts routed to the top one by Arrow (mix) and by the trained
+# router (mix3), and blended over both by Arrow (mix2).
+for name, top_k in (("mix", 1), ("mix2", 2), ("mix3", 1)):
     mix = work / name
     mix.mkdir()
     (mix / "adapter_config.json").write_text(json.dumps({
@@ -66,19 +81,23 @@ for name, top_k in (("mix", 1), ("mix2", 2)):
         "target_modules": ["q_proj", "v_proj"], "bias": "none", "use_rslora": False,
         "fan_in_fan_out": False, "base_model_name_or_path": "",
     }))
-    (mix / "weightpack_mix.json").write_text(json.dumps({
+    desc = {
         "version": 1, "router": "arrow", "top_k": top_k, "targets": ["q", "k", "v", "o"], "blocks": "",
         "experts": [{"id": "one", "rank": 4, "path": "/work/one"}, {"id": "two", "rank": 4, "path": "/work/two"}],
-    }))
+    }
+    if name == "mix3":
+        desc.update(router="trained", router_file="/work/router.safetensors")
+    (mix / "weightpack_mix.json").write_text(json.dumps(desc))
 
 engine = Engine(str(base), device="cpu", served_name="base")
 engine.load_adapter("one", str(work / "one"))
 engine.load_adapter("two", str(work / "two"))
 engine.load_mix("mix", ["one", "two"], 1, ["q", "k", "v", "o"])
 engine.load_mix("mix2", ["one", "two"], 2, ["q", "k", "v", "o"])
+engine.load_mix("mix3", ["one", "two"], 1, ["q", "k", "v", "o"], "", "trained", str(work / "router.safetensors"))
 ids = engine.encode_chat(PROMPT)
 want = {}
-for name in ("base", "one", "two", "mix", "mix2"):
+for name in ("base", "one", "two", "mix", "mix2", "mix3"):
     want[name], _, _ = engine.generate(name, ids, {"max_tokens": 8, "temperature": 0})
 (work / "want.json").write_text(json.dumps({"prompt": PROMPT, "replies": want}))
 print(json.dumps(want, indent=1))
@@ -102,7 +121,7 @@ for i in $(seq 300); do
 done
 curl -sf "$api/health" >/dev/null || { docker logs "$NAME" | tail -40; exit 1; }
 
-for name in one two mix mix2; do
+for name in one two mix mix2 mix3; do
   curl -sf "$api/v1/load_lora_adapter" -H 'Content-Type: application/json' \
     -d "{\"lora_name\": \"$name\", \"lora_path\": \"/work/$name\"}" >/dev/null ||
     { echo "load $name failed"; docker logs "$NAME" | tail -30; exit 1; }
@@ -110,7 +129,7 @@ done
 
 echo "== replies"
 fail=0
-for name in base one two mix mix2; do
+for name in base one two mix mix2 mix3; do
   reply=$(curl -s "$api/v1/chat/completions" -H 'Content-Type: application/json' -d "$(jq -c --arg m "$name" \
     '{model: $m, messages: .prompt, max_tokens: 8, temperature: 0}' "$work/want.json")")
   # Trimmed: vLLM's detokenizer keeps the first token's leading space.

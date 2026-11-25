@@ -45,6 +45,15 @@ def top_k_gates(logits: np.ndarray, k: int) -> np.ndarray:
     return gates
 
 
+def router_gates(
+    x: np.ndarray, weight: np.ndarray, bias: np.ndarray, k: int
+) -> np.ndarray:
+    """A trained router's weights, (tokens, experts): a softmax over each
+    token's top-k logits |x . w| + b."""
+    logits = np.abs(x.astype(np.float64) @ weight.T.astype(np.float64)) + bias
+    return top_k_gates(logits, min(k, len(weight)))
+
+
 def mix_forward(
     x: np.ndarray,
     base_weight: np.ndarray,

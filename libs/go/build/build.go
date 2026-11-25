@@ -2,10 +2,11 @@
 //
 // Sources: FROM a directory holding safetensors weights, config.json and a
 // tokenizer, or FROM an image (in the store, or pulled through
-// Options.Pull); LAYER and EXPERT from a PEFT LoRA adapter directory, or
-// from the top layer of an image built on the same chain. Hugging Face
-// sources, imports of full fine-tunes (codec=xor|bit1|sparse) and ROUTER
-// train are rejected with a clear error until they are supported.
+// Options.Pull); LAYER and EXPERT from a PEFT LoRA adapter directory, a
+// Hugging Face repo, a full fine-tune imported with codec=xor, or the top
+// layer of an image built on the same chain. Lossy imports (codec=bit1 or
+// sparse) are rejected with a clear error until they are supported. A MIX's
+// ROUTER train runs in the build worker (router.go).
 //
 // The builder never reads tensor values. It splits safetensors files along
 // the byte ranges their headers give, checks adapter shapes against the base,
@@ -53,6 +54,9 @@ type Options struct {
 	// NoCache reads and hashes every source again instead of reusing what
 	// the build cache remembers.
 	NoCache bool
+	// ServingFiles writes the files an engine serves an image from, which
+	// ROUTER train trains on. Nil means routers cannot be trained.
+	ServingFiles ServingFilesFunc
 }
 
 // PullFunc fetches ref into the store, reporting progress.
@@ -74,6 +78,8 @@ type builder struct {
 	worker   workerpb.WorkerClient
 	hf       *hf.Client
 	cache    *buildCache
+
+	servingFiles ServingFilesFunc
 
 	// inherited is what a FROM image passes on, nil for a local FROM.
 	inherited *inherited
@@ -111,10 +117,15 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	if err := checkSupported(opts.Weightfile, wf); err != nil {
 		return nil, err
 	}
+	if m := wf.Mix; m != nil && m.Router.Kind == "train" && (opts.Worker == nil || opts.ServingFiles == nil) {
+		return nil, &weightfile.Error{File: opts.Weightfile, Line: m.Router.Line,
+			Msg: "ROUTER train: training a router needs wpkd's build worker; restart wpkd with --worker"}
+	}
 
 	b := &builder{
 		ctx: ctx, store: s, progress: progress, pull: opts.Pull, worker: opts.Worker, hf: opts.HF, cache: newBuildCache(CacheDir(s.Root())),
-		dir: filepath.Dir(opts.Weightfile), file: opts.Weightfile,
+		servingFiles: opts.ServingFiles,
+		dir:          filepath.Dir(opts.Weightfile), file: opts.Weightfile,
 		blobs: map[string][]ocispec.Descriptor{},
 	}
 
@@ -174,6 +185,11 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	if err != nil {
 		return nil, err
 	}
+	if m := wf.Mix; m != nil && m.Router.Trained() {
+		if err := b.trainedRouter(m, byID[m.ID], parent, byID, base, cfg, wf); err != nil {
+			return nil, err
+		}
+	}
 	if b.cache.hits > 0 {
 		b.progress(api.Event{Step: "cache", Message: fmt.Sprintf("reused %d blobs without reading their sources", b.cache.hits)})
 	}
@@ -189,9 +205,6 @@ func checkSupported(path string, wf *weightfile.File) error {
 	layers := append([]weightfile.Layer{}, wf.Layers...)
 	if wf.Mix != nil {
 		layers = append(layers, wf.Mix.Experts...)
-		if wf.Mix.Router.Kind == "train" {
-			fail(wf.Mix.Router.Line, "ROUTER train is not supported yet; use ROUTER arrow, which needs no training")
-		}
 	}
 	for _, l := range layers {
 		delta := l.Codec != "" && l.Codec != weightfile.CodecLoRA

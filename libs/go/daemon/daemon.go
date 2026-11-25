@@ -191,6 +191,9 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	opts := build.Options{Weightfile: req.Weightfile, Tags: req.Tags, Pull: s.pullForBuild, NoCache: req.NoCache}
 	if s.worker != nil {
 		opts.Worker = s.worker
+		opts.ServingFiles = func(ctx context.Context, image, dir string, progress func(api.Event)) (*build.ServingFiles, error) {
+			return serving.WriteServingFiles(ctx, s.store, s.worker, image, dir, progress)
+		}
 	}
 	opts.HF = s.hf
 	res, err := build.Build(r.Context(), s.store, opts, send)

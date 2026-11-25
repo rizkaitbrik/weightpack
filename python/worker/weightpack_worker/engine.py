@@ -173,8 +173,10 @@ class Engine:
         targets: list[str],
         blocks: str = "",
         router: str = "arrow",
+        router_file: str = "",
     ) -> None:
-        """Name a mix of loaded adapters, routed per token."""
+        """Name a mix of loaded adapters, routed per token: by Arrow, or by
+        the trained router in router_file."""
         from .mixing import Mix
 
         with self.lock:
@@ -182,7 +184,9 @@ class Engine:
             for e in experts:
                 if e not in self.adapters:
                     raise KeyError(e)
-            self.mixes[name] = Mix(self.peft, experts, top_k, targets, blocks, router)
+            self.mixes[name] = Mix(
+                self.peft, experts, top_k, targets, blocks, router, router_file
+            )
 
     def unload_mix(self, name: str) -> None:
         with self.lock:
@@ -445,6 +449,7 @@ def make_handler(engine: Engine):
                         list(body["targets"]),
                         body.get("blocks") or "",
                         body.get("router") or "arrow",
+                        body.get("router_file") or "",
                     )
                     return self._text(200, f"Success: mix '{body['mix_name']}' added.")
                 if self.path == "/v1/unload_mix":

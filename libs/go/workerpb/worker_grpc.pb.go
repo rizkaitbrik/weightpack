@@ -35,6 +35,7 @@ const (
 	Worker_Evaluate_FullMethodName    = "/weightpack.worker.v1.Worker/Evaluate"
 	Worker_Info_FullMethodName        = "/weightpack.worker.v1.Worker/Info"
 	Worker_Squash_FullMethodName      = "/weightpack.worker.v1.Worker/Squash"
+	Worker_TrainRouter_FullMethodName = "/weightpack.worker.v1.Worker/TrainRouter"
 )
 
 // WorkerClient is the client API for Worker service.
@@ -51,6 +52,9 @@ type WorkerClient interface {
 	// Bake XOR and LoRA layers into the base tensors they modify and write the
 	// merged tensors to out_dir.
 	Squash(ctx context.Context, in *SquashRequest, opts ...grpc.CallOption) (*SquashResponse, error)
+	// Train a MIX's router with its experts frozen (ROUTER train), reporting
+	// progress as it goes; the last message carries the result.
+	TrainRouter(ctx context.Context, in *TrainRouterRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TrainRouterProgress], error)
 }
 
 type workerClient struct {
@@ -101,6 +105,25 @@ func (c *workerClient) Squash(ctx context.Context, in *SquashRequest, opts ...gr
 	return out, nil
 }
 
+func (c *workerClient) TrainRouter(ctx context.Context, in *TrainRouterRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TrainRouterProgress], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Worker_ServiceDesc.Streams[0], Worker_TrainRouter_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[TrainRouterRequest, TrainRouterProgress]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_TrainRouterClient = grpc.ServerStreamingClient[TrainRouterProgress]
+
 // WorkerServer is the server API for Worker service.
 // All implementations must embed UnimplementedWorkerServer
 // for forward compatibility.
@@ -115,6 +138,9 @@ type WorkerServer interface {
 	// Bake XOR and LoRA layers into the base tensors they modify and write the
 	// merged tensors to out_dir.
 	Squash(context.Context, *SquashRequest) (*SquashResponse, error)
+	// Train a MIX's router with its experts frozen (ROUTER train), reporting
+	// progress as it goes; the last message carries the result.
+	TrainRouter(*TrainRouterRequest, grpc.ServerStreamingServer[TrainRouterProgress]) error
 	mustEmbedUnimplementedWorkerServer()
 }
 
@@ -136,6 +162,9 @@ func (UnimplementedWorkerServer) Info(context.Context, *InfoRequest) (*InfoRespo
 }
 func (UnimplementedWorkerServer) Squash(context.Context, *SquashRequest) (*SquashResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Squash not implemented")
+}
+func (UnimplementedWorkerServer) TrainRouter(*TrainRouterRequest, grpc.ServerStreamingServer[TrainRouterProgress]) error {
+	return status.Error(codes.Unimplemented, "method TrainRouter not implemented")
 }
 func (UnimplementedWorkerServer) mustEmbedUnimplementedWorkerServer() {}
 func (UnimplementedWorkerServer) testEmbeddedByValue()                {}
@@ -230,6 +259,17 @@ func _Worker_Squash_Handler(srv interface{}, ctx context.Context, dec func(inter
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Worker_TrainRouter_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(TrainRouterRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(WorkerServer).TrainRouter(m, &grpc.GenericServerStream[TrainRouterRequest, TrainRouterProgress]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Worker_TrainRouterServer = grpc.ServerStreamingServer[TrainRouterProgress]
+
 // Worker_ServiceDesc is the grpc.ServiceDesc for Worker service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -254,6 +294,12 @@ var Worker_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Worker_Squash_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "TrainRouter",
+			Handler:       _Worker_TrainRouter_Handler,
+			ServerStreams: true,
+		},
+	},
 	Metadata: "weightpack/worker/v1/worker.proto",
 }

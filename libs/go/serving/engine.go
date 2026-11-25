@@ -233,7 +233,8 @@ func (e *engine) loadAdapter(ctx context.Context, name, dir string) error {
 
 // loadMix names, in the reference engine, a MIX of loaded adapters that
 // routes each token to its own experts, or counts one more user of it.
-func (e *engine) loadMix(ctx context.Context, name string, experts []string, mix spec.Layer) error {
+// routerFile holds a trained router's weights, "" for Arrow.
+func (e *engine) loadMix(ctx context.Context, name string, experts []string, mix spec.Layer, routerFile string) error {
 	e.amu.Lock()
 	defer e.amu.Unlock()
 	if e.mixes[name] > 0 {
@@ -243,6 +244,9 @@ func (e *engine) loadMix(ctx context.Context, name string, experts []string, mix
 	body := map[string]any{
 		"mix_name": name, "experts": experts, "top_k": mix.TopK,
 		"targets": mix.Targets, "blocks": mix.Blocks, "router": mix.Router,
+	}
+	if routerFile != "" {
+		body["router_file"] = routerFile
 	}
 	if err := e.post(ctx, "/v1/load_mix", body); err != nil {
 		return fmt.Errorf("set up per-token routing in the %s engine: %w", e.kind, err)

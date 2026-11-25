@@ -26,6 +26,9 @@ service Worker {
   // Bake XOR and LoRA layers into the base tensors they modify and write the
   // merged tensors to out_dir.
   rpc Squash(SquashRequest) returns (SquashResponse);
+  // Train a MIX's router with its experts frozen (ROUTER train), reporting
+  // progress as it goes; the last message carries the result.
+  rpc TrainRouter(TrainRouterRequest) returns (stream TrainRouterProgress);
 }
 
 enum Codec {
@@ -130,4 +133,48 @@ message SquashResponse {
   // Only the base tensors some layer modifies (XOR or LoRA); every other
   // tensor is unchanged and keeps its blob.
   repeated MergedTensor tensors = 1;
+}
+
+// A PEFT LoRA adapter directory, as wpk export writes one.
+message Adapter {
+  string id = 1;
+  string dir = 2;
+}
+
+message TrainRouterRequest {
+  // The serving base: a Hugging Face model directory with every layer below
+  // the mix baked in, as wpkd serves it.
+  string base_dir = 1;
+  // The mix's experts in mix order. The router file has one row per expert
+  // in this order.
+  repeated Adapter experts = 2;
+  repeated string targets = 3;  // canonical names: q, k, v, o, gate, up, down
+  string blocks = 4;            // "" for all, or ranges such as "0-3,8-31"
+  int32 top_k = 5;
+  // JSON Lines training data: {"messages": [...]}, {"prompt", "completion"}
+  // or {"text"} per line.
+  string data = 6;
+  int32 steps = 7;
+  // Where to write the router: a safetensors file holding, for each routed
+  // module, <module>.router.weight [experts, in] and <module>.router.bias
+  // [experts], in float32. The daemon checks and stores it.
+  string out_file = 8;
+  string device = 9;  // cuda, mps or cpu; "" picks the best there is
+  // A Jinja chat template that replaces the tokenizer's, as the image's
+  // TEMPLATE does when it is served; "" keeps the tokenizer's.
+  string chat_template = 10;
+}
+
+message TrainRouterProgress {
+  int32 step = 1;
+  int32 steps = 2;
+  double loss = 3;  // smoothed training loss
+  // Set on the last message only.
+  bool done = 4;
+  int32 examples = 5;      // trained on
+  int32 heldout = 6;       // held out to measure the loss on
+  double arrow_loss = 7;   // held-out loss with Arrow, the starting point
+  double trained_loss = 8; // and with the trained router
+  string device = 9;
+  double seconds = 10;
 }

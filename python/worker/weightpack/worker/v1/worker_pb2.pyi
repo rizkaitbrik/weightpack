@@ -131,3 +131,59 @@ class SquashResponse(_message.Message):
     TENSORS_FIELD_NUMBER: _ClassVar[int]
     tensors: _containers.RepeatedCompositeFieldContainer[MergedTensor]
     def __init__(self, tensors: _Optional[_Iterable[_Union[MergedTensor, _Mapping]]] = ...) -> None: ...
+
+class Adapter(_message.Message):
+    __slots__ = ("id", "dir")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    DIR_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    dir: str
+    def __init__(self, id: _Optional[str] = ..., dir: _Optional[str] = ...) -> None: ...
+
+class TrainRouterRequest(_message.Message):
+    __slots__ = ("base_dir", "experts", "targets", "blocks", "top_k", "data", "steps", "out_file", "device", "chat_template")
+    BASE_DIR_FIELD_NUMBER: _ClassVar[int]
+    EXPERTS_FIELD_NUMBER: _ClassVar[int]
+    TARGETS_FIELD_NUMBER: _ClassVar[int]
+    BLOCKS_FIELD_NUMBER: _ClassVar[int]
+    TOP_K_FIELD_NUMBER: _ClassVar[int]
+    DATA_FIELD_NUMBER: _ClassVar[int]
+    STEPS_FIELD_NUMBER: _ClassVar[int]
+    OUT_FILE_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_FIELD_NUMBER: _ClassVar[int]
+    CHAT_TEMPLATE_FIELD_NUMBER: _ClassVar[int]
+    base_dir: str
+    experts: _containers.RepeatedCompositeFieldContainer[Adapter]
+    targets: _containers.RepeatedScalarFieldContainer[str]
+    blocks: str
+    top_k: int
+    data: str
+    steps: int
+    out_file: str
+    device: str
+    chat_template: str
+    def __init__(self, base_dir: _Optional[str] = ..., experts: _Optional[_Iterable[_Union[Adapter, _Mapping]]] = ..., targets: _Optional[_Iterable[str]] = ..., blocks: _Optional[str] = ..., top_k: _Optional[int] = ..., data: _Optional[str] = ..., steps: _Optional[int] = ..., out_file: _Optional[str] = ..., device: _Optional[str] = ..., chat_template: _Optional[str] = ...) -> None: ...
+
+class TrainRouterProgress(_message.Message):
+    __slots__ = ("step", "steps", "loss", "done", "examples", "heldout", "arrow_loss", "trained_loss", "device", "seconds")
+    STEP_FIELD_NUMBER: _ClassVar[int]
+    STEPS_FIELD_NUMBER: _ClassVar[int]
+    LOSS_FIELD_NUMBER: _ClassVar[int]
+    DONE_FIELD_NUMBER: _ClassVar[int]
+    EXAMPLES_FIELD_NUMBER: _ClassVar[int]
+    HELDOUT_FIELD_NUMBER: _ClassVar[int]
+    ARROW_LOSS_FIELD_NUMBER: _ClassVar[int]
+    TRAINED_LOSS_FIELD_NUMBER: _ClassVar[int]
+    DEVICE_FIELD_NUMBER: _ClassVar[int]
+    SECONDS_FIELD_NUMBER: _ClassVar[int]
+    step: int
+    steps: int
+    loss: float
+    done: bool
+    examples: int
+    heldout: int
+    arrow_loss: float
+    trained_loss: float
+    device: str
+    seconds: float
+    def __init__(self, step: _Optional[int] = ..., steps: _Optional[int] = ..., loss: _Optional[float] = ..., done: _Optional[bool] = ..., examples: _Optional[int] = ..., heldout: _Optional[int] = ..., arrow_loss: _Optional[float] = ..., trained_loss: _Optional[float] = ..., device: _Optional[str] = ..., seconds: _Optional[float] = ...) -> None: ...

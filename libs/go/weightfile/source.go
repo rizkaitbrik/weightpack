@@ -102,7 +102,7 @@ func ParseSource(s string) (Source, error) {
 			return Source{}, err
 		}
 		return Source{Kind: SourceOCI, Ref: ref}, nil
-	case s == "." || s == ".." || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") || strings.HasPrefix(s, "/"):
+	case isLocalPath(s):
 		return Source{Kind: SourceLocal, Ref: s}, nil
 	case strings.HasPrefix(s, "~"):
 		return Source{}, fmt.Errorf("source %q: '~' is not expanded; use a path relative to the Weightfile", s)
@@ -136,4 +136,10 @@ func checkHF(ref string) error {
 func CheckOCIReference(ref string) error {
 	_, err := reference.Parse(ref)
 	return err
+}
+
+// isLocalPath reports whether s is written as a local path: ".", "..", or
+// starting with "./", "../" or "/".
+func isLocalPath(s string) bool {
+	return s == "." || s == ".." || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") || strings.HasPrefix(s, "/")
 }

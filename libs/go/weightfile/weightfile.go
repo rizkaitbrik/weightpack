@@ -81,14 +81,19 @@ type Mix struct {
 	Router  Router
 }
 
-// Router is the ROUTER line of a MIX. Kind is "arrow" (zero-shot) or
-// "train" (experts frozen, router trained on Data for Steps steps).
+// Router is the ROUTER line of a MIX. Kind is "arrow" (zero-shot), "train"
+// (experts frozen, router trained on Data for Steps steps) or "file" (a
+// router trained before, its weights at Path).
 type Router struct {
 	Line  int
 	Kind  string
 	Data  string
 	Steps int
+	Path  string
 }
+
+// Trained reports whether the router is a trained one, from data or a file.
+func (r Router) Trained() bool { return r.Kind == "train" || r.Kind == "file" }
 
 // Meta is a TEMPLATE or LICENSE value.
 type Meta struct {
@@ -383,11 +388,19 @@ func (p *parser) router(l rawLine, args []string) {
 		return
 	}
 	if len(args) < 1 {
-		p.errorf(l.no, "usage: ROUTER arrow | ROUTER train data=<path> steps=<n>")
+		p.errorf(l.no, "usage: ROUTER arrow | ROUTER train data=<path> steps=<n> | ROUTER <path>")
 		return
 	}
 	r := Router{Line: l.no, Kind: strings.ToLower(args[0])}
+	if isLocalPath(args[0]) {
+		r = Router{Line: l.no, Kind: "file", Path: args[0]}
+	}
 	switch r.Kind {
+	case "file":
+		if len(args) > 1 {
+			p.errorf(l.no, "ROUTER <path> takes no parameters")
+			return
+		}
 	case "arrow":
 		if len(args) > 1 {
 			p.errorf(l.no, "ROUTER arrow takes no parameters")
@@ -414,7 +427,7 @@ func (p *parser) router(l rawLine, args []string) {
 			r.Steps = n
 		}
 	default:
-		p.errorf(l.no, "unknown router %q (want arrow or train)", args[0])
+		p.errorf(l.no, "unknown router %q (want arrow, train, or the path of a trained router such as ./router.safetensors)", args[0])
 		return
 	}
 	m.Router = r

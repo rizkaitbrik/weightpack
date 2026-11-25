@@ -274,6 +274,12 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		mixRel = filepath.Join("mixes", hexOf(p.mix.Chain)+"-"+p.mix.ID)
 		rels = append(rels, mixRel)
 	}
+	routerRel, routerFile := "", ""
+	if p.mix != nil && p.mix.Router == spec.RouterTrained {
+		routerRel = filepath.Join("routers", hexOf(p.mix.Chain)+"-"+p.mix.ID)
+		routerFile = filepath.Join(rt.dir, routerRel, export.RouterPath(p.mix.ID))
+		rels = append(rels, routerRel)
+	}
 	rt.pin(rels, 1)
 	defer rt.pin(rels, -1)
 
@@ -282,6 +288,11 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	}
 	for i, a := range p.adapters {
 		if err := rt.prepareAdapter(ctx, digest, a, adapterRels[i], progress); err != nil {
+			return nil, err
+		}
+	}
+	if routerRel != "" {
+		if err := rt.prepareRouter(ctx, digest, routerRel, progress); err != nil {
 			return nil, err
 		}
 	}
@@ -310,8 +321,10 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	}
 
 	c := &container{engine: e, template: template, files: adapterRels}
-	if mixRel != "" {
-		c.files = append(c.files, mixRel)
+	for _, rel := range []string{mixRel, routerRel} {
+		if rel != "" {
+			c.files = append(c.files, rel)
+		}
 	}
 	c.info = api.Container{
 		Name: name, Image: req.Ref, Digest: digest, Engine: kind, Device: device, EngineID: e.id,
@@ -350,14 +363,14 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		var err error
 		if kind == EngineVLLM {
 			var dir string
-			if dir, err = rt.writeMix(p, adapterRels, mixRel); err == nil {
+			if dir, err = rt.writeMix(p, adapterRels, mixRel, routerFile); err == nil {
 				err = e.loadAdapter(ctx, mn, dir)
 			}
 			if err != nil {
 				err = fmt.Errorf("%w; vLLM routes tokens with the weightpack-vllm plugin installed beside it", err)
 			}
 		} else {
-			err = e.loadMix(ctx, mn, c.adapters, *p.mix)
+			err = e.loadMix(ctx, mn, c.adapters, *p.mix, routerFile)
 		}
 		if err != nil {
 			progress(api.Event{Step: step, Warning: true, Message: fmt.Sprintf(
@@ -482,6 +495,23 @@ func (rt *Runtime) prepareAdapter(ctx context.Context, digest string, a spec.Lay
 	rt.storeLock.Lock()
 	defer rt.storeLock.Unlock()
 	_, err := export.Export(ctx, rt.cfg.Store, digest, export.Options{Dir: dir, NoBase: true, Adapters: []string{a.ID}}, progress)
+	return err
+}
+
+// prepareRouter exports a MIX's trained router, unless an earlier run did.
+// The mix's chain ID, which names the directory, covers its router.
+func (rt *Runtime) prepareRouter(ctx context.Context, digest, rel string, progress func(api.Event)) error {
+	dir := filepath.Join(rt.dir, rel)
+	defer rt.lockPrep(rel)()
+	if _, err := os.Stat(dir); err == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		return err
+	}
+	rt.storeLock.Lock()
+	defer rt.storeLock.Unlock()
+	_, err := export.Export(ctx, rt.cfg.Store, digest, export.Options{Dir: dir, NoBase: true, Adapters: []string{}, Routers: true}, progress)
 	return err
 }
 
@@ -789,7 +819,7 @@ func (rt *Runtime) pruneable(dryRun bool) ([]string, error) {
 		}
 	}
 	var doomed []string
-	for _, sub := range []string{"bases", "adapters", "mixes", "logs"} {
+	for _, sub := range []string{"bases", "adapters", "mixes", "routers", "logs"} {
 		dir := filepath.Join(rt.dir, sub)
 		entries, err := os.ReadDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
@@ -842,10 +872,10 @@ func mixRank(p *plan) int {
 
 // writeMix writes the directory vLLM loads a MIX from, with the
 // weightpack-vllm plugin: an adapter config of the stacked rank, and
-// weightpack_mix.json naming each expert's exported adapter. The plugin
-// stacks the experts' weights; wpkd writes only JSON. It returns the
-// directory.
-func (rt *Runtime) writeMix(p *plan, adapterRels []string, rel string) (string, error) {
+// weightpack_mix.json naming each expert's exported adapter, and the router
+// file of a trained router. The plugin stacks the experts' weights; wpkd
+// writes only JSON. It returns the directory.
+func (rt *Runtime) writeMix(p *plan, adapterRels []string, rel, routerFile string) (string, error) {
 	dir := filepath.Join(rt.dir, rel)
 	if _, err := os.Stat(filepath.Join(dir, mixFile)); err == nil {
 		return dir, nil
@@ -874,8 +904,11 @@ func (rt *Runtime) writeMix(p *plan, adapterRels []string, rel string) (string, 
 		"base_model_name_or_path": "",
 	}
 	mix := map[string]any{
-		"version": 1, "router": cmp.Or(p.mix.Router, "arrow"), "top_k": p.mix.TopK,
+		"version": 1, "router": cmp.Or(p.mix.Router, spec.RouterArrow), "top_k": p.mix.TopK,
 		"targets": p.mix.Targets, "blocks": p.mix.Blocks, "experts": experts,
+	}
+	if routerFile != "" {
+		mix["router_file"] = routerFile
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return "", err

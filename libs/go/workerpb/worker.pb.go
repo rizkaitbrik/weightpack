@@ -824,6 +824,303 @@ func (x *SquashResponse) GetTensors() []*MergedTensor {
 	return nil
 }
 
+// A PEFT LoRA adapter directory, as wpk export writes one.
+type Adapter struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Dir           string                 `protobuf:"bytes,2,opt,name=dir,proto3" json:"dir,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Adapter) Reset() {
+	*x = Adapter{}
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Adapter) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Adapter) ProtoMessage() {}
+
+func (x *Adapter) ProtoReflect() protoreflect.Message {
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Adapter.ProtoReflect.Descriptor instead.
+func (*Adapter) Descriptor() ([]byte, []int) {
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *Adapter) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Adapter) GetDir() string {
+	if x != nil {
+		return x.Dir
+	}
+	return ""
+}
+
+type TrainRouterRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The serving base: a Hugging Face model directory with every layer below
+	// the mix baked in, as wpkd serves it.
+	BaseDir string `protobuf:"bytes,1,opt,name=base_dir,json=baseDir,proto3" json:"base_dir,omitempty"`
+	// The mix's experts in mix order. The router file has one row per expert
+	// in this order.
+	Experts []*Adapter `protobuf:"bytes,2,rep,name=experts,proto3" json:"experts,omitempty"`
+	Targets []string   `protobuf:"bytes,3,rep,name=targets,proto3" json:"targets,omitempty"` // canonical names: q, k, v, o, gate, up, down
+	Blocks  string     `protobuf:"bytes,4,opt,name=blocks,proto3" json:"blocks,omitempty"`   // "" for all, or ranges such as "0-3,8-31"
+	TopK    int32      `protobuf:"varint,5,opt,name=top_k,json=topK,proto3" json:"top_k,omitempty"`
+	// JSON Lines training data: {"messages": [...]}, {"prompt", "completion"}
+	// or {"text"} per line.
+	Data  string `protobuf:"bytes,6,opt,name=data,proto3" json:"data,omitempty"`
+	Steps int32  `protobuf:"varint,7,opt,name=steps,proto3" json:"steps,omitempty"`
+	// Where to write the router: a safetensors file holding, for each routed
+	// module, <module>.router.weight [experts, in] and <module>.router.bias
+	// [experts], in float32. The daemon checks and stores it.
+	OutFile string `protobuf:"bytes,8,opt,name=out_file,json=outFile,proto3" json:"out_file,omitempty"`
+	Device  string `protobuf:"bytes,9,opt,name=device,proto3" json:"device,omitempty"` // cuda, mps or cpu; "" picks the best there is
+	// A Jinja chat template that replaces the tokenizer's, as the image's
+	// TEMPLATE does when it is served; "" keeps the tokenizer's.
+	ChatTemplate  string `protobuf:"bytes,10,opt,name=chat_template,json=chatTemplate,proto3" json:"chat_template,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TrainRouterRequest) Reset() {
+	*x = TrainRouterRequest{}
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrainRouterRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrainRouterRequest) ProtoMessage() {}
+
+func (x *TrainRouterRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrainRouterRequest.ProtoReflect.Descriptor instead.
+func (*TrainRouterRequest) Descriptor() ([]byte, []int) {
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *TrainRouterRequest) GetBaseDir() string {
+	if x != nil {
+		return x.BaseDir
+	}
+	return ""
+}
+
+func (x *TrainRouterRequest) GetExperts() []*Adapter {
+	if x != nil {
+		return x.Experts
+	}
+	return nil
+}
+
+func (x *TrainRouterRequest) GetTargets() []string {
+	if x != nil {
+		return x.Targets
+	}
+	return nil
+}
+
+func (x *TrainRouterRequest) GetBlocks() string {
+	if x != nil {
+		return x.Blocks
+	}
+	return ""
+}
+
+func (x *TrainRouterRequest) GetTopK() int32 {
+	if x != nil {
+		return x.TopK
+	}
+	return 0
+}
+
+func (x *TrainRouterRequest) GetData() string {
+	if x != nil {
+		return x.Data
+	}
+	return ""
+}
+
+func (x *TrainRouterRequest) GetSteps() int32 {
+	if x != nil {
+		return x.Steps
+	}
+	return 0
+}
+
+func (x *TrainRouterRequest) GetOutFile() string {
+	if x != nil {
+		return x.OutFile
+	}
+	return ""
+}
+
+func (x *TrainRouterRequest) GetDevice() string {
+	if x != nil {
+		return x.Device
+	}
+	return ""
+}
+
+func (x *TrainRouterRequest) GetChatTemplate() string {
+	if x != nil {
+		return x.ChatTemplate
+	}
+	return ""
+}
+
+type TrainRouterProgress struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Step  int32                  `protobuf:"varint,1,opt,name=step,proto3" json:"step,omitempty"`
+	Steps int32                  `protobuf:"varint,2,opt,name=steps,proto3" json:"steps,omitempty"`
+	Loss  float64                `protobuf:"fixed64,3,opt,name=loss,proto3" json:"loss,omitempty"` // smoothed training loss
+	// Set on the last message only.
+	Done          bool    `protobuf:"varint,4,opt,name=done,proto3" json:"done,omitempty"`
+	Examples      int32   `protobuf:"varint,5,opt,name=examples,proto3" json:"examples,omitempty"`                           // trained on
+	Heldout       int32   `protobuf:"varint,6,opt,name=heldout,proto3" json:"heldout,omitempty"`                             // held out to measure the loss on
+	ArrowLoss     float64 `protobuf:"fixed64,7,opt,name=arrow_loss,json=arrowLoss,proto3" json:"arrow_loss,omitempty"`       // held-out loss with Arrow, the starting point
+	TrainedLoss   float64 `protobuf:"fixed64,8,opt,name=trained_loss,json=trainedLoss,proto3" json:"trained_loss,omitempty"` // and with the trained router
+	Device        string  `protobuf:"bytes,9,opt,name=device,proto3" json:"device,omitempty"`
+	Seconds       float64 `protobuf:"fixed64,10,opt,name=seconds,proto3" json:"seconds,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TrainRouterProgress) Reset() {
+	*x = TrainRouterProgress{}
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TrainRouterProgress) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TrainRouterProgress) ProtoMessage() {}
+
+func (x *TrainRouterProgress) ProtoReflect() protoreflect.Message {
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TrainRouterProgress.ProtoReflect.Descriptor instead.
+func (*TrainRouterProgress) Descriptor() ([]byte, []int) {
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *TrainRouterProgress) GetStep() int32 {
+	if x != nil {
+		return x.Step
+	}
+	return 0
+}
+
+func (x *TrainRouterProgress) GetSteps() int32 {
+	if x != nil {
+		return x.Steps
+	}
+	return 0
+}
+
+func (x *TrainRouterProgress) GetLoss() float64 {
+	if x != nil {
+		return x.Loss
+	}
+	return 0
+}
+
+func (x *TrainRouterProgress) GetDone() bool {
+	if x != nil {
+		return x.Done
+	}
+	return false
+}
+
+func (x *TrainRouterProgress) GetExamples() int32 {
+	if x != nil {
+		return x.Examples
+	}
+	return 0
+}
+
+func (x *TrainRouterProgress) GetHeldout() int32 {
+	if x != nil {
+		return x.Heldout
+	}
+	return 0
+}
+
+func (x *TrainRouterProgress) GetArrowLoss() float64 {
+	if x != nil {
+		return x.ArrowLoss
+	}
+	return 0
+}
+
+func (x *TrainRouterProgress) GetTrainedLoss() float64 {
+	if x != nil {
+		return x.TrainedLoss
+	}
+	return 0
+}
+
+func (x *TrainRouterProgress) GetDevice() string {
+	if x != nil {
+		return x.Device
+	}
+	return ""
+}
+
+func (x *TrainRouterProgress) GetSeconds() float64 {
+	if x != nil {
+		return x.Seconds
+	}
+	return 0
+}
+
 var File_weightpack_worker_v1_worker_proto protoreflect.FileDescriptor
 
 const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
@@ -873,7 +1170,35 @@ const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04file\x18\x02 \x01(\tR\x04file\"N\n" +
 	"\x0eSquashResponse\x12<\n" +
-	"\atensors\x18\x01 \x03(\v2\".weightpack.worker.v1.MergedTensorR\atensors*_\n" +
+	"\atensors\x18\x01 \x03(\v2\".weightpack.worker.v1.MergedTensorR\atensors\"+\n" +
+	"\aAdapter\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x10\n" +
+	"\x03dir\x18\x02 \x01(\tR\x03dir\"\xb1\x02\n" +
+	"\x12TrainRouterRequest\x12\x19\n" +
+	"\bbase_dir\x18\x01 \x01(\tR\abaseDir\x127\n" +
+	"\aexperts\x18\x02 \x03(\v2\x1d.weightpack.worker.v1.AdapterR\aexperts\x12\x18\n" +
+	"\atargets\x18\x03 \x03(\tR\atargets\x12\x16\n" +
+	"\x06blocks\x18\x04 \x01(\tR\x06blocks\x12\x13\n" +
+	"\x05top_k\x18\x05 \x01(\x05R\x04topK\x12\x12\n" +
+	"\x04data\x18\x06 \x01(\tR\x04data\x12\x14\n" +
+	"\x05steps\x18\a \x01(\x05R\x05steps\x12\x19\n" +
+	"\bout_file\x18\b \x01(\tR\aoutFile\x12\x16\n" +
+	"\x06device\x18\t \x01(\tR\x06device\x12#\n" +
+	"\rchat_template\x18\n" +
+	" \x01(\tR\fchatTemplate\"\x91\x02\n" +
+	"\x13TrainRouterProgress\x12\x12\n" +
+	"\x04step\x18\x01 \x01(\x05R\x04step\x12\x14\n" +
+	"\x05steps\x18\x02 \x01(\x05R\x05steps\x12\x12\n" +
+	"\x04loss\x18\x03 \x01(\x01R\x04loss\x12\x12\n" +
+	"\x04done\x18\x04 \x01(\bR\x04done\x12\x1a\n" +
+	"\bexamples\x18\x05 \x01(\x05R\bexamples\x12\x18\n" +
+	"\aheldout\x18\x06 \x01(\x05R\aheldout\x12\x1d\n" +
+	"\n" +
+	"arrow_loss\x18\a \x01(\x01R\tarrowLoss\x12!\n" +
+	"\ftrained_loss\x18\b \x01(\x01R\vtrainedLoss\x12\x16\n" +
+	"\x06device\x18\t \x01(\tR\x06device\x12\x18\n" +
+	"\aseconds\x18\n" +
+	" \x01(\x01R\aseconds*_\n" +
 	"\x05Codec\x12\x15\n" +
 	"\x11CODEC_UNSPECIFIED\x10\x00\x12\r\n" +
 	"\tCODEC_XOR\x10\x01\x12\x0e\n" +
@@ -881,12 +1206,13 @@ const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"CODEC_BIT1\x10\x02\x12\x10\n" +
 	"\fCODEC_SPARSE\x10\x03\x12\x0e\n" +
 	"\n" +
-	"CODEC_LORA\x10\x042\xeb\x02\n" +
+	"CODEC_LORA\x10\x042\xd1\x03\n" +
 	"\x06Worker\x12b\n" +
 	"\vEncodeLayer\x12(.weightpack.worker.v1.EncodeLayerRequest\x1a).weightpack.worker.v1.EncodeLayerResponse\x12Y\n" +
 	"\bEvaluate\x12%.weightpack.worker.v1.EvaluateRequest\x1a&.weightpack.worker.v1.EvaluateResponse\x12M\n" +
 	"\x04Info\x12!.weightpack.worker.v1.InfoRequest\x1a\".weightpack.worker.v1.InfoResponse\x12S\n" +
-	"\x06Squash\x12#.weightpack.worker.v1.SquashRequest\x1a$.weightpack.worker.v1.SquashResponseB=Z;github.com/rizkaitbrik/weightpack/libs/go/workerpb;workerpbb\x06proto3"
+	"\x06Squash\x12#.weightpack.worker.v1.SquashRequest\x1a$.weightpack.worker.v1.SquashResponse\x12d\n" +
+	"\vTrainRouter\x12(.weightpack.worker.v1.TrainRouterRequest\x1a).weightpack.worker.v1.TrainRouterProgress0\x01B=Z;github.com/rizkaitbrik/weightpack/libs/go/workerpb;workerpbb\x06proto3"
 
 var (
 	file_weightpack_worker_v1_worker_proto_rawDescOnce sync.Once
@@ -901,7 +1227,7 @@ func file_weightpack_worker_v1_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_weightpack_worker_v1_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_weightpack_worker_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_weightpack_worker_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_weightpack_worker_v1_worker_proto_goTypes = []any{
 	(Codec)(0),                  // 0: weightpack.worker.v1.Codec
 	(*XORLayer)(nil),            // 1: weightpack.worker.v1.XORLayer
@@ -917,6 +1243,9 @@ var file_weightpack_worker_v1_worker_proto_goTypes = []any{
 	(*SquashRequest)(nil),       // 11: weightpack.worker.v1.SquashRequest
 	(*MergedTensor)(nil),        // 12: weightpack.worker.v1.MergedTensor
 	(*SquashResponse)(nil),      // 13: weightpack.worker.v1.SquashResponse
+	(*Adapter)(nil),             // 14: weightpack.worker.v1.Adapter
+	(*TrainRouterRequest)(nil),  // 15: weightpack.worker.v1.TrainRouterRequest
+	(*TrainRouterProgress)(nil), // 16: weightpack.worker.v1.TrainRouterProgress
 }
 var file_weightpack_worker_v1_worker_proto_depIdxs = []int32{
 	9,  // 0: weightpack.worker.v1.XORLayer.blobs:type_name -> weightpack.worker.v1.Blob
@@ -930,19 +1259,22 @@ var file_weightpack_worker_v1_worker_proto_depIdxs = []int32{
 	10, // 8: weightpack.worker.v1.SquashRequest.layers:type_name -> weightpack.worker.v1.LoRALayer
 	1,  // 9: weightpack.worker.v1.SquashRequest.xor_layers:type_name -> weightpack.worker.v1.XORLayer
 	12, // 10: weightpack.worker.v1.SquashResponse.tensors:type_name -> weightpack.worker.v1.MergedTensor
-	2,  // 11: weightpack.worker.v1.Worker.EncodeLayer:input_type -> weightpack.worker.v1.EncodeLayerRequest
-	5,  // 12: weightpack.worker.v1.Worker.Evaluate:input_type -> weightpack.worker.v1.EvaluateRequest
-	7,  // 13: weightpack.worker.v1.Worker.Info:input_type -> weightpack.worker.v1.InfoRequest
-	11, // 14: weightpack.worker.v1.Worker.Squash:input_type -> weightpack.worker.v1.SquashRequest
-	4,  // 15: weightpack.worker.v1.Worker.EncodeLayer:output_type -> weightpack.worker.v1.EncodeLayerResponse
-	6,  // 16: weightpack.worker.v1.Worker.Evaluate:output_type -> weightpack.worker.v1.EvaluateResponse
-	8,  // 17: weightpack.worker.v1.Worker.Info:output_type -> weightpack.worker.v1.InfoResponse
-	13, // 18: weightpack.worker.v1.Worker.Squash:output_type -> weightpack.worker.v1.SquashResponse
-	15, // [15:19] is the sub-list for method output_type
-	11, // [11:15] is the sub-list for method input_type
-	11, // [11:11] is the sub-list for extension type_name
-	11, // [11:11] is the sub-list for extension extendee
-	0,  // [0:11] is the sub-list for field type_name
+	14, // 11: weightpack.worker.v1.TrainRouterRequest.experts:type_name -> weightpack.worker.v1.Adapter
+	2,  // 12: weightpack.worker.v1.Worker.EncodeLayer:input_type -> weightpack.worker.v1.EncodeLayerRequest
+	5,  // 13: weightpack.worker.v1.Worker.Evaluate:input_type -> weightpack.worker.v1.EvaluateRequest
+	7,  // 14: weightpack.worker.v1.Worker.Info:input_type -> weightpack.worker.v1.InfoRequest
+	11, // 15: weightpack.worker.v1.Worker.Squash:input_type -> weightpack.worker.v1.SquashRequest
+	15, // 16: weightpack.worker.v1.Worker.TrainRouter:input_type -> weightpack.worker.v1.TrainRouterRequest
+	4,  // 17: weightpack.worker.v1.Worker.EncodeLayer:output_type -> weightpack.worker.v1.EncodeLayerResponse
+	6,  // 18: weightpack.worker.v1.Worker.Evaluate:output_type -> weightpack.worker.v1.EvaluateResponse
+	8,  // 19: weightpack.worker.v1.Worker.Info:output_type -> weightpack.worker.v1.InfoResponse
+	13, // 20: weightpack.worker.v1.Worker.Squash:output_type -> weightpack.worker.v1.SquashResponse
+	16, // 21: weightpack.worker.v1.Worker.TrainRouter:output_type -> weightpack.worker.v1.TrainRouterProgress
+	17, // [17:22] is the sub-list for method output_type
+	12, // [12:17] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_weightpack_worker_v1_worker_proto_init() }
@@ -956,7 +1288,7 @@ func file_weightpack_worker_v1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_weightpack_worker_v1_worker_proto_rawDesc), len(file_weightpack_worker_v1_worker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   16,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
