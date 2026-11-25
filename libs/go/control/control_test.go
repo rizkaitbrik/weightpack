@@ -135,22 +135,68 @@ func TestChooseByBaseAffinity(t *testing.T) {
 		{[]agentState{idle, holdsBase, full}, "base"},
 		{[]agentState{idle, full, down}, "idle"},
 	} {
-		got, err := choose(c.states, m, res)
+		got, err := choose(c.states, m, res, nil)
 		if err != nil || got.Node.Name != c.want {
 			t.Errorf("choose = %s, %v; want %s", got.Node.Name, err, c.want)
 		}
 	}
-	if _, err := choose([]agentState{full, down}, m, res); err == nil || !strings.Contains(err.Error(), "--max-engines") {
+	if _, err := choose([]agentState{full, down}, m, res, nil); err == nil || !strings.Contains(err.Error(), "--max-engines") {
 		t.Errorf("only a full node: %v", err)
 	}
-	if _, err := choose([]agentState{down}, m, res); err == nil || !strings.Contains(err.Error(), "no node agent is up") {
+	if _, err := choose([]agentState{down}, m, res, nil); err == nil || !strings.Contains(err.Error(), "no node agent is up") {
 		t.Errorf("no node up: %v", err)
 	}
 	// A pinned engine kind rules out reuse of another kind's engine.
 	vllm := m
 	vllm.Engine = "vllm"
-	if got, _ := choose([]agentState{idle, servesBase}, vllm, res); got.Node.Name != "idle" {
+	if got, _ := choose([]agentState{idle, servesBase}, vllm, res, nil); got.Node.Name != "idle" {
 		t.Errorf("vllm model went to %s", got.Node.Name)
+	}
+
+	// Nodes that report their devices and engines take only models they
+	// can run; a node that reports neither (an older wpkd) may take any.
+	gpu := agentState{URL: "g-gpu", Up: true, Node: node("gpu", 3, 0)}
+	gpu.Node.Devices, gpu.Node.EngineKinds = []string{"cuda", "cpu"}, []string{"reference", "vllm"}
+	cpu := agentState{URL: "a-cpu", Up: true, Node: node("cpu", 0, 0)}
+	cpu.Node.Devices, cpu.Node.EngineKinds = []string{"cpu"}, []string{"reference"}
+	for _, c := range []struct {
+		engine, device, want string
+	}{
+		{"vllm", "", "gpu"}, {"", "cuda", "gpu"}, {"reference", "cuda", "gpu"}, {"", "", "cpu"}, {"reference", "cpu", "cpu"},
+	} {
+		pinned := m
+		pinned.Engine, pinned.Device = c.engine, c.device
+		if got, err := choose([]agentState{cpu, gpu}, pinned, res, nil); err != nil || got.Node.Name != c.want {
+			t.Errorf("engine %q device %q went to %s (%v), want %s", c.engine, c.device, got.Node.Name, err, c.want)
+		}
+	}
+	mps := m
+	mps.Device = "mps"
+	if _, err := choose([]agentState{cpu, gpu}, mps, res, nil); err == nil || !strings.Contains(err.Error(), "lacks its engine or device") {
+		t.Errorf("no mps node: %v", err)
+	}
+	if got, _ := choose([]agentState{cpu, idle}, mps, res, nil); got.Node.Name != "idle" {
+		t.Errorf("an mps model on a node that does not say: %s", got.Node.Name)
+	}
+	// A node that just failed to place the model is passed over.
+	if got, _ := choose([]agentState{cpu, gpu}, m, res, map[string]bool{"a-cpu": true}); got.Node.Name != "gpu" {
+		t.Errorf("avoided node chosen: %s", got.Node.Name)
+	}
+}
+
+func TestPlacementMovesOnAfterAFailure(t *testing.T) {
+	reg := newRegistry()
+	reg.set("reg.example/chat:v1", fakeImage{digest: "sha256:c1", base: "b", servingBase: "sb"})
+	a, b := newFakeAgent(t, "gpu-a", reg), newFakeAgent(t, "gpu-b", reg)
+	a.failRun = "CUDA out of memory"
+	cl := newCluster(t, []*fakeAgent{a, b}, reg, Model{Name: "chat", Image: "reg.example/chat:v1", Replicas: 1})
+	cl.sync(t) // gpu-a sorts first, and fails
+	if _, ok := a.running()["chat"]; ok {
+		t.Fatal("gpu-a ran it")
+	}
+	cl.sync(t)
+	if _, ok := b.running()["chat"]; !ok {
+		t.Fatalf("the retry did not move to gpu-b; status %v", cl.c.status)
 	}
 }
 

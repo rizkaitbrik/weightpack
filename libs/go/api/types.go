@@ -394,8 +394,12 @@ type Node struct {
 	Serving bool `json:"serving"`
 	// GatewayPort is the OpenAI gateway's port, on the same host as the API.
 	GatewayPort int `json:"gateway_port,omitempty"`
-	// Device is the default device containers run on.
-	Device string `json:"device,omitempty"`
+	// Device is the default device containers run on; Devices are all the
+	// devices they can run on, and EngineKinds the engines installed
+	// ("reference", and "vllm" on an NVIDIA GPU with vLLM).
+	Device      string   `json:"device,omitempty"`
+	Devices     []string `json:"devices,omitempty"`
+	EngineKinds []string `json:"engine_kinds,omitempty"`
 	// Engines counts the engine processes running; MaxEngines caps them
 	// (0: no cap). A container on a base no engine serves yet needs one.
 	Engines    int `json:"engines"`

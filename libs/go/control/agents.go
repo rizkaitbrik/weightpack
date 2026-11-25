@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -172,6 +173,19 @@ func (s agentState) serves(model string) bool {
 		}
 	}
 	return false
+}
+
+// canRun reports whether the agent has the model's pinned engine and
+// device. An agent that reports neither list (an older wpkd) may.
+func (s agentState) canRun(m Model) bool {
+	n := s.Node
+	if m.Device != "" && len(n.Devices) > 0 && !slices.Contains(n.Devices, m.Device) {
+		return false
+	}
+	if m.Engine != "" && len(n.EngineKinds) > 0 && !slices.Contains(n.EngineKinds, m.Engine) {
+		return false
+	}
+	return true
 }
 
 // container returns the agent's container named name, if any.

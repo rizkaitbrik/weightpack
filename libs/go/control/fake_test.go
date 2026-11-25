@@ -48,6 +48,7 @@ type fakeAgent struct {
 	reg        *fakeRegistry
 	api, gw    *httptest.Server
 	maxEngines int
+	failRun    string // when set, every run fails with it
 
 	mu         sync.Mutex
 	images     []api.Image
@@ -139,6 +140,10 @@ func (a *fakeAgent) handle(w http.ResponseWriter, r *http.Request) {
 	case "POST /v1/run":
 		var req api.RunRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if a.failRun != "" {
+			stream(api.Event{Error: a.failRun})
+			return
+		}
 		img, ok := a.reg.get(req.Ref)
 		if !ok {
 			stream(api.Event{Error: "no such image"})

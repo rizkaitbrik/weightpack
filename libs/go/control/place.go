@@ -20,9 +20,10 @@ const (
 )
 
 // choose picks the agent to start model on, by base affinity, among agents
-// that serve, are up, have no container of that name, and have room for
-// an engine unless they already run the image's serving base.
-func choose(states []agentState, m Model, res resolution) (agentState, error) {
+// that serve, are up, can run the model's engine and device, have no
+// container of that name, have room for an engine unless they already run
+// the image's serving base, and are not in avoid.
+func choose(states []agentState, m Model, res resolution, avoid map[string]bool) (agentState, error) {
 	type candidate struct {
 		s     agentState
 		score int
@@ -34,7 +35,7 @@ func choose(states []agentState, m Model, res resolution) (agentState, error) {
 			continue
 		}
 		up++
-		if _, taken := s.container(m.Name); taken {
+		if _, taken := s.container(m.Name); taken || avoid[s.URL] || !s.canRun(m) {
 			continue
 		}
 		reuse := false
@@ -150,13 +151,20 @@ func (c *Controller) place(ctx context.Context, m Model, on string) (err error) 
 			return fmt.Errorf("agent %s is gone", on)
 		}
 		target = a.snapshot()
-	} else if target, err = choose(c.states(), m, res); err != nil {
+	} else if target, err = choose(c.states(), m, res, c.recentFailures(m.Name)); err != nil {
 		return err
 	}
 	a := c.agentByURL(target.URL)
 	if a == nil {
 		return fmt.Errorf("agent %s is gone", target.URL)
 	}
+	// A node that fails to place the model is passed over for a while, so
+	// the next try goes elsewhere.
+	defer func() {
+		if err != nil {
+			c.placementFailed(m.Name, target.URL)
+		}
+	}()
 	c.cfg.Logger.Info("placing", "model", m.Name, "image", m.Image, "digest", res.Digest, "node", target.Node.Name, "agent", a.url)
 	// The run resolves m.Image in the node's store, so that name must
 	// point at the digest: holding it under another name, or an older
@@ -173,6 +181,32 @@ func (c *Controller) place(ctx context.Context, m Model, on string) (err error) 
 	a.refresh(ctx)
 	c.cfg.Logger.Info("placed", "model", m.Name, "node", target.Node.Name, "took", time.Since(start).Round(time.Second))
 	return nil
+}
+
+// failureCooldown is how long a node that failed to place a model is
+// passed over for it.
+const failureCooldown = 2 * time.Minute
+
+func (c *Controller) placementFailed(model, agentURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failed[model] == nil {
+		c.failed[model] = map[string]time.Time{}
+	}
+	c.failed[model][agentURL] = time.Now()
+}
+
+// recentFailures are the agents that failed to place model lately.
+func (c *Controller) recentFailures(model string) map[string]bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := map[string]bool{}
+	for u, at := range c.failed[model] {
+		if time.Since(at) < failureCooldown {
+			out[u] = true
+		}
+	}
+	return out
 }
 
 // current reports whether a node's store resolves image to digest: by its
@@ -272,7 +306,7 @@ func (c *Controller) reconcileModel(ctx context.Context, m Model, states []agent
 	}
 	switch {
 	case len(good) < target:
-		_, err := choose(states, m, res)
+		_, err := choose(states, m, res, c.recentFailures(m.Name))
 		switch {
 		case err == nil:
 			c.startAsync(m, "")
