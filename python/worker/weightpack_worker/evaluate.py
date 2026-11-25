@@ -121,8 +121,20 @@ def _load(model_dir: str, device: str, chat_template: str | None):
 def self_suite(model, tok, max_new_tokens: int = 128) -> Suite:
     """The source's own greedy replies to SELF_PROMPTS."""
     import torch
+    import transformers
 
     chat = bool(getattr(tok, "chat_template", None))
+    # Plain greedy decoding: a checkpoint's own generation config may add a
+    # repetition penalty, and the replies would then not be the model's
+    # first choices.
+    greedy = transformers.GenerationConfig(
+        do_sample=False,
+        max_new_tokens=max_new_tokens,
+        eos_token_id=model.generation_config.eos_token_id,
+        pad_token_id=tok.pad_token_id
+        if tok.pad_token_id is not None
+        else tok.eos_token_id,
+    )
     examples = []
     for prompt in SELF_PROMPTS:
         if chat:
@@ -137,9 +149,7 @@ def self_suite(model, tok, max_new_tokens: int = 128) -> Suite:
             out = model.generate(
                 x,
                 attention_mask=torch.ones_like(x),
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                pad_token_id=tok.pad_token_id or tok.eos_token_id,
+                generation_config=greedy,
             )
         reply = tok.decode(out[0, x.shape[1] :], skip_special_tokens=True)
         if chat:
