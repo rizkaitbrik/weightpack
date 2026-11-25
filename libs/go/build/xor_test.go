@@ -258,3 +258,35 @@ func TestDecodeXORLayerStaysInItsDirectory(t *testing.T) {
 		t.Errorf("files escaped the directory: %v", leaked)
 	}
 }
+
+func TestXORChecksTheTokenizer(t *testing.T) {
+	f := newFixture(t)
+	cases := map[string]struct {
+		tokenizer string // "" removes it
+		want      string // "" means the import succeeds
+	}{
+		"same bytes":       {`{"model":{"type":"BPE"}}`, ""},
+		"reformatted":      {"{ \"version\": \"1.0\",\n  \"model\" : { \"type\" : \"BPE\" } }", ""},
+		"other vocabulary": {`{"model":{"type":"BPE","vocab":{"hello":0}}}`, "tokenizer differs from its parent's"},
+		"none":             {"", ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(f.dir, "ft-"+strings.ReplaceAll(name, " ", "-"))
+			writeFinetune(t, dir, 7)
+			tok := filepath.Join(dir, "tokenizer.json")
+			if c.tokenizer == "" {
+				_ = os.Remove(tok)
+			} else if err := os.WriteFile(tok, []byte(c.tokenizer), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := f.buildXOR(t, "W", "FROM ./base\nLAYER ft "+dir+" codec=xor\n", &xorWorker{})
+			switch {
+			case c.want == "" && err != nil:
+				t.Fatalf("import refused: %v", err)
+			case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+				t.Fatalf("err = %v, want %q", err, c.want)
+			}
+		})
+	}
+}

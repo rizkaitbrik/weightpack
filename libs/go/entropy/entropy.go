@@ -28,7 +28,11 @@ func Suffix(mediaType string) string {
 // depends only on the input (one encoder goroutine, a fixed level), so the
 // same tensor always gives the same blob digest with a given encoder
 // version.
-func Encode(coder string, r io.Reader) (io.Reader, error) {
+//
+// The caller must Close the reader, even after reading it to the end:
+// closing early stops the encoder goroutine, which would otherwise block on
+// its pipe forever.
+func Encode(coder string, r io.Reader) (io.ReadCloser, error) {
 	if coder != Zstd {
 		return nil, fmt.Errorf("unsupported entropy coder %q", coder)
 	}
