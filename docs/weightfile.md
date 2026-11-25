@@ -59,11 +59,27 @@ Without `codec=`, or with `codec=lora`, the source is an adapter and is stored a
 | -------- | -------------- | -------- | -------------------------------- |
 | `xor`    | `delta.xor`    | Yes      | —                                |
 | `bit1`   | `delta.bit1`   | No       | `max_drop=<n>`; `eval=` optional |
-| `sparse` | `delta.sparse` | No       | `max_drop=<n>`; `eval=` optional |
+| `sparse` | `delta.sparse` | No       | `max_drop=<n>`; `eval=` and `density=<n>` optional |
 
-`eval=` names the suite the build gates on; without it the domain's shared default suite applies. `eval` and `max_drop` are rejected on lossless codecs.
+`eval=` names the suite the build gates on; without it the build gates on the fine-tune's own replies to general prompts. `max_drop` is in points of next-token accuracy. `density` (in (0, 1], default 0.1) is the fraction of each matrix's delta that `sparse` keeps. `eval`, `max_drop` and `density` are rejected where they do not apply.
 
-`codec=xor` is supported: the source is a directory of safetensors weights with exactly the base's tensor names, dtypes and shapes, and the layer must sit on the base or on other `xor` layers (LoRA layers can go on top of it). The image keeps its parent's tokenizer and `config.json`, so the build refuses a fine-tune whose tokenizer or config differs from them in anything but metadata (`_name_or_path`, `transformers_version`, `torch_dtype` and the like): a changed `rope_theta`, say, would otherwise be silently dropped. Build such a fine-tune as a base of its own (`FROM`). The build needs `wpkd`'s build worker. `wpk import --parent <image | dir> [--id name] -t name <dir>` is shorthand for `FROM <parent>` plus one such layer. `bit1` and `sparse` are not supported yet.
+`codec=xor` is supported: the source is a directory of safetensors weights with exactly the base's tensor names, dtypes and shapes, and the layer must sit on the base or on other `xor` layers (LoRA layers can go on top of it). The image keeps its parent's tokenizer and `config.json`, so the build refuses a fine-tune whose tokenizer or config differs from them in anything but metadata (`_name_or_path`, `transformers_version`, `torch_dtype` and the like): a changed `rope_theta`, say, would otherwise be silently dropped. Build such a fine-tune as a base of its own (`FROM`). The build needs `wpkd`'s build worker. `wpk import --parent <image | dir> [--id name] -t name <dir>` is shorthand for `FROM <parent>` plus one such layer.
+
+`codec=bit1` and `codec=sparse` take the same sources, under the same rules, and store the fine-tune lossily: `bit1` keeps one sign bit per weight plus one scale per matrix (1/16 of BF16), and `sparse` keeps the largest `density` fraction of each matrix's change. They need torch and transformers in the build worker (the `serve` extra). The build then:
+
+1. encodes the delta and writes the model the layer gives back;
+2. scores the fine-tune and that model on the eval suite by next-token accuracy (the percent of the suite's learnt tokens each model predicts);
+3. fails if the fine-tune's score minus the layer's, the drop, exceeds `max_drop`;
+4. records both scores, the drop, the suite and the source's digest in the layer's fidelity record, which `wpk history` shows.
+
+An eval suite is a file of JSON Lines in the shapes `ROUTER train` reads (`{"messages": [...]}`, `{"prompt", "completion"}` or `{"text"}`), named after the file, or YAML that names one:
+
+```yaml
+name: finance-v2
+data: finance.jsonl # relative to this file
+```
+
+Without `eval=`, the suite is the fine-tune's greedy replies to a fixed set of general prompts, on which the fine-tune scores about 100: the drop is then about the share of reply tokens where the layer's first choice differs from the fine-tune's. A rebuild reuses the deltas and the eval from the build cache. A lossy layer has no PEFT form, so like an XOR layer it is squashed to export it, and it is baked into the serving base to run it.
 
 ## MIX parameters
 
@@ -121,6 +137,6 @@ An image named by `FROM`, `LAYER` or `EXPERT` comes from the local store, or is 
 
 Building `FROM` a pushed base gives the same image digest as building from the base's directory.
 
-Not yet supported, each with a clear error: lossy imports (`codec=bit1|sparse`), pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `rank_pattern` or `alpha_pattern`.
+Not yet supported, each with a clear error: pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `rank_pattern` or `alpha_pattern`.
 
 Building the same inputs twice gives the same image digest and stores nothing new; the build cache also lets a rebuild skip reading unchanged source files (`wpk build --no-cache` reads them anyway). Two images on the same base share its blobs, so the second stores only its own layers.
