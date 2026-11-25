@@ -330,15 +330,18 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		// the reference engine does that so far; vLLM serves the experts
 		// one per request.
 		if kind == EngineReference {
+			// An engine that cannot mix these experts (one replaces whole
+			// modules, say) still serves them one per request.
 			mn := mixName(*p.mix)
 			if err := e.loadMix(ctx, mn, c.adapters, *p.mix); err != nil {
-				c.unload()
-				return nil, fmt.Errorf("run %s: %w", req.Ref, err)
+				progress(api.Event{Step: step, Warning: true, Message: fmt.Sprintf(
+					"model %s, which would route each token, is not served (%v); the experts are", name, err)})
+			} else {
+				c.mix = mn
+				c.info.Models = append([]string{name}, c.info.Models...)
+				c.info.Router = p.mix.Router
+				upstream[name] = mn
 			}
-			c.mix = mn
-			c.info.Models = append([]string{name}, c.info.Models...)
-			c.info.Router = p.mix.Router
-			upstream[name] = mn
 		} else {
 			progress(api.Event{Step: step, Message: fmt.Sprintf(
 				"%s serves the experts one per request; for model %s, which routes each token, run with --engine reference", kind, name)})

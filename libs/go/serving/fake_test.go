@@ -38,6 +38,7 @@ func fakeEngine(args []string) int {
 	starts := fs.String("starts", "", "append a line to this file on start")
 	fail := fs.Bool("fail", false, "exit at once, as a broken engine does")
 	hang := fs.Bool("hang", false, "never answer, as an engine loading a large model")
+	rejectMixes := fs.Bool("reject-mixes", false, "refuse every mix, as for experts with saved modules")
 	model := fs.String("model", "", "")
 	host := fs.String("host", "127.0.0.1", "")
 	port := fs.Int("port", 0, "")
@@ -164,6 +165,10 @@ func fakeEngine(args []string) int {
 				fail400(w, 404, "unknown model or field '"+e+"'")
 				return
 			}
+		}
+		if *rejectMixes {
+			fail400(w, 400, "expert 'x' replaces whole modules (lm_head); token routing mixes LoRA updates only")
+			return
 		}
 		if _, ok := mixes[b.Name]; ok || b.TopK < 1 || len(b.Targets) == 0 || b.Router != "arrow" {
 			fail400(w, 400, "bad mix "+b.Name)

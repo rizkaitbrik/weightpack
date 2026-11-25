@@ -532,3 +532,29 @@ func TestMaxEngines(t *testing.T) {
 	}
 	f.run(t, api.RunRequest{Ref: "assistant"})
 }
+
+func TestMixWithoutTokenRouting(t *testing.T) {
+	f := newFixture(t, "--reject-mixes")
+	f.build(t, "domains", "FROM ./base\nMIX domain targets=mlp top_k=1\n  EXPERT legal ./adapters/legal\n  EXPERT medical ./adapters/medical\n")
+	var warnings []string
+	c, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "domains"}, func(e api.Event) {
+		if e.Warning {
+			warnings = append(warnings, e.Message)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.Models, []string{"domains/legal", "domains/medical"}) || c.Router != "" {
+		t.Errorf("container = %+v", c)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "replaces whole modules") {
+		t.Errorf("warnings = %q", warnings)
+	}
+	if status, _ := f.chat(t, map[string]any{"model": "domains/legal", "messages": []any{}}); status != 200 {
+		t.Errorf("an expert answered %d", status)
+	}
+	if _, err := f.rt.Stop([]string{"domains"}); err != nil {
+		t.Fatal(err)
+	}
+}

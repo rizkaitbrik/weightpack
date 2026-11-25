@@ -27,11 +27,15 @@ from .test_engine import PROMPT, get, post, tiny_model  # noqa: E402
 ALL = ["q", "k", "v", "o", "gate", "up", "down"]
 
 
-def adapter(base, path, seed, r=4, targets=("q_proj", "v_proj")):
+def adapter(base, path, seed, r=4, targets=("q_proj", "v_proj"), saved=None):
     torch.manual_seed(seed)
     model = transformers.AutoModelForCausalLM.from_pretrained(base)
     cfg = peft.LoraConfig(
-        r=r, lora_alpha=16, target_modules=list(targets), init_lora_weights=False
+        r=r,
+        lora_alpha=16,
+        target_modules=list(targets),
+        init_lora_weights=False,
+        modules_to_save=saved,
     )
     peft.get_peft_model(model, cfg).save_pretrained(path)
     return path
@@ -208,3 +212,24 @@ def test_mix_endpoints(tmp_path):
         assert [m["id"] for m in get(url + "/v1/models")["data"]] == ["tiny", "two"]
     finally:
         server.shutdown()
+
+
+def test_experts_with_saved_modules_are_not_mixed(tmp_path):
+    """Token routing has no sum of whole-module replacements, and dropping
+    them would serve an expert without weights it was trained with."""
+    base, one, tok = tiny_model(tmp_path)
+    head = adapter(base, tmp_path / "head", seed=3, saved=["lm_head"])
+    engine = Engine(str(base), device="cpu", served_name="tiny")
+    engine.load_adapter("one", str(one))
+    engine.load_adapter("head", str(head))
+    with pytest.raises(ValueError, match=r"'head' replaces whole modules \(lm_head\)"):
+        engine.load_mix("mix", ["one", "head"], 1, ALL)
+    assert "mix" not in engine.models()
+    # The expert still serves as its own model, saved head included.
+    ids = prompt_ids(tok)
+    with_head = logits(engine, "head", ids)
+    model = peft.PeftModel.from_pretrained(
+        transformers.AutoModelForCausalLM.from_pretrained(base), str(head)
+    ).eval()
+    with torch.no_grad():
+        assert torch.allclose(with_head, model(input_ids=ids).logits, atol=1e-5)

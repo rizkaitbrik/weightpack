@@ -17,7 +17,10 @@ and the prototypes are exact (an SVD of r x r factors), not power-iterated
 from a random start, so they do not depend on a seed.
 
 Modules an expert touches outside the MIX's targets and blocks are not
-applied when it is mixed; the build warns about them.
+applied when it is mixed; the build warns about them. An expert that
+replaces whole modules (PEFT's modules_to_save) cannot be mixed: there is
+no per-token sum of replacements, and dropping them would serve the
+expert without weights it was trained with.
 """
 
 from __future__ import annotations
@@ -122,6 +125,26 @@ class Route:
         return out.reshape(*shape[:-1], out.shape[-1])
 
 
+def refuse_saved_modules(peft_model, experts: list[str]) -> None:
+    """Raises if an expert replaces whole modules (modules_to_save)."""
+    import torch
+
+    saved: dict[str, list[str]] = {}
+    for name, module in peft_model.named_modules():
+        copies = getattr(module, "modules_to_save", None)
+        if not isinstance(copies, torch.nn.ModuleDict):
+            continue
+        for e in experts:
+            if e in copies:
+                saved.setdefault(e, []).append(name.removeprefix("base_model.model."))
+    for e, modules in saved.items():
+        raise ValueError(
+            f"expert {e!r} replaces whole modules ({', '.join(sorted(modules))}); "
+            "token routing mixes LoRA updates only, so serve the expert as its own "
+            "model"
+        )
+
+
 class Mix:
     """A MIX of loaded adapters, routed per token in the modules it covers."""
 
@@ -146,6 +169,7 @@ class Mix:
                 raise ValueError(f"bad blocks range {part!r}")
         self.experts, self.top_k = list(experts), top_k
         self.targets, self.blocks = list(targets), blocks
+        refuse_saved_modules(peft_model, self.experts)
         self.routes: list[Route] = []
         for name, module in peft_model.named_modules():
             lora_a = getattr(module, "lora_A", None)
