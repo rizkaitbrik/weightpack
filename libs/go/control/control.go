@@ -60,10 +60,11 @@ type Controller struct {
 	agents    map[string]*agent // by URL
 	catalogue *Catalogue        // the last catalogue that loaded
 	catErr    string
-	resolved  map[string]resolution // by image reference
-	placing   map[string]*placement // by model name
-	status    map[string]string     // by model name: the last placement error
-	next      int                   // round-robin among equally loaded agents
+	resolved  map[string]resolution           // by image reference
+	placing   map[string]*placement           // by model name
+	status    map[string]string               // by model name: the last placement error
+	failed    map[string]map[string]time.Time // by model, then agent: when a placement failed
+	next      int                             // round-robin among equally loaded agents
 
 	metrics metrics
 }
@@ -103,7 +104,7 @@ func New(cfg Config) *Controller {
 	}
 	c := &Controller{
 		cfg: cfg, agents: map[string]*agent{}, resolved: map[string]resolution{},
-		placing: map[string]*placement{}, status: map[string]string{},
+		placing: map[string]*placement{}, status: map[string]string{}, failed: map[string]map[string]time.Time{},
 		metrics: newMetrics(),
 	}
 	c.handler = c.routes()
@@ -270,5 +271,5 @@ func errNoAgent(model string, up int) error {
 	if up == 0 {
 		return fmt.Errorf("cannot place %s: no node agent is up", model)
 	}
-	return fmt.Errorf("cannot place %s: each of the %d nodes up serves it already or runs its most engines (wpkd --max-engines)", model, up)
+	return fmt.Errorf("cannot place %s: each of the %d nodes up serves it already, lacks its engine or device, runs its most engines (wpkd --max-engines), or just failed to start it", model, up)
 }

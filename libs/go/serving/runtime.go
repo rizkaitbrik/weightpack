@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -599,6 +600,28 @@ func (rt *Runtime) Engines() int {
 
 // MaxEngines is the cap on engines (Config.MaxEngines).
 func (rt *Runtime) MaxEngines() int { return rt.cfg.MaxEngines }
+
+// Devices are the devices containers can run on here: the one detected
+// and the CPU.
+func (rt *Runtime) Devices() []string {
+	rt.detectOnce.Do(func() { rt.detected = DetectDevice() })
+	if rt.detected == "cpu" {
+		return []string{"cpu"}
+	}
+	return []string{rt.detected, "cpu"}
+}
+
+// EngineKinds are the engines that can run here: the reference engine
+// always, vLLM on an NVIDIA GPU with its command installed.
+func (rt *Runtime) EngineKinds() []string {
+	kinds := []string{EngineReference}
+	if slices.Contains(rt.Devices(), "cuda") {
+		if _, err := exec.LookPath(rt.cfg.Engines[EngineVLLM][0]); err == nil {
+			kinds = append(kinds, EngineVLLM)
+		}
+	}
+	return kinds
+}
 
 // Device is the device containers run on when a run names none.
 func (rt *Runtime) Device() string {

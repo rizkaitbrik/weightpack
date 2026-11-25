@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +97,9 @@ func TestServeAPIOverTCP(t *testing.T) {
 	}
 	if node.Name != "gpu-7" || !node.Serving || node.GatewayPort == 0 || node.MaxEngines != 1 || node.Engines != 0 {
 		t.Errorf("node = %+v", node)
+	}
+	if !slices.Contains(node.Devices, "cpu") || !slices.Contains(node.EngineKinds, "reference") {
+		t.Errorf("node devices %v, engines %v", node.Devices, node.EngineKinds)
 	}
 	if _, err := api.NewRemoteClient("http://"+addr, "wrong", nil).Node(context.Background()); err == nil || !strings.Contains(err.Error(), "API key") {
 		t.Errorf("wrong key: %v", err)

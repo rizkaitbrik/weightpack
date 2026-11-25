@@ -24,6 +24,8 @@ func (s *server) nodeInfo(w http.ResponseWriter, _ *http.Request) {
 	if s.runtime != nil {
 		n.Serving = true
 		n.Device = s.runtime.Device()
+		n.Devices = s.runtime.Devices()
+		n.EngineKinds = s.runtime.EngineKinds()
 		n.Engines = s.runtime.Engines()
 		n.MaxEngines = s.runtime.MaxEngines()
 	}
