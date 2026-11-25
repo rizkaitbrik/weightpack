@@ -501,3 +501,26 @@ func mustStore(t *testing.T) *store.Store {
 	}
 	return s
 }
+
+func TestMaxEngines(t *testing.T) {
+	f := newFixture(t)
+	f.rt.cfg.MaxEngines = 1
+	f.build(t, "french", "FROM ./base\nLAYER french ./adapters/french\n")
+	f.build(t, "assistant", buildtest.Assistant)
+	f.run(t, api.RunRequest{Ref: "french"})
+	if f.rt.Engines() != 1 || f.rt.Device() != "cpu" {
+		t.Errorf("engines = %d, device %q", f.rt.Engines(), f.rt.Device())
+	}
+	// The assistant's serving base bakes French in: another base, so
+	// another engine, over the cap.
+	if _, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "assistant"}, nil); err == nil || !strings.Contains(err.Error(), "--max-engines") {
+		t.Fatalf("a second base over the cap: %v", err)
+	}
+	// Another image on the running base only adds an adapter.
+	f.build(t, "french2", "FROM ./base\nLAYER french ./adapters/french\n")
+	f.run(t, api.RunRequest{Ref: "french2"})
+	if _, err := f.rt.Stop([]string{"french", "french2"}); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t, api.RunRequest{Ref: "assistant"})
+}

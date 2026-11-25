@@ -1,0 +1,103 @@
+# Images: <repository>:<tag>-cpu, -cuda and -control, as the release
+# publishes them. The tag defaults to v<appVersion>.
+image:
+  repository: ghcr.io/rizkaitbrik/weightpack
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+clusterDomain: cluster.local
+
+# Keys. The chart makes a Secret with a random agent-key (the control
+# plane's key to the agents' API and gateways), kept across upgrades. Or
+# name your own Secret, with keys agent-key and, optionally, api-key.
+auth:
+  existingSecret: ""
+  # Bearer token clients must send to the control plane. Empty leaves its
+  # gateway open to anything that reaches the Service.
+  apiKey: ""
+
+# The node agent: wpkd on every node the DaemonSet selects, with its store
+# on the node's disk so base weights survive restarts and upgrades.
+agent:
+  # cuda: vLLM (and the reference engine) on NVIDIA GPUs. cpu: the
+  # reference engine on CPU, for small models and tests.
+  variant: cuda
+  # GPUs each agent claims (nvidia.com/gpu); 0 claims none.
+  gpus: 1
+  # Most engine processes per node. vLLM claims about 90% of a GPU, so one
+  # base per GPU node unless engines get a smaller share
+  # (WPK_ENGINE_VLLM="vllm serve --gpu-memory-utilization 0.45").
+  maxEngines: 1
+  # Host directory of the store (blobs, serving files, logs).
+  storePath: /var/lib/weightpack
+  apiPort: 8091
+  gatewayPort: 8090
+  # Shared memory for vLLM's workers (cuda only).
+  shmSize: 8Gi
+  # A kubernetes.io/dockerconfigjson Secret the agents pull images with,
+  # as docker login would leave it.
+  registrySecret: ""
+  # Registries (host[:port]) reached over plain HTTP, such as an
+  # in-cluster registry without TLS.
+  insecureRegistries: []
+  # A Secret with key "token": a Hugging Face token, for builds from
+  # gated hf:// repositories.
+  hfTokenSecret: ""
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources: {}
+  extraEnv: []
+  podAnnotations: {}
+
+# The control plane: an OpenAI gateway that routes each request to a node
+# serving its model and keeps the catalogue running. Keep one replica:
+# replicas do not coordinate, and two may place a model twice.
+control:
+  replicas: 1
+  port: 8080
+  # Seconds between passes over the agents.
+  interval: 5s
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {memory: 256Mi}
+  podAnnotations: {}
+
+# The images the cluster serves. Each entry: name (the model clients ask
+# for; a MIX answers to name/<expert>), image (a registry reference),
+# replicas (0: start on the first request), and optionally engine
+# (reference or vllm) and device (cuda or cpu). Edits apply within a
+# minute, without restarts; moving a tag rolls the replicas over.
+catalogue:
+  models: []
+  # - name: qwen-tasks
+  #   image: ghcr.io/acme/qwen-tasks:v1
+  #   replicas: 1
+
+# The trust policy every agent pulls under (see wpk trust). Each rule:
+# scope (*, a registry host or a repository prefix), action (signed,
+# accept or reject), and for signed rules keys (PEM public keys) and/or
+# identities (subject or subject_regexp, issuer or issuer_regexp).
+trust:
+  rules: []
+  # - scope: ghcr.io/acme
+  #   action: signed
+  #   identities:
+  #     - subject_regexp: https://github.com/acme/models/.*
+  #       issuer: https://token.actions.githubusercontent.com
+  # - scope: "*"
+  #   action: reject
+
+# Let only the control plane reach the agents' API and gateway ports.
+networkPolicy:
+  enabled: true

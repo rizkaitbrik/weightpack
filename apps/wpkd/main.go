@@ -2,7 +2,8 @@
 // builds, pushes and pulls, hands per-weight work (squash) to a Python build
 // worker, and runs containers: engine processes that serve images, behind an
 // OpenAI-compatible gateway. It serves its API (see libs/go/api) on a Unix
-// socket that only its owner can connect to.
+// socket that only its owner can connect to, and, for a cluster control
+// plane, on a TCP address with a bearer key (--api).
 package main
 
 import (
@@ -16,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +43,18 @@ type config struct {
 	device       string   // default device for containers; "" detects
 	engines      map[string][]string
 	apiKey       string // bearer token the gateway requires; "" for none
+	api          string // TCP address of the API for a control plane; "" for none
+	apiToken     string // bearer token the TCP API requires
+	policyFile   string // trust policy file; "" means <root>/policy.json
+	maxEngines   int
+	node         string // machine name /v1/node reports; "" means the hostname
+	insecure     string // comma-separated registries reached over plain HTTP
+}
+
+// envInt returns $key as a number, or 0.
+func envInt(key string) int {
+	n, _ := strconv.Atoi(os.Getenv(key))
+	return n
 }
 
 // envOr returns $key, or def when it is unset.
@@ -63,6 +77,12 @@ func main() {
 	flag.StringVar(&c.apiKey, "gateway-key", os.Getenv("WPK_GATEWAY_KEY"), "bearer token the gateway requires; set it when the gateway listens beyond loopback ($WPK_GATEWAY_KEY)")
 	refCmd := flag.String("engine-reference", envOr("WPK_ENGINE_REFERENCE", "weightpack-engine"), "command that starts the reference engine ($WPK_ENGINE_REFERENCE)")
 	vllmCmd := flag.String("engine-vllm", envOr("WPK_ENGINE_VLLM", "vllm serve"), "command that starts vLLM ($WPK_ENGINE_VLLM)")
+	flag.StringVar(&c.api, "api", os.Getenv("WPK_API"), "also serve the API on this TCP address, for a cluster control plane; needs --api-key ($WPK_API)")
+	flag.StringVar(&c.apiToken, "api-key", os.Getenv("WPK_API_KEY"), "bearer token the TCP API requires ($WPK_API_KEY)")
+	flag.StringVar(&c.policyFile, "trust-policy", os.Getenv("WPK_TRUST_POLICY"), "trust policy file, such as a mounted ConfigMap ($WPK_TRUST_POLICY, default <root>/policy.json)")
+	flag.IntVar(&c.maxEngines, "max-engines", envInt("WPK_MAX_ENGINES"), "most engine processes to run at once, 0 for no limit ($WPK_MAX_ENGINES)")
+	flag.StringVar(&c.node, "node-name", os.Getenv("WPK_NODE_NAME"), "this machine's name for a control plane ($WPK_NODE_NAME, default the hostname)")
+	flag.StringVar(&c.insecure, "insecure-registries", os.Getenv("WPK_INSECURE_REGISTRIES"), "comma-separated registries (host[:port]) to reach over plain HTTP, as Docker's insecure-registries ($WPK_INSECURE_REGISTRIES)")
 	flag.Parse()
 	c.workerCmd = strings.Fields(*workerCmd)
 	c.engines = map[string][]string{serving.EngineReference: strings.Fields(*refCmd), serving.EngineVLLM: strings.Fields(*vllmCmd)}
@@ -116,7 +136,22 @@ func serve(ctx context.Context, c config, logger *slog.Logger) error {
 		return err
 	}
 
+	if c.api != "" && c.apiToken == "" {
+		_ = ln.Close()
+		return errors.New("--api serves the whole API over TCP; set --api-key (or $WPK_API_KEY) too")
+	}
 	opts := []daemon.Option{daemon.WithWorker(wc), daemon.WithHF(hf.NewFromEnv(c.hfCache))}
+	if c.policyFile != "" {
+		opts = append(opts, daemon.WithPolicyFile(c.policyFile))
+	}
+	var insecure []string
+	for _, h := range strings.Split(c.insecure, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			insecure = append(insecure, h)
+		}
+	}
+	opts = append(opts, daemon.WithInsecureRegistries(insecure))
+	gatewayPort := 0
 	var gw *http.Server
 	if c.gateway != "" {
 		gln, err := net.Listen("tcp", c.gateway)
@@ -124,8 +159,9 @@ func serve(ctx context.Context, c config, logger *slog.Logger) error {
 			_ = ln.Close()
 			return fmt.Errorf("gateway: %w (pick another address with --gateway, or turn serving off with --gateway '')", err)
 		}
+		gatewayPort = gln.Addr().(*net.TCPAddr).Port
 		rt := serving.New(serving.Config{
-			Store: s, Worker: wc, Engines: c.engines, Device: c.device,
+			Store: s, Worker: wc, Engines: c.engines, Device: c.device, MaxEngines: c.maxEngines,
 			Endpoint: "http://" + gln.Addr().String() + "/v1", Logger: logger, APIKey: c.apiKey,
 		})
 		defer rt.Close()
@@ -139,9 +175,23 @@ func serve(ctx context.Context, c config, logger *slog.Logger) error {
 		logger.Info("gateway listening", "addr", gln.Addr().String())
 	}
 
-	srv := &http.Server{
-		Handler:           daemon.NewHandler(s, version, logger, opts...),
-		ReadHeaderTimeout: 5 * time.Second,
+	opts = append(opts, daemon.WithNode(c.node, gatewayPort))
+	handler := daemon.NewHandler(s, version, logger, opts...)
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	var apiSrv *http.Server
+	if c.api != "" {
+		aln, err := net.Listen("tcp", c.api)
+		if err != nil {
+			_ = ln.Close()
+			return fmt.Errorf("api: %w", err)
+		}
+		apiSrv = &http.Server{Handler: daemon.RequireKey(handler, c.apiToken), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := apiSrv.Serve(aln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				logger.Error("api listener stopped", "err", err)
+			}
+		}()
+		logger.Info("api listening", "addr", aln.Addr().String())
 	}
 	go func() {
 		<-ctx.Done()
@@ -150,6 +200,9 @@ func serve(ctx context.Context, c config, logger *slog.Logger) error {
 		_ = srv.Shutdown(shutdown)
 		if gw != nil {
 			_ = gw.Shutdown(shutdown)
+		}
+		if apiSrv != nil {
+			_ = apiSrv.Shutdown(shutdown)
 		}
 	}()
 

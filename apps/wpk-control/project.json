@@ -1,0 +1,13 @@
+{
+  "name": "wpk-control",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "apps/wpk-control",
+  "tags": ["lang:go", "type:app"],
+  "targets": {
+    "build": { "executor": "@nx-go/nx-go:build", "outputs": ["{workspaceRoot}/dist/{projectRoot}"], "options": { "flags": ["-trimpath"] }, "cache": true },
+    "serve": { "executor": "@nx-go/nx-go:serve" },
+    "test": { "executor": "@nx-go/nx-go:test", "options": { "race": true }, "cache": true },
+    "lint": { "executor": "@nx-go/nx-go:lint", "options": { "linter": "go", "args": ["vet"] }, "cache": true }
+  }
+}

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // DefaultRoot is the daemon's store directory: $WPK_ROOT, or ~/.weightpack.
@@ -39,9 +40,12 @@ type ErrorBody struct {
 	Error string `json:"error"`
 }
 
-// Client talks to wpkd over its Unix socket.
+// Client talks to wpkd over its Unix socket, or over TCP to a daemon that
+// serves its API there (wpkd --api).
 type Client struct {
-	socket string
+	socket string // "" for a remote daemon
+	base   string // URL prefix of every request
+	key    string // bearer token, for a remote daemon
 	hc     *http.Client
 }
 
@@ -53,7 +57,25 @@ func NewClient(socket string) *Client {
 			return d.DialContext(ctx, "unix", socket)
 		},
 	}
-	return &Client{socket: socket, hc: &http.Client{Transport: tr}}
+	return &Client{socket: socket, base: "http://wpkd", hc: &http.Client{Transport: tr}}
+}
+
+// NewRemoteClient returns a client for a daemon serving its API at baseURL
+// (such as http://10.0.0.5:8091), sending key as a bearer token. hc may be
+// nil.
+func NewRemoteClient(baseURL, key string, hc *http.Client) *Client {
+	if hc == nil {
+		hc = &http.Client{}
+	}
+	return &Client{base: strings.TrimRight(baseURL, "/"), key: key, hc: hc}
+}
+
+// Addr is where the client reaches the daemon: its socket or its URL.
+func (c *Client) Addr() string {
+	if c.socket != "" {
+		return c.socket
+	}
+	return c.base
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) (*http.Response, error) {
@@ -65,17 +87,23 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (*http.R
 		}
 		rd = bytes.NewReader(b)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://wpkd"+path, rd)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
 		return nil, err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if c.key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		var opErr *net.OpError
 		if errors.As(err, &opErr) && opErr.Op == "dial" {
+			if c.socket == "" {
+				return nil, fmt.Errorf("cannot reach wpkd at %s: %w", c.base, err)
+			}
 			return nil, fmt.Errorf("cannot reach wpkd at %s; is the daemon running? (start it with: wpkd)", c.socket)
 		}
 		return nil, err
@@ -229,6 +257,12 @@ func (c *Client) Run(ctx context.Context, req RunRequest, onEvent func(Event)) (
 		return nil, errors.New("wpkd ended the run stream without a container")
 	}
 	return last.Container, nil
+}
+
+// Node describes the daemon's machine.
+func (c *Client) Node(ctx context.Context) (*Node, error) {
+	var out Node
+	return &out, c.getJSON(ctx, "/v1/node", &out)
 }
 
 // Doctor asks the daemon to check its machine.

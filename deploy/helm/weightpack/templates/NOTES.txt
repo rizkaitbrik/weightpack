@@ -1,0 +1,23 @@
+Weightpack is installed: wpkd on the nodes the agent DaemonSet selects, and
+wpk-control behind the Service {{ include "weightpack.fullname" . }}.
+
+The OpenAI endpoint, from inside the cluster:
+
+  http://{{ include "weightpack.fullname" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:{{ .Values.control.service.port }}/v1
+
+From your machine:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "weightpack.fullname" . }} 8080:{{ .Values.control.service.port }}
+  curl http://127.0.0.1:8080/v1/models{{ if .Values.auth.apiKey }} -H "Authorization: Bearer $API_KEY"{{ end }}
+  curl http://127.0.0.1:8080/v1/cluster{{ if .Values.auth.apiKey }} -H "Authorization: Bearer $API_KEY"{{ end }}    # nodes, containers, placements
+
+{{- if not .Values.catalogue.models }}
+
+The catalogue is empty: list the images to serve under catalogue.models
+and helm upgrade. Edits apply within a minute.
+{{- end }}
+{{- if and (not .Values.auth.apiKey) (not .Values.auth.existingSecret) }}
+
+The gateway takes requests without a key. Set auth.apiKey, or keep the
+Service internal.
+{{- end }}

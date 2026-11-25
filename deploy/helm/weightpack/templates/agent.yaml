@@ -1,0 +1,149 @@
+{{- $agent := .Values.agent }}
+{{- if not (has $agent.variant (list "cuda" "cpu")) }}
+{{- fail "agent.variant must be cuda or cpu" }}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "weightpack.agentService" . }}
+  labels:
+    {{- include "weightpack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  selector:
+    matchLabels:
+      {{- include "weightpack.selectorLabels" (dict "root" . "component" "agent") | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "weightpack.selectorLabels" (dict "root" . "component" "agent") | nindent 8 }}
+      {{- with $agent.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Engines get time to stop; containers go with them.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: wpkd
+          image: {{ include "weightpack.image" (dict "root" . "variant" $agent.variant) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # The image's entrypoint starts wpkd with its worker; later flags win.
+          args: ["--gateway", "0.0.0.0:{{ $agent.gatewayPort }}"]
+          env:
+            - name: WPK_API
+              value: "0.0.0.0:{{ $agent.apiPort }}"
+            - name: WPK_API_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ include "weightpack.secretName" . }}, key: agent-key}
+            # The control plane is the gateway's only client; it sends the same key.
+            - name: WPK_GATEWAY_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ include "weightpack.secretName" . }}, key: agent-key}
+            - name: WPK_TRUST_POLICY
+              value: /etc/weightpack/config/policy.json
+            - name: WPK_MAX_ENGINES
+              value: {{ $agent.maxEngines | quote }}
+            - name: WPK_NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            {{- if $agent.registrySecret }}
+            - name: DOCKER_CONFIG
+              value: /etc/weightpack/docker
+            {{- end }}
+            {{- with $agent.insecureRegistries }}
+            - name: WPK_INSECURE_REGISTRIES
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if $agent.hfTokenSecret }}
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: {name: {{ $agent.hfTokenSecret }}, key: token}
+            {{- end }}
+            {{- with $agent.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - {name: api, containerPort: {{ $agent.apiPort }}}
+            - {name: gateway, containerPort: {{ $agent.gatewayPort }}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: api}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: api}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          {{- $resources := deepCopy ($agent.resources | default dict) }}
+          {{- if gt (int $agent.gpus) 0 }}
+          {{- $limits := $resources.limits | default dict }}
+          {{- $_ := set $limits "nvidia.com/gpu" (int $agent.gpus) }}
+          {{- $_ := set $resources "limits" $limits }}
+          {{- end }}
+          {{- with $resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - {name: store, mountPath: /var/lib/weightpack}
+            - {name: config, mountPath: /etc/weightpack/config, readOnly: true}
+            {{- if $agent.registrySecret }}
+            - {name: registry, mountPath: /etc/weightpack/docker, readOnly: true}
+            {{- end }}
+            {{- if eq $agent.variant "cuda" }}
+            - {name: shm, mountPath: /dev/shm}
+            {{- end }}
+      volumes:
+        - name: store
+          hostPath: {path: {{ $agent.storePath }}, type: DirectoryOrCreate}
+        - name: config
+          configMap:
+            name: {{ include "weightpack.fullname" . }}-config
+            items: [{key: policy.json, path: policy.json}]
+        {{- if $agent.registrySecret }}
+        - name: registry
+          secret:
+            secretName: {{ $agent.registrySecret }}
+            items: [{key: .dockerconfigjson, path: config.json}]
+        {{- end }}
+        {{- if eq $agent.variant "cuda" }}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: {{ $agent.shmSize }}}
+        {{- end }}
+      {{- with $agent.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $agent.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $agent.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+# Headless: its DNS name lists every ready agent, which is how the control
+# plane finds them.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "weightpack.agentService" . }}
+  labels:
+    {{- include "weightpack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: agent
+spec:
+  clusterIP: None
+  selector:
+    {{- include "weightpack.selectorLabels" (dict "root" . "component" "agent") | nindent 4 }}
+  ports:
+    - {name: api, port: {{ $agent.apiPort }}, targetPort: api}
+    - {name: gateway, port: {{ $agent.gatewayPort }}, targetPort: gateway}

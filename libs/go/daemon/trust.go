@@ -13,6 +13,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/reference"
 	"github.com/rizkaitbrik/weightpack/libs/go/registry"
+	"github.com/rizkaitbrik/weightpack/libs/go/serving"
 	"github.com/rizkaitbrik/weightpack/libs/go/trust"
 )
 
@@ -21,15 +22,38 @@ import (
 // the store root.
 func WithTrust(sg *trust.Sigstore) Option { return func(s *server) { s.sigstore = sg } }
 
-// policyPath is the trust policy's file, next to the store.
-func (s *server) policyPath() string { return filepath.Join(s.store.Root(), "policy.json") }
+// WithPolicyFile reads the trust policy from path instead of
+// <root>/policy.json, as from a mounted Kubernetes ConfigMap. wpk trust set
+// fails when the file is read-only.
+func WithPolicyFile(path string) Option { return func(s *server) { s.policyFile = path } }
+
+// policyPath is the trust policy's file, next to the store by default.
+func (s *server) policyPath() string {
+	if s.policyFile != "" {
+		return s.policyFile
+	}
+	return filepath.Join(s.store.Root(), "policy.json")
+}
 
 func (s *server) verifier() *trust.Verifier { return &trust.Verifier{Sigstore: s.sigstore} }
 
 // pullOptions are the registry options of every pull: the trust policy
 // checks each image before its tensors are fetched.
 func (s *server) pullOptions(plainHTTP, exact bool) registry.Options {
-	return registry.Options{PlainHTTP: plainHTTP, Exact: exact, Verify: s.checkPolicy}
+	opts := s.registryOptions(plainHTTP)
+	opts.Exact, opts.Verify = exact, s.checkPolicy
+	return opts
+}
+
+// WithInsecureRegistries names registries wpkd always reaches over plain
+// HTTP (wpkd --insecure-registries).
+func WithInsecureRegistries(hosts []string) Option {
+	return func(s *server) { s.insecure = hosts }
+}
+
+// registryOptions are the options of every registry operation.
+func (s *server) registryOptions(plainHTTP bool) registry.Options {
+	return registry.Options{PlainHTTP: plainHTTP, InsecureHosts: s.insecure}
 }
 
 // checkPolicy applies the trust policy's rule for r to the manifest root.
@@ -65,12 +89,38 @@ func (s *server) resolve(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	ref, _, root, err := registry.Resolve(r.Context(), req.Ref, "resolve", registry.Options{PlainHTTP: req.PlainHTTP})
+	ref, repo, root, err := registry.Resolve(r.Context(), req.Ref, "resolve", s.registryOptions(req.PlainHTTP))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, api.ResolveResponse{Ref: ref.String(), Digest: root.Digest.String(), MediaType: root.MediaType, Size: root.Size})
+	out := api.ResolveResponse{Ref: ref.String(), Digest: root.Digest.String(), MediaType: root.MediaType, Size: root.Size}
+	if req.Placement {
+		// What a pull checks first: the trust policy, then the manifest and
+		// config. A control plane then never places an image the node
+		// would refuse.
+		if out.Signer, err = s.checkPolicy(r.Context(), ref, repo, root); err != nil {
+			writeError(w, http.StatusForbidden, fmt.Errorf("%s: %w", ref, err))
+			return
+		}
+		m, cfg, err := registry.Describe(r.Context(), repo, ref, root)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		if out.ServingBase, err = serving.ServingBase(cfg); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("%s cannot be served: %w", ref, err))
+			return
+		}
+		if len(cfg.Layers) > 0 {
+			out.Base = cfg.Layers[0].Chain
+		}
+		out.Bytes = root.Size + m.Config.Size
+		for _, l := range m.Layers {
+			out.Bytes += l.Size
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // attach stores a bundle wpk made as a referrer of the manifest it signs.
@@ -85,7 +135,7 @@ func (s *server) attach(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("digest: %w", err))
 		return
 	}
-	ref, repo, err := registry.Open(req.Ref, "sign", registry.Options{PlainHTTP: req.PlainHTTP})
+	ref, repo, err := registry.Open(req.Ref, "sign", s.registryOptions(req.PlainHTTP))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -111,7 +161,7 @@ func (s *server) verify(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	ref, repo, root, err := registry.Resolve(r.Context(), req.Ref, "verify", registry.Options{PlainHTTP: req.PlainHTTP})
+	ref, repo, root, err := registry.Resolve(r.Context(), req.Ref, "verify", s.registryOptions(req.PlainHTTP))
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err)
 		return

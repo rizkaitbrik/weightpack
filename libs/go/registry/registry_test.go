@@ -312,3 +312,25 @@ func TestUntaggedPushMeansLatest(t *testing.T) {
 		t.Errorf("pulled %s, pushed %s", pulled.Digest, built.Digest)
 	}
 }
+
+func TestInsecureHosts(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	for _, c := range []struct {
+		ref   string
+		opts  Options
+		plain bool
+	}{
+		{"registry.internal:5000/x", Options{}, false},
+		{"registry.internal:5000/x", Options{InsecureHosts: []string{"registry.internal:5000"}}, true},
+		{"registry.internal:5000/x", Options{InsecureHosts: []string{"registry.internal"}}, false},
+		{"localhost:5000/x", Options{}, true},
+	} {
+		_, repo, err := Open(c.ref, "pull", c.opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if repo.PlainHTTP != c.plain {
+			t.Errorf("%s with %v: plain HTTP %v", c.ref, c.opts.InsecureHosts, repo.PlainHTTP)
+		}
+	}
+}
