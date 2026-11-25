@@ -349,6 +349,18 @@ For a 1-bit expert the term becomes sᵢ · sign(Δᵢ) x. Expert terms run in g
 - **Storage.** One `router.v1` blob on the mix layer, titled `router.safetensors`: per routed module (the modules its experts touch in its targets and blocks), `<module>.router.weight` [experts, in] and `<module>.router.bias` [experts] in float32, a row per expert in mix order. The mix's `router` is `trained`, and its digest covers the blob, so another router is another mix. An image check refuses a trained mix without exactly one router blob, and any other mix with one. The build checks a router against the mix: float32, the right shapes, and exactly the routed modules.
 - **A router from a file.** `ROUTER ./routers/domain.safetensors` stores a router trained before. `wpk export` writes a trained router there, and its Weightfile names it, so an export rebuilds the same image without training.
 - **Serving.** `wpkd` exports the router file under `<root>/run/routers/<chain>-<id>` and hands it to the engine: `router_file` in `/v1/load_mix` on the reference engine, and in `weightpack_mix.json` on vLLM.
+- **What it gives** (`npx nx run worker:gate`, the token-mixing gate below). Qwen2.5-0.5B-Instruct with the smoke test's three public experts, mixed in every projection at `top_k` 1. The router was trained by `wpk build` for 600 steps on 1,200 examples, 400 each from public Python, SQL and GSM8K math data (5 minutes on one A40). The eval is 50 held-out examples per domain, scored by mean loss per answer token:
+
+  | Model | Python | SQL | Math | Mean |
+  | --- | --- | --- | --- | --- |
+  | base | 0.847 | 0.526 | 0.860 | 0.744 |
+  | python expert | 0.765 | 0.474 | 0.763 | 0.667 |
+  | sql expert | 0.904 | 0.663 | 0.830 | 0.799 |
+  | math expert | 0.794 | 0.416 | 0.703 | 0.637 |
+  | mix, Arrow | 0.794 | 0.510 | 0.692 | 0.665 |
+  | mix, trained router | 0.726 | 0.147 | 0.579 | 0.484 |
+
+  The trained mix beats every single expert on every domain, and Arrow by 27% on the mean. Read it as in-distribution: the router learnt from the same three datasets the eval draws from (other examples), while the public experts were trained on data of their own. On SQL, whose answers follow one strict format, it gets far below any single model (the SQL expert is worse than the base there). Averaged over a domain's tokens, routing weight moves off Arrow's favourite (SQL: 45–56% on every kind of prompt) toward Python (45–50%), with no domain getting its own expert as a whole: the gain comes from choosing per module and per token.
 
 **FFN experts (v1).** An `ffn-expert` replaces the whole FFN path, so it cannot ride on the shared base product the way a LoRA does: the block outputs the router-weighted sum of each chosen expert's FFN, each with weights W₀ + Δᵢ. The gate and up projections still share W₀x across experts, because they see the same input. Only the down projection needs a full product per active expert. Weights stay stored and paged as deltas, so the extra cost is compute, not memory. When a full fine-tune is imported as an FFN expert, its attention changes are dropped by default; `attn=average` instead averages them into one stacked layer below the mix, as BTX does.
 
@@ -372,7 +384,7 @@ Build it in four phases, each closed by a measurable gate. Phases 1 and 2 pay fo
 | --- | --- | --- |
 | 1 · Format, store | Tensor store on OCI; base and LoRA layers; `FROM`, `LAYER`, `EXPERT`; build, push, squash; vLLM with per-request routing | 50 LoRA variants of one 8B base in 20 GB; squash matches a PEFT merge |
 | 2 · Delta import | `wpk import`; `xor` codec (lossless); `bit1` codec (lossy); `ffn-expert` import; fidelity records and eval gate | Lossless import is bit-exact; `bit1` import stays within `max_drop` on its eval |
-| 3 · Token mixing | Arrow router; vLLM module for MoE over LoRA and FFN experts; `ROUTER train` (done for LoRA experts: see Trained routers); sequence and token routing | A 3-expert mix beats each single expert on a mixed-domain eval |
+| 3 · Token mixing | Arrow router; vLLM module for MoE over LoRA and FFN experts; `ROUTER train` (done for LoRA experts, and the gate met for them: see Trained routers); sequence and token routing | A 3-expert mix beats each single expert on a mixed-domain eval |
 | 4 · Ecosystem | ModelPack media types proposal; HF and GGUF export; Sigstore signing (done: see Signatures); `wpk rebase` | A ModelPack client pulls and runs a squashed image |
 
 Phase 3 is the research-heavy one, so it comes after the format and codecs are stable. Phase 4 can start any time someone needs interop.
