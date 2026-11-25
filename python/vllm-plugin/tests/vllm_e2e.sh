@@ -5,31 +5,46 @@
 # It makes a tiny Llama, two LoRA experts and a router trained on them,
 # asks weightpack-engine what the base, each expert and three mixes of
 # them (Arrow top_k 1 and 2, and the trained router) generate, then serves
-# the same files with vLLM's CPU image in Docker, loads the experts and the
-# mix directories as wpkd writes them, and compares.
+# the same files with vLLM, loads the experts and the mix directories as
+# wpkd writes them, and compares: one request at a time, then all at once,
+# so mix, single-adapter and base tokens share batches.
 #
-# Needs docker, uv and jq. IMAGE picks the vLLM image (default: vLLM's
-# arm64 CPU release; on x86, public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo).
+# Needs uv and jq, and either docker (vLLM's CPU image; IMAGE picks it:
+# default the arm64 CPU release, on x86 public.ecr.aws/q9t5s3a7/vllm-cpu-
+# release-repo) or VLLM=<path to a vllm executable> whose environment has
+# this plugin installed, such as a CUDA machine's.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 IMAGE=${IMAGE:-public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v0.29.0}
+VLLM=${VLLM:-}
 NAME=wpk-vllm-e2e
 PORT=${PORT:-18011}
 work=$PWD/tmp/vllm-e2e
 rm -rf "$work" && mkdir -p "$work"
+# Where the vLLM server sees the work directory.
+srv=/work
+if [ -n "$VLLM" ]; then srv=$work; fi
+logs() {
+  if [ -n "$VLLM" ]; then cat "$work/vllm.log"; else docker logs "$NAME" 2>&1; fi
+}
 finish() {
   status=$?
   if [ "$status" -ne 0 ]; then
     echo "== vLLM log (exit $status)"
-    docker logs "$NAME" 2>&1 | grep -vE "^\s*$" | tail -60
+    logs | grep -vE "^\s*$" | tail -60
   fi
-  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  if [ -n "$VLLM" ]; then
+    [ -n "${pid:-}" ] && kill "$pid" 2>/dev/null && wait "$pid" 2>/dev/null
+  else
+    docker rm -f "$NAME" >/dev/null 2>&1 || true
+  fi
+  return 0
 }
 trap finish EXIT
 
 echo "== tiny model, experts and what weightpack-engine generates"
-uv run --project python/worker --group parity python - "$work" <<'PY'
+uv run --project python/worker --group parity python - "$work" "$srv" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -42,7 +57,7 @@ from tests.test_engine import PROMPT, tiny_model
 from weightpack_worker import router_train
 from weightpack_worker.engine import Engine
 
-work = Path(sys.argv[1])
+work, srv = Path(sys.argv[1]), sys.argv[2]
 # The worker's tiny model and tokenizer, with a head size vLLM's CPU
 # attention supports (64, not 16).
 base, _, tok = tiny_model(work)
@@ -70,7 +85,7 @@ router_train.train(
     router_train.Options(steps=30, batch_size=8, learning_rate=0.05), device="cpu",
 )
 
-# Mix directories, as wpkd writes them, with the container's paths: the
+# Mix directories, as wpkd writes them, with the server's paths: the
 # same experts routed to the top one by Arrow (mix) and by the trained
 # router (mix3), and blended over both by Arrow (mix2).
 for name, top_k in (("mix", 1), ("mix2", 2), ("mix3", 1)):
@@ -83,10 +98,10 @@ for name, top_k in (("mix", 1), ("mix2", 2), ("mix3", 1)):
     }))
     desc = {
         "version": 1, "router": "arrow", "top_k": top_k, "targets": ["q", "k", "v", "o"], "blocks": "",
-        "experts": [{"id": "one", "rank": 4, "path": "/work/one"}, {"id": "two", "rank": 4, "path": "/work/two"}],
+        "experts": [{"id": "one", "rank": 4, "path": f"{srv}/one"}, {"id": "two", "rank": 4, "path": f"{srv}/two"}],
     }
     if name == "mix3":
-        desc.update(router="trained", router_file="/work/router.safetensors")
+        desc.update(router="trained", router_file=f"{srv}/router.safetensors")
     (mix / "weightpack_mix.json").write_text(json.dumps(desc))
 
 engine = Engine(str(base), device="cpu", served_name="base")
@@ -105,39 +120,60 @@ print(json.dumps(want, indent=1))
 assert len(set(want.values())) == len(want), "replies are not all different"
 PY
 
-echo "== vLLM ($IMAGE) with weightpack-vllm"
-docker rm -f "$NAME" >/dev/null 2>&1 || true
-docker run -d --name "$NAME" -p "127.0.0.1:$PORT:8000" \
-  -v "$work:/work" -v "$PWD/python/vllm-plugin:/plugin:ro" \
-  -e VLLM_ALLOW_RUNTIME_LORA_UPDATING=True -e VLLM_CPU_KVCACHE_SPACE=1 \
-  --entrypoint bash "$IMAGE" -c \
-  "pip install -q --no-deps /plugin && exec vllm serve /work/base --served-model-name base \
-   --enable-lora --max-lora-rank 16 --max-loras 4 --dtype float32 --max-model-len 128" >/dev/null
+serve_args=(--served-model-name base --enable-lora --max-lora-rank 16 --max-loras 4 --dtype float32 --max-model-len 128)
+if [ -n "$VLLM" ]; then
+  echo "== vLLM ($VLLM) with weightpack-vllm"
+  VLLM_ALLOW_RUNTIME_LORA_UPDATING=True "$VLLM" serve "$work/base" --port "$PORT" "${serve_args[@]}" \
+    >"$work/vllm.log" 2>&1 &
+  pid=$!
+  alive() { kill -0 "$pid" 2>/dev/null; }
+else
+  echo "== vLLM ($IMAGE) with weightpack-vllm"
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  docker run -d --name "$NAME" -p "127.0.0.1:$PORT:8000" \
+    -v "$work:/work" -v "$PWD/python/vllm-plugin:/plugin:ro" \
+    -e VLLM_ALLOW_RUNTIME_LORA_UPDATING=True -e VLLM_CPU_KVCACHE_SPACE=1 \
+    --entrypoint bash "$IMAGE" -c \
+    "pip install -q --no-deps /plugin && exec vllm serve /work/base ${serve_args[*]}" >/dev/null
+  alive() { docker ps -q -f name="$NAME" | grep -q .; }
+fi
 api=http://127.0.0.1:$PORT
-for i in $(seq 300); do
+for i in $(seq 450); do
   curl -sf "$api/health" >/dev/null && break
-  if ! docker ps -q -f name="$NAME" | grep -q .; then docker logs "$NAME" | tail -40; exit 1; fi
+  alive || exit 1
   sleep 2
 done
-curl -sf "$api/health" >/dev/null || { docker logs "$NAME" | tail -40; exit 1; }
+curl -sf "$api/health" >/dev/null || exit 1
 
 for name in one two mix mix2 mix3; do
   curl -sf "$api/v1/load_lora_adapter" -H 'Content-Type: application/json' \
-    -d "{\"lora_name\": \"$name\", \"lora_path\": \"/work/$name\"}" >/dev/null ||
-    { echo "load $name failed"; docker logs "$NAME" | tail -30; exit 1; }
+    -d "{\"lora_name\": \"$name\", \"lora_path\": \"$srv/$name\"}" >/dev/null ||
+    { echo "load $name failed"; exit 1; }
 done
 
-echo "== replies"
+names=(base one two mix mix2 mix3)
+ask() {
+  curl -s "$api/v1/chat/completions" -H 'Content-Type: application/json' -d "$(jq -c --arg m "$1" \
+    '{model: $m, messages: .prompt, max_tokens: 8, temperature: 0}' "$work/want.json")" >"$work/reply-$1-$2.json"
+}
 fail=0
-for name in base one two mix mix2 mix3; do
-  reply=$(curl -s "$api/v1/chat/completions" -H 'Content-Type: application/json' -d "$(jq -c --arg m "$name" \
-    '{model: $m, messages: .prompt, max_tokens: 8, temperature: 0}' "$work/want.json")")
-  # Trimmed: vLLM's detokenizer keeps the first token's leading space.
-  got=$(jq -r '.choices[0].message.content // ("ERROR " + (.error.message // .message // tostring)) | ltrimstr(" ") | rtrimstr(" ")' <<<"$reply")
-  want=$(jq -r --arg m "$name" '.replies[$m] | ltrimstr(" ") | rtrimstr(" ")' "$work/want.json")
-  if [ "$got" = "$want" ]; then mark=same; else mark=DIFFERENT; fail=1; fi
-  printf '%-5s %-9s vllm %-30q engine %q\n' "$name" "$mark" "$got" "$want"
-done
+compare() {
+  for name in "${names[@]}"; do
+    # Trimmed: vLLM's detokenizer keeps the first token's leading space.
+    got=$(jq -r '.choices[0].message.content // ("ERROR " + (.error.message // .message // tostring)) | ltrimstr(" ") | rtrimstr(" ")' "$work/reply-$name-$1.json")
+    want=$(jq -r --arg m "$name" '.replies[$m] | ltrimstr(" ") | rtrimstr(" ")' "$work/want.json")
+    if [ "$got" = "$want" ]; then mark=same; else mark=DIFFERENT; fail=1; fi
+    printf '%-5s %-9s vllm %-30q engine %q\n' "$name" "$mark" "$got" "$want"
+  done
+}
+echo "== replies, one request at a time"
+for name in "${names[@]}"; do ask "$name" seq; done
+compare seq
+echo "== replies, all requests at once (shared batches)"
+asks=()
+for name in "${names[@]}"; do ask "$name" par & asks+=($!); done
+wait "${asks[@]}"
+compare par
 echo "== plugin log lines"
-docker logs "$NAME" 2>&1 | grep -E "weightpack" | sed 's/^.*weightpack/weightpack/' | sort -u
+logs | grep -E "weightpack" | sed 's/^.*weightpack/weightpack/' | sort -u
 exit $fail
