@@ -51,6 +51,8 @@ class LoRALayer:
 
 @dataclass(frozen=True)
 class _Delta:
+    """A LoRA module: add scaling * B @ A to its base tensor."""
+
     layer: str
     scaling: float
     path: str
@@ -58,15 +60,47 @@ class _Delta:
     b: TensorInfo
 
 
-def _deltas(
+@dataclass(frozen=True)
+class _Replace:
+    """A modules_to_save copy: the base tensor becomes this tensor."""
+
+    layer: str
+    path: str
+    info: TensorInfo
+
+
+def _ops(
     layers: list[LoRALayer], base: dict[str, tuple[str, TensorInfo]]
-) -> dict[str, list[_Delta]]:
-    """Collect each layer's modules by the base tensor they modify, checking
-    every shape against the base before any math runs."""
-    out: dict[str, list[_Delta]] = {}
+) -> dict[str, list[_Delta | _Replace]]:
+    """Collect each layer's work by the base tensor it touches, in chain
+    order, checking every shape against the base before any math runs.
+
+    A blob holding one module's lora_A and lora_B is a LoRA delta; a blob
+    holding one tensor named after a base tensor is a modules_to_save copy
+    that replaces it.
+    """
+    out: dict[str, list[_Delta | _Replace]] = {}
     for layer in layers:
         for path in layer.blobs:
             header = read_header(path)
+            single = len(header) == 1 and not next(iter(header)).endswith(
+                (_A_SUFFIX, _B_SUFFIX)
+            )
+            if single:
+                ((name, info),) = header.items()
+                want = base.get(name)
+                if want is None:
+                    raise ValueError(
+                        f"layer {layer.id}: {path}: {name} replaces no base tensor"
+                    )
+                if (info.dtype, info.shape) != (want[1].dtype, want[1].shape):
+                    raise ValueError(
+                        f"layer {layer.id}: saved {name} is "
+                        f"{info.dtype}{list(info.shape)}, the base has "
+                        f"{want[1].dtype}{list(want[1].shape)}"
+                    )
+                out.setdefault(name, []).append(_Replace(layer.id, path, info))
+                continue
             modules = {n[: -len(_A_SUFFIX)] for n in header if n.endswith(_A_SUFFIX)}
             if len(header) != 2 or len(modules) != 1:
                 raise ValueError(
@@ -118,19 +152,24 @@ def squash(
     """
     out_dir = Path(out_dir)
     parent = Parent(base_blobs, xor_layers)
-    deltas = _deltas(layers, parent.base)
+    ops = _ops(layers, parent.base)
     merged: list[tuple[str, str]] = []
-    for i, target in enumerate(sorted(set(deltas) | parent.touched())):
+    for i, target in enumerate(sorted(set(ops) | parent.touched())):
         info = parent.base[target][1]
         raw = parent.bits(target).view(storage_dtype(info.dtype))
-        if target in deltas:
-            w = to_float32(info.dtype, raw)
-            for d in deltas[target]:
-                a = to_float32(d.a.dtype, load_raw(d.path, d.a))
-                b = to_float32(d.b.dtype, load_raw(d.path, d.b))
-                delta = b @ a
-                delta *= np.float32(d.scaling)
-                w += delta
+        w = None  # float32 working copy, made when the first delta needs it
+        for op in ops.get(target, []):
+            if isinstance(op, _Replace):
+                raw, w = np.asarray(load_raw(op.path, op.info)), None
+                continue
+            if w is None:
+                w = to_float32(info.dtype, raw)
+            a = to_float32(op.a.dtype, load_raw(op.path, op.a))
+            b = to_float32(op.b.dtype, load_raw(op.path, op.b))
+            delta = b @ a
+            delta *= np.float32(op.scaling)
+            w += delta
+        if w is not None:
             raw = from_float32(info.dtype, w)
         file = f"{i:06d}.safetensors"
         write_tensor(out_dir / file, target, info.dtype, raw)

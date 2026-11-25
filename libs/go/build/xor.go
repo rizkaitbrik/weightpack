@@ -50,7 +50,10 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 	}
 
 	// Check the fine-tune's tensor table against the base before any work.
-	dir := src.Source.Path(b.dir)
+	dir, err := b.sourceDir(step, src.Line, src.Source, fetchModel)
+	if err != nil {
+		return err
+	}
 	names, err := weightFiles(dir)
 	if err != nil {
 		return fail("%v", err)

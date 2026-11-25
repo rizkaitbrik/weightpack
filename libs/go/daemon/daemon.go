@@ -17,6 +17,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build"
 	"github.com/rizkaitbrik/weightpack/libs/go/export"
+	"github.com/rizkaitbrik/weightpack/libs/go/hf"
 	"github.com/rizkaitbrik/weightpack/libs/go/registry"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/squash"
@@ -31,10 +32,14 @@ type server struct {
 	version string
 	log     *slog.Logger
 	worker  *worker.Client
+	hf      *hf.Client
 }
 
 // Option configures the handler.
 type Option func(*server)
+
+// WithHF sets the Hugging Face client builds fetch hf:// sources with.
+func WithHF(c *hf.Client) Option { return func(s *server) { s.hf = c } }
 
 // WithWorker sets the build worker that squash (and later imports and
 // evals) run on. Without one, those endpoints explain how to start one.
@@ -135,6 +140,7 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	if s.worker != nil {
 		opts.Worker = s.worker
 	}
+	opts.HF = s.hf
 	res, err := build.Build(r.Context(), s.store, opts, send)
 	if err != nil {
 		s.log.Info("build failed", "weightfile", req.Weightfile, "err", err)

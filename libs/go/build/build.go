@@ -28,6 +28,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
+	"github.com/rizkaitbrik/weightpack/libs/go/hf"
 	"github.com/rizkaitbrik/weightpack/libs/go/reference"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
@@ -47,6 +48,8 @@ type Options struct {
 	Pull PullFunc
 	// Worker encodes codec=xor layers. Nil means such layers cannot be built.
 	Worker workerpb.WorkerClient
+	// HF fetches hf:// sources. Nil means such sources cannot be built.
+	HF *hf.Client
 }
 
 // PullFunc fetches ref into the store, reporting progress.
@@ -66,6 +69,7 @@ type builder struct {
 	progress func(api.Event)
 	pull     PullFunc
 	worker   workerpb.WorkerClient
+	hf       *hf.Client
 
 	// inherited is what a FROM image passes on, nil for a local FROM.
 	inherited *inherited
@@ -105,14 +109,14 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	}
 
 	b := &builder{
-		ctx: ctx, store: s, progress: progress, pull: opts.Pull, worker: opts.Worker,
+		ctx: ctx, store: s, progress: progress, pull: opts.Pull, worker: opts.Worker, hf: opts.HF,
 		dir: filepath.Dir(opts.Weightfile), file: opts.Weightfile,
 		blobs: map[string][]ocispec.Descriptor{},
 	}
 
 	var base *baseModel
 	top := weightfile.ReservedBaseID
-	if wf.From.Source.Kind == weightfile.SourceLocal {
+	if wf.From.Source.Kind != weightfile.SourceOCI {
 		base, err = b.ingestBase(wf.From, &cfg.Layers[0])
 		if err != nil {
 			return nil, err
@@ -171,9 +175,6 @@ func checkSupported(path string, wf *weightfile.File) error {
 	fail := func(line int, format string, args ...any) {
 		errs = append(errs, &weightfile.Error{File: path, Line: line, Msg: fmt.Sprintf(format, args...)})
 	}
-	if wf.From.Source.Kind == weightfile.SourceHF {
-		fail(wf.From.Line, "FROM %s: Hugging Face sources are not supported yet; download the model and use its directory", wf.From.Source)
-	}
 	layers := append([]weightfile.Layer{}, wf.Layers...)
 	if wf.Mix != nil {
 		layers = append(layers, wf.Mix.Experts...)
@@ -184,8 +185,6 @@ func checkSupported(path string, wf *weightfile.File) error {
 	for _, l := range layers {
 		delta := l.Codec != "" && l.Codec != weightfile.CodecLoRA
 		switch {
-		case l.Source.Kind == weightfile.SourceHF:
-			fail(l.Line, "%s: Hugging Face sources are not supported yet; download the adapter and use its directory", l.ID)
 		case l.Source.Kind == weightfile.SourceOCI && delta:
 			fail(l.Line, "%s: codec= applies to importing a full fine-tune; a layer from an image is stored already", l.ID)
 		case delta && l.Codec != weightfile.CodecXOR:

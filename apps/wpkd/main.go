@@ -20,6 +20,7 @@ import (
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/daemon"
+	"github.com/rizkaitbrik/weightpack/libs/go/hf"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 	"github.com/rizkaitbrik/weightpack/libs/go/worker"
 )
@@ -32,6 +33,7 @@ type config struct {
 	socket       string   // default <root>/wpkd.sock
 	workerSocket string   // default <root>/worker.sock
 	workerCmd    []string // start this worker on workerSocket; empty: connect only
+	hfCache      string   // default <root>/cache/hf
 }
 
 func main() {
@@ -40,6 +42,7 @@ func main() {
 	flag.StringVar(&c.socket, "socket", os.Getenv("WPK_SOCKET"), "Unix socket to listen on ($WPK_SOCKET, default <root>/wpkd.sock)")
 	flag.StringVar(&c.workerSocket, "worker-socket", "", "socket of the build worker ($WPK_WORKER_SOCKET, default <root>/worker.sock)")
 	workerCmd := flag.String("worker", os.Getenv("WPK_WORKER"), "command that starts a build worker, such as weightpack-worker; wpkd adds --socket and stops it on exit ($WPK_WORKER)")
+	flag.StringVar(&c.hfCache, "hf-cache", os.Getenv("WPK_HF_CACHE"), "where hf:// downloads are cached ($WPK_HF_CACHE, default <root>/cache/hf)")
 	flag.Parse()
 	c.workerCmd = strings.Fields(*workerCmd)
 
@@ -64,6 +67,9 @@ func serve(ctx context.Context, c config, logger *slog.Logger) error {
 	}
 	if c.workerSocket == "" {
 		c.workerSocket = worker.DefaultSocket(c.root)
+	}
+	if c.hfCache == "" {
+		c.hfCache = filepath.Join(c.root, "cache", "hf")
 	}
 	if len(c.workerCmd) > 0 {
 		logger.Info("starting build worker", "command", strings.Join(c.workerCmd, " "), "socket", c.workerSocket)
@@ -90,7 +96,7 @@ func serve(ctx context.Context, c config, logger *slog.Logger) error {
 	}
 
 	srv := &http.Server{
-		Handler:           daemon.NewHandler(s, version, logger, daemon.WithWorker(wc)),
+		Handler:           daemon.NewHandler(s, version, logger, daemon.WithWorker(wc), daemon.WithHF(hf.NewFromEnv(c.hfCache))),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {

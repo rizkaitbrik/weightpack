@@ -58,7 +58,10 @@ func (b *builder) ingestLoRA(step string, src weightfile.Layer, layer, parent *s
 	fail := func(format string, args ...any) error {
 		return &weightfile.Error{File: b.file, Line: src.Line, Msg: step + ": " + fmt.Sprintf(format, args...)}
 	}
-	dir := src.Source.Path(b.dir)
+	dir, err := b.sourceDir(step, src.Line, src.Source, fetchAdapter)
+	if err != nil {
+		return err
+	}
 	pc, err := readPEFTConfig(dir)
 	if err != nil {
 		return fail("%v", err)
@@ -77,11 +80,16 @@ func (b *builder) ingestLoRA(step string, src weightfile.Layer, layer, parent *s
 	defer f.Close()
 
 	modules := map[string]*loraModule{}
+	var saved []*safetensors.Tensor // modules_to_save: full copies that replace base tensors
 	for i := range f.Tensors {
 		t := &f.Tensors[i]
 		m := loraTensor.FindStringSubmatch(t.Name)
 		if m == nil {
-			return fail("tensor %s is not a LoRA A or B matrix; embedding LoRAs, DoRA magnitudes, biases and saved modules are not supported yet", t.Name)
+			if isSavedModule(t, pc.ModulesToSave, base) {
+				saved = append(saved, t)
+				continue
+			}
+			return fail("tensor %s is not a LoRA A or B matrix, nor a module_to_save copy of a base tensor; embedding LoRAs, DoRA magnitudes and trained biases are not supported yet", t.Name)
 		}
 		mod := modules[m[1]]
 		if mod == nil {
@@ -94,7 +102,7 @@ func (b *builder) ingestLoRA(step string, src weightfile.Layer, layer, parent *s
 			mod.b = t
 		}
 	}
-	if len(modules) == 0 {
+	if len(modules) == 0 && len(saved) == 0 {
 		return fail("adapter has no tensors")
 	}
 	names := make([]string, 0, len(modules))
@@ -137,6 +145,19 @@ func (b *builder) ingestLoRA(step string, src weightfile.Layer, layer, parent *s
 		b.blobs[layer.ID] = append(b.blobs[layer.ID], d)
 	}
 
+	// A saved module replaces its base tensor outright: a tensor.v1 blob in
+	// the LoRA layer, under the base tensor's name.
+	sort.Slice(saved, func(i, j int) bool { return saved[i].Name < saved[j].Name })
+	for _, t := range saved {
+		name := strings.TrimPrefix(t.Name, peftPrefix)
+		d, err := b.putTensors([]safetensors.Entry{{Name: name, DType: t.DType, Shape: t.Shape, Data: f.Data(*t)}}, spec.MediaTypeTensor,
+			map[string]string{spec.AnnotationLayer: layer.ID, spec.AnnotationTensor: name})
+		if err != nil {
+			return fail("%s: %v", name, err)
+		}
+		b.blobs[layer.ID] = append(b.blobs[layer.ID], d)
+	}
+
 	layer.Rank = pc.R
 	layer.Alpha = pc.Alpha
 	layer.RSLoRA = pc.RSLoRA
@@ -149,8 +170,12 @@ func (b *builder) ingestLoRA(step string, src weightfile.Layer, layer, parent *s
 	}
 	layer.Digest = spec.LayerDigest(*layer, refs, nil)
 	layer.Chain = spec.ChainID(parent.Chain, layer.Digest)
-	b.progress(api.Event{Step: step, Message: fmt.Sprintf("LoRA rank %d, alpha %s, %d modules (%s), %s",
-		pc.R, strconv.FormatFloat(pc.Alpha, 'f', -1, 64), len(names), strings.Join(layer.Targets, ","), api.FormatSize(size))})
+	note := ""
+	if len(saved) > 0 {
+		note = fmt.Sprintf(", %d saved modules", len(saved))
+	}
+	b.progress(api.Event{Step: step, Message: fmt.Sprintf("LoRA rank %d, alpha %s, %d modules (%s)%s, %s",
+		pc.R, strconv.FormatFloat(pc.Alpha, 'f', -1, 64), len(names), strings.Join(layer.Targets, ","), note, api.FormatSize(size))})
 	return nil
 }
 
@@ -179,8 +204,6 @@ func readPEFTConfig(dir string) (*peftConfig, error) {
 		return nil, errors.New("fan_in_fan_out adapters are not supported yet")
 	case pc.Bias != "" && pc.Bias != "none":
 		return nil, fmt.Errorf("adapters that train biases (bias=%q) are not supported yet", pc.Bias)
-	case len(pc.ModulesToSave) > 0:
-		return nil, fmt.Errorf("modules_to_save %v stores full copies of modules, which is not supported yet", pc.ModulesToSave)
 	case len(pc.RankPattern) > 0 || len(pc.AlphaPattern) > 0:
 		return nil, errors.New("per-module rank_pattern and alpha_pattern are not supported yet")
 	}
@@ -205,6 +228,31 @@ func checkModule(m *loraModule, r int, base *baseModel) error {
 			m.name, m.a.Shape, m.b.Shape, w.Shape, r)
 	}
 	return nil
+}
+
+// peftPrefix starts every tensor name in a saved PEFT adapter.
+const peftPrefix = "base_model.model."
+
+// isSavedModule reports whether t is a modules_to_save copy: a full tensor,
+// named base_model.model.<base tensor>, of a module the adapter config
+// lists (PEFT matches module names by suffix), with the base tensor's dtype
+// and shape.
+func isSavedModule(t *safetensors.Tensor, modulesToSave []string, base *baseModel) bool {
+	name, ok := strings.CutPrefix(t.Name, peftPrefix)
+	if !ok {
+		return false
+	}
+	w, ok := base.tensors[name]
+	if !ok || w.DType != t.DType || !slices.Equal(w.Shape, t.Shape) {
+		return false
+	}
+	module := name[:max(strings.LastIndex(name, "."), 0)]
+	for _, m := range modulesToSave {
+		if module == m || strings.HasSuffix(module, "."+m) {
+			return true
+		}
+	}
+	return false
 }
 
 func targetName(module string) string {

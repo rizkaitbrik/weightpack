@@ -159,3 +159,41 @@ def test_rejects_blobs_that_are_not_one_module(model):
     write_many(p, {"m.q_proj.lora_A.weight": ("F32", np.zeros((2, 6), np.float32))})
     with pytest.raises(ValueError, match="one module"):
         squash(blobs, [LoRALayer("odd", 1.0, [str(p)])], out)
+
+
+def test_saved_modules_replace_their_base_tensor_in_chain_order(tmp_path):
+    rng = np.random.default_rng(9)
+    w = rng.standard_normal((4, 5)).astype(np.float32)
+    base = tmp_path / "base.safetensors"
+    write_many(base, {"head.weight": ("F32", w)})
+    out = tmp_path / "out"
+    out.mkdir()
+
+    # Layer 1 adds a LoRA to head; layer 2 replaces head with a saved copy;
+    # layer 3 adds a LoRA on top of the copy.
+    a1, b1 = (
+        rng.standard_normal((1, 5)).astype(np.float32),
+        rng.standard_normal((4, 1)).astype(np.float32),
+    )
+    saved = rng.standard_normal((4, 5)).astype(np.float32)
+    saved_blob = tmp_path / "saved.safetensors"
+    write_tensor(saved_blob, "head.weight", "F32", saved)
+    a3, b3 = (
+        rng.standard_normal((1, 5)).astype(np.float32),
+        rng.standard_normal((4, 1)).astype(np.float32),
+    )
+    layers = [
+        LoRALayer("one", 1.0, [lora_blob(tmp_path / "1.safetensors", "head", a1, b1)]),
+        LoRALayer("two", 1.0, [str(saved_blob)]),
+        LoRALayer(
+            "three", 2.0, [lora_blob(tmp_path / "3.safetensors", "head", a3, b3)]
+        ),
+    ]
+    _, got = read_merged(out, squash([str(base)], layers, out))["head.weight"]
+    np.testing.assert_array_equal(got, saved + np.float32(2.0) * (b3 @ a3))
+
+    # A saved copy that does not fit the base is refused.
+    bad = tmp_path / "bad.safetensors"
+    write_tensor(bad, "head.weight", "F32", np.zeros((4, 4), np.float32))
+    with pytest.raises(ValueError, match="the base has"):
+        squash([str(base)], [LoRALayer("bad", 1.0, [str(bad)])], tmp_path / "out")

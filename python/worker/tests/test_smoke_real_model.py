@@ -122,6 +122,8 @@ def stores():
     bins = binaries()
     if bins is None:
         pytest.skip("wpk/wpkd not built")
+    # wpkd caches hf:// downloads here, across runs.
+    os.environ["WPK_HF_CACHE"] = str(REPO / "tmp" / "smoke" / "hf-cache")
     a, b = Weightpack(*bins), Weightpack(*bins)
     yield a, b
     a.close()
@@ -214,6 +216,18 @@ def test_real_model_end_to_end(models, registry, stores, tmp_path):
         f"  store after mix: {store_after_mix / 1e6:.1f} MB; "
         f"three full copies would be {3 * sizes['base'] / 1e6:.1f} MB"
     )
+
+    # 1b. The same mix straight from the Hub, by hf:// references at the
+    #     same commits, gives the same image.
+    hub_ctx = tmp_path / "hub"
+    hub_ctx.mkdir()
+    (hub_ctx / "Weightfile").write_text(
+        f"FROM hf://{BASE[0]}@{BASE[1]}\nMIX tasks top_k=1\n"
+        + "".join(f"  EXPERT {n} hf://{r}@{rev}\n" for n, (r, rev) in ADAPTERS.items())
+    )
+    hub_out = timer("build mix from hf://", a.wpk, "build", str(hub_ctx))
+    assert mix["digest"] in hub_out
+    report.append("  hf:// build gives the same digest as the downloaded files")
 
     # 2. Push, then pull into a second, empty store.
     timer("push", a.wpk, "push", ref)
