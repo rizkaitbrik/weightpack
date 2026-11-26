@@ -98,6 +98,8 @@ type Runtime struct {
 	pluginOnce    sync.Once
 	plugin        string
 	pluginVersion func(context.Context) string
+
+	beforeAcquire func() // a test's hook between planning and acquire
 }
 
 type container struct {
@@ -176,10 +178,19 @@ func (rt *Runtime) planDeltas(ctx context.Context, cfg *spec.Config, kind, devic
 	e := rt.engines[shared.base.Chain+" "+kind+" "+device]
 	rt.mu.Unlock()
 	if e != nil && !e.hasExited() && !e.deltas {
-		return false, "the vllm engine on its base was started without delta slots, by an image with no bit1 layer; to share it, stop that base's containers (wpk ps) and run this image first"
+		return false, noDeltaSlots
 	}
 	return true, ""
 }
+
+// noDeltaSlots says why a fine-tune is baked when its base's vLLM engine
+// has no delta slots.
+const noDeltaSlots = "the vllm engine on its base was started without delta slots, by an image with no bit1 layer; to share it, stop that base's containers (wpk ps) and run this image first"
+
+// errNoDeltaSlots is acquire's answer to a plan with a bit1 layer when the
+// base's vLLM engine, started meanwhile by another image, has no delta
+// slots: Run then plans the image again, baked.
+var errNoDeltaSlots = errors.New(noDeltaSlots)
 
 // versionAtLeast compares dotted versions number by number.
 func versionAtLeast(v, min string) bool {
@@ -289,12 +300,27 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		rt.mu.Unlock()
 	}()
 
-	step := "run " + req.Ref
 	digest, cfg, template, err := rt.read(req.Ref)
 	if err != nil {
 		return nil, err
 	}
+	c, err := rt.run(ctx, req, progress, name, kind, device, digest, cfg, template, false)
+	if errors.Is(err, errNoDeltaSlots) {
+		// Another image started the base's engine, without delta slots,
+		// after this one was planned: bake the fine-tune instead.
+		c, err = rt.run(ctx, req, progress, name, kind, device, digest, cfg, template, true)
+	}
+	return c, err
+}
+
+// run serves an image Run has read and reserved a name for; baked plans it
+// with its bit1 layer baked into the base.
+func (rt *Runtime) run(ctx context.Context, req api.RunRequest, progress func(api.Event), name, kind, device, digest string, cfg *spec.Config, template string, baked bool) (*api.Container, error) {
+	step := "run " + req.Ref
 	deltas, why := rt.planDeltas(ctx, cfg, kind, device)
+	if baked && deltas && kind != EngineReference {
+		deltas, why = false, noDeltaSlots
+	}
 	p, err := planFor(cfg, deltas)
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", req.Ref, err)
@@ -359,6 +385,9 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		}
 	}
 
+	if rt.beforeAcquire != nil {
+		rt.beforeAcquire()
+	}
 	e, started, err := rt.acquire(p, kind, device, maxRank, filepath.Join(rt.dir, baseRel, "base"))
 	if err != nil {
 		return nil, err
@@ -553,6 +582,11 @@ func (rt *Runtime) prepareAdapter(ctx context.Context, digest string, a spec.Lay
 	dir := filepath.Join(rt.dir, rel)
 	defer rt.lockPrep(rel)()
 	if _, err := os.Stat(dir); err == nil {
+		if a.Kind == spec.KindDeltaBit1 {
+			// One exported before vLLM served bit1 layers has no adapter
+			// config, which vLLM reads first.
+			return export.EnsureDeltaAdapter(filepath.Join(dir, export.DeltaDir(a.ID)))
+		}
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
@@ -604,6 +638,9 @@ func (rt *Runtime) acquire(p *plan, kind, device string, maxRank int, modelDir s
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if e := rt.engines[key]; e != nil && !e.hasExited() {
+		if kind == EngineVLLM && !e.deltas && slices.ContainsFunc(p.adapters, func(a spec.Layer) bool { return a.Kind == spec.KindDeltaBit1 }) {
+			return nil, false, errNoDeltaSlots
+		}
 		e.refs++
 		return e, false, nil
 	}

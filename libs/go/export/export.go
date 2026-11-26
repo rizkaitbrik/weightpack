@@ -745,16 +745,49 @@ func (e *exporter) delta(id string, ds []ocispec.Descriptor) error {
 		}
 		meta.Files = append(meta.Files, name)
 	}
-	// vLLM reads an adapter config before its loader, which the
-	// weightpack-vllm plugin replaces for this directory, runs: a rank-1
-	// adapter with no LoRA weights.
-	adapter := map[string]any{
-		"peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 1, "lora_alpha": 1,
-		"target_modules": []string{}, "bias": "none", "use_rslora": false,
-		"fan_in_fan_out": false, "base_model_name_or_path": "",
-	}
-	if err := e.writeJSON(filepath.Join(DeltaDir(id), "adapter_config.json"), adapter); err != nil {
+	if err := e.writeJSON(filepath.Join(DeltaDir(id), deltaAdapterFile), deltaAdapter); err != nil {
 		return err
 	}
 	return e.writeJSON(filepath.Join(DeltaDir(id), DeltaFile), meta)
+}
+
+// deltaAdapter is what vLLM reads before its loader, which the
+// weightpack-vllm plugin replaces for a delta directory, runs: a rank-1
+// adapter with no LoRA weights.
+var deltaAdapter = map[string]any{
+	"peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 1, "lora_alpha": 1,
+	"target_modules": []string{}, "bias": "none", "use_rslora": false,
+	"fan_in_fan_out": false, "base_model_name_or_path": "",
+}
+
+const deltaAdapterFile = "adapter_config.json"
+
+// EnsureDeltaAdapter writes a delta directory's adapter config if it has
+// none, as one exported before vLLM served bit1 layers lacks. It writes a
+// temporary file and renames it into place, leaving the deltas, which an
+// engine may be reading, as they are.
+func EnsureDeltaAdapter(dir string) error {
+	path := filepath.Join(dir, deltaAdapterFile)
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	raw, err := json.MarshalIndent(deltaAdapter, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+deltaAdapterFile+"-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(append(raw, '\n'))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return err
 }

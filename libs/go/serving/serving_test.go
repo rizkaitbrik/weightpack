@@ -967,3 +967,55 @@ func TestVersionAtLeast(t *testing.T) {
 		}
 	}
 }
+
+// A delta export made before vLLM served bit1 layers has no adapter
+// config, which vLLM reads first: a run on vLLM writes it.
+func TestOldDeltaExportsGetAnAdapterConfig(t *testing.T) {
+	f := newFixture(t)
+	f.rt.pluginVersion = func(context.Context) string { return "0.2.0" }
+	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
+	f.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
+	f.run(t, api.RunRequest{Ref: "finance"})
+	if _, err := f.rt.Stop([]string{"finance"}); err != nil {
+		t.Fatal(err)
+	}
+	_, cfg, _, _ := f.rt.read("finance")
+	config := filepath.Join(f.store.Root(), "run", "deltas", hexOf(cfg.Layers[1].Chain)+"-finance", "deltas", "finance", "adapter_config.json")
+	if err := os.Remove(config); err != nil {
+		t.Fatal(err)
+	}
+	c := f.run(t, api.RunRequest{Ref: "finance", Engine: EngineVLLM, Device: "cuda"})
+	if !slices.Equal(c.Adapters, []string{"finance"}) {
+		t.Errorf("finance on vLLM = %+v", c)
+	}
+	if _, err := os.Stat(config); err != nil {
+		t.Errorf("adapter config not written back: %v", err)
+	}
+}
+
+// A plain image that starts the base's vLLM engine, without delta slots,
+// between a fine-tune's planning and its acquire leaves the fine-tune baked,
+// on an engine of its own, rather than failing to load.
+func TestBit1LayerRacingAPlainImage(t *testing.T) {
+	f := newFixture(t)
+	f.rt.pluginVersion = func(context.Context) string { return "0.2.0" }
+	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
+	f.build(t, "plain", "FROM ./base\n")
+	f.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
+	var plain *api.Container
+	f.rt.beforeAcquire = func() {
+		f.rt.beforeAcquire = nil
+		plain = f.run(t, api.RunRequest{Ref: "plain", Engine: EngineVLLM, Device: "cuda"})
+	}
+	var events []string
+	finance, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "finance", Engine: EngineVLLM, Device: "cuda"}, func(e api.Event) { events = append(events, e.Message) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain == nil || finance.EngineID == plain.EngineID || len(finance.Adapters) != 0 || f.worker.count() != 1 {
+		t.Errorf("finance %+v beside plain %+v, %d squashes: want it baked on its own engine", finance, plain, f.worker.count())
+	}
+	if got := strings.Join(events, "\n"); !strings.Contains(got, "started without delta slots") {
+		t.Errorf("events = %q", events)
+	}
+}
