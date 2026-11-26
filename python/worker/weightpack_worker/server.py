@@ -84,6 +84,12 @@ class Worker(worker_pb2_grpc.WorkerServicer):
                 if res.calibration is not None:
                     before = res.calibration.loss_before
                     after = res.calibration.loss_after
+        except ImportError as exc:  # calibration loads torch on first use
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"bit1 calibration needs torch and transformers "
+                f"(pip install 'weightpack-worker[serve]'), or calibrate=0: {exc}",
+            )
         except (ValueError, OSError, KeyError) as exc:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
         return worker_pb2.EncodeLayerResponse(
