@@ -16,9 +16,9 @@ For a bit1 fine-tune, `wpkd` starts vLLM with `WEIGHTPACK_DELTA_SLOTS=1` and `--
 
 - `weightpack_vllm/routing.py`: the stacking and the gating, in torch, tested without vLLM against `reference.py`, the NumPy ground truth.
 - `weightpack_vllm/deltas.py`: reading a bit1 layer, the per-slot buffers and the per-token delta products, in torch, tested without vLLM against the dense fine-tunes.
-- `weightpack_vllm/bit1_kernel.py`: the CUDA kernel for the linear layers' delta products (Triton), tested against `deltas.py` on a GPU (`tests/test_bit1_kernel.py`).
+- `weightpack_vllm/bit1_kernel.py`: the CUDA kernels for the delta products (Triton), tested against `deltas.py` on a GPU or under Triton's interpreter (`tests/test_bit1_kernel.py`), and timed on a 7B model's projections by `tests/bench_bit1_kernels.py`.
 - `weightpack_vllm/patches.py`: the patches into vLLM's LoRA path and its linear, embedding and RMSNorm layers, written against vLLM 0.34 and run end to end on 0.29.
 - `tests/vllm_e2e.sh`: serves a tiny model with vLLM's CPU image in Docker, loads two experts and two mixes of them (top_k 1 and 2), and compares the replies with weightpack-engine's.
 - `tests/vllm_bit1_e2e.sh`: the same for two bit1 fine-tunes and a LoRA adapter over a tiny model with tied embeddings and biased projections.
 
-Limits: tensor parallel size 1, at most 8 experts per mix (`WEIGHTPACK_MAX_EXPERTS`), and as many fine-tunes per batch as adapter slots. With delta slots, a fine-tune runs at about half the base's throughput and the base at 87% (`tests/bench_bit1.py` on an RTX PRO 4500, a 7B-shaped model and four fine-tunes; the design doc has the numbers), and vLLM compiles without its cache. `WEIGHTPACK_DISABLE=1` leaves vLLM untouched.
+Limits: tensor parallel size 1, at most 8 experts per mix (`WEIGHTPACK_MAX_EXPERTS`), and as many fine-tunes per batch as adapter slots. With delta slots, a fine-tune runs at about two thirds of the base's throughput, and the base with the plugin at 88% of plain vLLM's, mostly for the token routing's gates, which run with no mix loaded (`tests/bench_bit1.py` on an RTX PRO 4500, a 7B-shaped model and four fine-tunes; the design doc has the numbers); and vLLM compiles without its cache. `WEIGHTPACK_DISABLE=1` leaves vLLM untouched.
