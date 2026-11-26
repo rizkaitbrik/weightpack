@@ -137,15 +137,15 @@ def greedy(model, ids: list[int], max_new_tokens: int, eos: set[int]) -> list[in
     return tokens
 
 
-def self_suite(model, tok, max_new_tokens: int = 128) -> Suite:
-    """The source's own greedy replies to SELF_PROMPTS."""
+def self_suite(model, tok, max_new_tokens: int = 128, prompts=SELF_PROMPTS) -> Suite:
+    """The source's own greedy replies to prompts, SELF_PROMPTS by default."""
     import torch
 
     chat = bool(getattr(tok, "chat_template", None))
     eos = model.generation_config.eos_token_id
     eos = set(eos if isinstance(eos, list) else [eos]) | {tok.eos_token_id}
     examples = []
-    for prompt in SELF_PROMPTS:
+    for prompt in prompts:
         if chat:
             msgs = [{"role": "user", "content": prompt}]
             ids = tok.apply_chat_template(

@@ -86,6 +86,9 @@ type Fidelity struct {
 	SourceDigest string  `json:"source_digest,omitempty"`
 	Codec        string  `json:"codec,omitempty"`
 	Density      float64 `json:"density,omitempty"` // codec=sparse
+	// CalibrationSteps is codec=bit1's steps of scale calibration, which
+	// distils the source into the per-matrix scales; 0 for none.
+	CalibrationSteps int `json:"calibration_steps,omitempty"`
 	// Eval names the suite: a suite file's name, or "self" for the source's
 	// own replies to general prompts. EvalDigest covers its files.
 	Eval         string   `json:"eval,omitempty"`

@@ -54,12 +54,15 @@ type cachedLossy struct {
 	Unchanged     int64          `json:"unchanged"`
 	Raw           int64          `json:"raw"` // the changed tensors' own size
 	RelativeError float64        `json:"relative_error"`
-	SourceDigest  string         `json:"source_digest"`
-	Suite         string         `json:"suite"`
-	Examples      int32          `json:"examples"`
-	Tokens        int64          `json:"tokens"`
-	SourceScore   float64        `json:"source_score"`
-	Score         float64        `json:"score"`
+	// bit1's calibration loss before and after, when it calibrated.
+	CalibrationBefore float64 `json:"calibration_before,omitempty"`
+	CalibrationAfter  float64 `json:"calibration_after,omitempty"`
+	SourceDigest      string  `json:"source_digest"`
+	Suite             string  `json:"suite"`
+	Examples          int32   `json:"examples"`
+	Tokens            int64   `json:"tokens"`
+	SourceScore       float64 `json:"source_score"`
+	Score             float64 `json:"score"`
 }
 
 // ingestLossy imports a full fine-tune as a lossy delta over its parent
@@ -81,11 +84,17 @@ func (b *builder) ingestLossy(step string, src weightfile.Layer, layer, parent *
 	if err != nil {
 		return err
 	}
-	density := 0.0
-	if src.Codec == weightfile.CodecSparse {
+	density, steps := 0.0, 0
+	switch src.Codec {
+	case weightfile.CodecSparse:
 		density = weightfile.DefaultDensity
 		if src.Density != nil {
 			density = *src.Density
+		}
+	case weightfile.CodecBit1:
+		steps = weightfile.DefaultCalibrate
+		if src.Calibrate != nil {
+			steps = *src.Calibrate
 		}
 	}
 	suite, suiteDigest := "", ""
@@ -106,14 +115,14 @@ func (b *builder) ingestLossy(step string, src weightfile.Layer, layer, parent *
 
 	key := ""
 	if fk := b.cache.xorKey(parent.Chain, ft.files); fk != "" {
-		key = hashKey("lossy", src.Codec, codec.mediaType, strconv.FormatFloat(density, 'g', -1, 64), fk, suiteDigest, template.digest, info.Version)
+		key = hashKey("lossy", src.Codec, codec.mediaType, strconv.FormatFloat(density, 'g', -1, 64), strconv.Itoa(steps), fk, suiteDigest, template.digest, info.Version)
 	}
 	var entry cachedLossy
 	cached := b.cache.load(key, &entry) && entry.Tensors != nil && b.storeHas(entry.Tensors)
 	if cached {
 		b.cache.hits += len(entry.Tensors)
 	} else {
-		if entry, err = b.encodeLossy(step, src, layer, parent, base, ft, codec.codec, codec.mediaType, density, suite, template, fail); err != nil {
+		if entry, err = b.encodeLossy(step, src, layer, parent, base, ft, codec.codec, codec.mediaType, density, steps, suite, template, fail); err != nil {
 			return err
 		}
 		b.cache.store(key, entry)
@@ -139,6 +148,10 @@ func (b *builder) ingestLossy(step string, src weightfile.Layer, layer, parent *
 	b.progress(api.Event{Step: step, Message: fmt.Sprintf("%s delta: %d tensors changed, %d unchanged; %s of changed weights stored in %s (%.1f%%), relative error %.3f%s",
 		src.Codec, len(entry.Tensors), entry.Unchanged, api.FormatSize(entry.Raw), api.FormatSize(stored), 100*float64(stored)/math.Max(1, float64(entry.Raw)), entry.RelativeError, note)})
 
+	if steps > 0 {
+		b.progress(api.Event{Step: step, Message: fmt.Sprintf("calibrated the scales over %d steps: KL divergence per reply token from the fine-tune %.4g with mean absolute deltas, %.4g calibrated%s",
+			steps, entry.CalibrationBefore, entry.CalibrationAfter, note)})
+	}
 	drop := entry.SourceScore - entry.Score
 	b.progress(api.Event{Step: step, Message: fmt.Sprintf("eval %s (%d examples, %d tokens): the fine-tune predicts %.2f%% of tokens, the %s layer %.2f%%: a drop of %.2f points (max_drop %g)",
 		entry.Suite, entry.Examples, entry.Tokens, entry.SourceScore, src.Codec, entry.Score, drop, *src.MaxDrop)})
@@ -153,7 +166,7 @@ func (b *builder) ingestLossy(step string, src weightfile.Layer, layer, parent *
 		layer.Fidelity = fid
 	}
 	fid.SourceDigest = entry.SourceDigest
-	fid.Density = density
+	fid.Density, fid.CalibrationSteps = density, steps
 	fid.Eval, fid.EvalDigest = entry.Suite, suiteDigest
 	fid.SourceScore, fid.Score, fid.MeasuredDrop = &entry.SourceScore, &entry.Score, &drop
 	layer.Digest = spec.LayerDigest(*layer, refs, nil)
@@ -163,7 +176,7 @@ func (b *builder) ingestLossy(step string, src weightfile.Layer, layer, parent *
 
 // encodeLossy has the worker encode the deltas and evaluate them, then
 // checks and stores the deltas.
-func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *spec.Layer, base *baseModel, ft *fineTune, codec workerpb.Codec, mediaType string, density float64, suite string, template templateSource, fail func(string, ...any) error) (cachedLossy, error) {
+func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *spec.Layer, base *baseModel, ft *fineTune, codec workerpb.Codec, mediaType string, density float64, steps int, suite string, template templateSource, fail func(string, ...any) error) (cachedLossy, error) {
 	var entry cachedLossy
 	staging, err := b.store.TempDir("encode-")
 	if err != nil {
@@ -183,16 +196,28 @@ func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *
 	if err != nil {
 		return entry, err
 	}
-	req := &workerpb.EncodeLayerRequest{Codec: codec, TargetFiles: targets, OutDir: outDir, Density: density, ReconstructDir: recon}
+	templatePath, err := template.write(b, staging)
+	if err != nil {
+		return entry, err
+	}
+	req := &workerpb.EncodeLayerRequest{
+		Codec: codec, TargetFiles: targets, OutDir: outDir, Density: density, ReconstructDir: recon,
+		CalibrationSteps: int32(steps), ChatTemplate: templatePath,
+	}
 	if req.Base, req.Parents, err = b.parentBlobs(ft, inDir); err != nil {
 		return entry, err
 	}
-	b.progress(api.Event{Step: step, Message: fmt.Sprintf("encoding %s as a %s delta over %s", src.Source, src.Codec, parent.ID)})
+	what := fmt.Sprintf("encoding %s as a %s delta over %s", src.Source, src.Codec, parent.ID)
+	if steps > 0 {
+		what += fmt.Sprintf(", calibrating its scales over %d steps", steps)
+	}
+	b.progress(api.Event{Step: step, Message: what})
 	resp, err := b.worker.EncodeLayer(b.ctx, req)
 	if err != nil {
 		return entry, fail("%s", WorkerError(err))
 	}
 	entry.Unchanged, entry.RelativeError = resp.Unchanged, resp.RelativeError
+	entry.CalibrationBefore, entry.CalibrationAfter = resp.CalibrationLossBefore, resp.CalibrationLossAfter
 	for _, t := range resp.Tensors {
 		want, ok := base.tensors[t.Name]
 		if !ok {
@@ -216,15 +241,11 @@ func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *
 		return entry, err
 	}
 
-	what := "its own replies to general prompts"
+	on := "its own replies to general prompts"
 	if suite != "" {
-		what = src.Eval
+		on = src.Eval
 	}
-	b.progress(api.Event{Step: step, Message: fmt.Sprintf("evaluating the fine-tune and the %s layer on %s", src.Codec, what)})
-	templatePath, err := template.write(b, staging)
-	if err != nil {
-		return entry, err
-	}
+	b.progress(api.Event{Step: step, Message: fmt.Sprintf("evaluating the fine-tune and the %s layer on %s", src.Codec, on)})
 	ev, err := b.worker.Evaluate(b.ctx, &workerpb.EvaluateRequest{Models: []string{source, recon}, Suite: suite, ChatTemplate: templatePath})
 	if err != nil {
 		return entry, fail("eval: %s", WorkerError(err))

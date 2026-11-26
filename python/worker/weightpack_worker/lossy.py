@@ -5,7 +5,9 @@ approximation of the float32 difference ``target - parent``:
 
 - ``bit1``, as BitDelta (Liu et al., 2024) does: a matrix's delta as one
   sign bit per weight and one scale, the mean absolute delta, which is the
-  scale that minimises the squared error of ``scale * sign``.
+  scale that minimises the squared error of ``scale * sign``; or, calibrated
+  (calibrate.py), the scale that makes the whole model's next-token
+  distributions closest to the fine-tune's.
 - ``sparse``: a matrix's delta keeps the ``density`` fraction of its entries
   with the largest magnitudes: a bitmap of which entries it keeps, and their
   values rounded to the tensor's own dtype. The daemon stores these blobs
@@ -59,14 +61,26 @@ DELTA = ".delta"
 SUFFIXES = (SIGNS, SCALE, MASK, VALUES, DELTA)
 
 
-def encode(codec: str, delta: np.ndarray, dtype: str = "F32", density: float = 0.1):
+def bit1_scale(delta: np.ndarray) -> float:
+    """bit1's scale before calibration: the mean absolute delta, as float32."""
+    return float(np.float32(np.mean(np.abs(delta)))) if delta.size else 0.0
+
+
+def encode(
+    codec: str,
+    delta: np.ndarray,
+    dtype: str = "F32",
+    density: float = 0.1,
+    scale: float | None = None,
+):
     """A tensor's delta as (suffix, dtype, raw values) entries; dtype is the
-    tensor's own, which sparse values are rounded to."""
+    tensor's own, which sparse values are rounded to. scale replaces bit1's
+    mean absolute delta, as calibration gives it."""
     if delta.ndim < 2:
         return [(DELTA, "F32", delta.astype(np.float32))]
     flat = delta.reshape(-1)
     if codec == BIT1:
-        scale = np.float32(np.mean(np.abs(flat))) if flat.size else np.float32(0)
+        scale = np.float32(bit1_scale(flat) if scale is None else scale)
         signs = np.packbits(flat >= 0)
         return [(SIGNS, "U8", signs), (SCALE, "F32", np.array([scale], np.float32))]
     if codec == SPARSE:
@@ -127,6 +141,7 @@ class Encoded:
     tensors: list[tuple[str, str]]  # (tensor name, file name), by name
     unchanged: int
     relative_error: float  # ||delta - decoded|| / ||delta|| over all deltas
+    calibration: object = None  # calibrate.Calibration, for calibrated bit1
 
 
 def encode_lossy(
@@ -137,6 +152,9 @@ def encode_lossy(
     out_dir: str | Path,
     density: float = 0.1,
     reconstruct_dir: str | Path | None = None,
+    calibration_steps: int = 0,
+    chat_template: str | None = None,
+    device: str = "auto",
 ) -> Encoded:
     """Encode a fine-tune as a lossy delta over its parent.
 
@@ -145,10 +163,23 @@ def encode_lossy(
     parent with each delta decoded and added, as safetensors with an index,
     beside copies of the fine-tune's other files (config, tokenizer), so it
     can be evaluated against the fine-tune.
+
+    For bit1, calibration_steps > 0 first calibrates the scales (see
+    calibrate.py), which needs the target files' directory to be a model
+    directory, with torch and transformers.
     """
     out_dir = Path(out_dir)
     parent = Parent(base_blobs, parents)
     target = fine_tune(parent, target_files)
+    calibration = None
+    if codec == BIT1 and calibration_steps > 0:
+        from weightpack_worker.calibrate import calibrate_bit1
+
+        source = str(Path(target_files[0]).parent)
+        calibration = calibrate_bit1(
+            source, parent, target, calibration_steps, chat_template, device
+        )
+    scales = calibration.scales if calibration else {}
     recon = Path(reconstruct_dir) if reconstruct_dir else None
     weight_map: dict[str, str] = {}
     total = 0
@@ -167,7 +198,7 @@ def encode_lossy(
                 )
             w = to_float32(info.dtype, raw)
             delta = to_float32(info.dtype, new.view(storage_dtype(info.dtype))) - w
-            entries = encode(codec, delta, info.dtype, density)
+            entries = encode(codec, delta, info.dtype, density, scales.get(name))
             approx = decode({s: (d, v) for s, d, v in entries}, info.shape)
             err2 += float(np.sum((delta - approx) ** 2, dtype=np.float64))
             norm2 += float(np.sum(delta**2, dtype=np.float64))
@@ -186,7 +217,7 @@ def encode_lossy(
         _write_index(recon, weight_map, total)
         _copy_meta(Path(target_files[0]).parent, recon)
     rel = float(np.sqrt(err2 / norm2)) if norm2 > 0 else 0.0
-    return Encoded(encoded, unchanged, rel)
+    return Encoded(encoded, unchanged, rel, calibration)
 
 
 def _write_index(dir: Path, weight_map: dict[str, str], total: int) -> None:

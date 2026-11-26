@@ -50,6 +50,7 @@
       "fidelity": {
         "source": "hf://acme/llama-fin-full",
         "codec": "bit1",
+        "calibration_steps": 200,
         "eval": "./evals/finance.yaml",
         "max_drop": 0.5
       }

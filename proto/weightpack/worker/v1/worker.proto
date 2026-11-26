@@ -73,6 +73,14 @@ message EncodeLayerRequest {
   // back into (the parent plus each decoded delta, beside the fine-tune's
   // config and tokenizer), so it can be evaluated against the fine-tune.
   string reconstruct_dir = 7;
+  // CODEC_BIT1: steps of scale calibration, which distils the fine-tune into
+  // the per-matrix scales on its own replies to general prompts (see
+  // weightpack_worker/calibrate.py); 0 keeps each mean absolute delta. The
+  // target files' directory must then be a model directory.
+  int32 calibration_steps = 8;
+  // A Jinja template replacing the tokenizer's chat template, for the
+  // calibration prompts.
+  string chat_template = 9;
 }
 
 message EncodedTensor {
@@ -87,6 +95,12 @@ message EncodeLayerResponse {
   // A lossy codec: ||delta - decoded|| / ||delta|| over every changed
   // tensor, how much of the fine-tune's change the layer misses.
   double relative_error = 3;
+  // CODEC_BIT1 with calibration: the mean KL divergence per reply token
+  // from the fine-tune to the layer's model on the calibration replies,
+  // with the mean absolute deltas and with the calibrated scales. They are
+  // equal when calibration did not help and the layer kept the former.
+  double calibration_loss_before = 4;
+  double calibration_loss_after = 5;
 }
 
 message EvaluateRequest {

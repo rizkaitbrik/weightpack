@@ -77,6 +77,12 @@ func weightLayer(l Layer, parent string) spec.Layer {
 				fid.Density = *l.Density
 			}
 		}
+		if l.Codec == CodecBit1 {
+			fid.CalibrationSteps = DefaultCalibrate
+			if l.Calibrate != nil {
+				fid.CalibrationSteps = *l.Calibrate
+			}
+		}
 		out.Fidelity = fid
 	}
 	return out
