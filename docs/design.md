@@ -247,6 +247,8 @@ LICENSE inherit
 | `wpk push` / `wpk pull` | same | Moves only the blobs the other side lacks |
 | `wpk run name:tag` | `docker run` | Starts a container: an OpenAI-compatible endpoint for that composition |
 | `wpk ps` / `wpk stop` / `wpk logs` | same | Lists, stops and shows the engine log of containers |
+| `wpk doctor` | `docker info` | Checks the daemon, worker, device, engines, gateway, disk and Hub access, with a fix for each failure |
+| `wpk service install` | `systemctl enable docker` | Runs `wpkd` as a launchd agent (macOS) or systemd user unit (Linux) |
 | `wpk squash name:tag --to dense` | `docker export` | Bakes a stack, or a mix with fixed weights, into one dense checkpoint |
 | `wpk diff a b` | `docker diff` | Per-tensor report: which tensors differ and by how much |
 | `wpk inspect` / `wpk history` | same | Layers, parents, sizes, codecs, fidelity |

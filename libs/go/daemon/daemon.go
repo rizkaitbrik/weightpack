@@ -97,6 +97,7 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	mux.HandleFunc("GET /v1/containers", srv.serving(srv.containers))
 	mux.HandleFunc("POST /v1/stop", srv.serving(srv.stop))
 	mux.HandleFunc("GET /v1/containers/logs", srv.serving(srv.logs))
+	mux.HandleFunc("GET /v1/doctor", srv.doctor)
 	return mux
 }
 

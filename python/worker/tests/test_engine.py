@@ -223,6 +223,18 @@ def test_generates_on_metal(tmp_path):
     assert next(engine.peft.parameters()).device.type == "mps"
 
 
+def test_check(capsys):
+    from weightpack_worker.engine import main
+
+    assert main(["--check"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["torch"] == torch.__version__
+    assert report["mps"] == torch.backends.mps.is_available()
+    assert report["cuda"] == torch.cuda.is_available()
+    with pytest.raises(SystemExit):
+        main([])  # --model is required to serve
+
+
 def test_failed_generation_frees_the_engine(tmp_path):
     """A generation that fails mid-stream ends the stream with an error,
     and the engine serves the next request: the lock is released."""

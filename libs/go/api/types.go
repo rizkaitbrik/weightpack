@@ -18,6 +18,7 @@
 //	GET  /v1/containers            -> []Container
 //	POST /v1/stop                  StopRequest -> StopResponse
 //	GET  /v1/containers/logs?name=N[&follow=1]  -> the engine's log, as text
+//	GET  /v1/doctor                -> DoctorReport
 //
 // Containers answer on wpkd's gateway, a separate TCP listener that speaks
 // the OpenAI API and routes each request by its model field.
@@ -243,6 +244,29 @@ type ImageDetail struct {
 	Digest   string           `json:"digest"`
 	Manifest ocispec.Manifest `json:"manifest"`
 	Config   spec.Config      `json:"config"`
+}
+
+// Check statuses.
+const (
+	CheckOK   = "ok"
+	CheckWarn = "warn" // works, with a limit worth knowing
+	CheckFail = "fail" // something wpk needs does not work
+	CheckSkip = "skip" // does not apply here
+)
+
+// Check is one line of wpk doctor.
+type Check struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Detail string `json:"detail"`
+	// Fix says what to do about a warn or fail.
+	Fix string `json:"fix,omitempty"`
+}
+
+// DoctorReport is what wpkd finds about its machine: the build worker, the
+// device, the engines, the gateway, the store and Hugging Face access.
+type DoctorReport struct {
+	Checks []Check `json:"checks"`
 }
 
 // FormatSize prints a byte count in decimal units, as the design doc does

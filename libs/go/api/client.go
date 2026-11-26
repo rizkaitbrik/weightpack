@@ -196,6 +196,12 @@ func (c *Client) Run(ctx context.Context, req RunRequest, onEvent func(Event)) (
 	return last.Container, nil
 }
 
+// Doctor asks the daemon to check its machine.
+func (c *Client) Doctor(ctx context.Context) (*DoctorReport, error) {
+	var out DoctorReport
+	return &out, c.getJSON(ctx, "/v1/doctor", &out)
+}
+
 // Containers lists the running containers.
 func (c *Client) Containers(ctx context.Context) ([]Container, error) {
 	var out []Container
