@@ -249,3 +249,43 @@ def rms_normalized(x, eps: float, var_size: int | None = None):
     xf = x.float()
     v = xf if var_size is None else xf[..., :var_size]
     return xf * torch.rsqrt(v.pow(2).mean(-1, keepdim=True) + eps)
+
+
+# In place, as the plugin's ops run: torch here, bit1_kernel's on CUDA. Each
+# rounds the base's output plus the delta once, to the output's dtype.
+
+
+def linear_(y, x, slots, signs, row_scale, active, bias=None, bias_active=None):
+    """y (tokens, rows) += each token's delta product (and bias delta)."""
+    import torch
+
+    n = min(signs.shape[1], y.shape[1])
+    d = linear_delta(x, slots, signs[:, :n], row_scale[:, :n], active, False)
+    if bias is not None:
+        s = slots.clamp(min=0)
+        on = (slots >= 0) & (bias_active[s] > 0)
+        d = d + torch.where(on.view(-1, 1), bias[s, :n], 0.0)
+    y[:, :n] = (y[:, :n].float() + d).to(y.dtype)
+
+
+def norm_(y, x, slots, delta, active, eps, var_size=-1):
+    """y (rows, H) += normalized(x) * delta, rows // len(slots) per token."""
+    import torch
+
+    rows = x.shape[0]
+    s = slots.repeat_interleave(max(1, rows // max(1, slots.shape[0])))[:rows]
+    keep = (s >= 0) & (active[s.clamp(min=0)] > 0)
+    d = torch.where(keep.view(-1, 1), delta[s.clamp(min=0)], 0.0)
+    n = rms_normalized(x, eps, None if var_size < 0 else var_size)
+    y.copy_((y.float() + n * d).to(y.dtype))
+
+
+def rows_(y, ids, slots, signs, row_scale, active):
+    """y (tokens, H) += each token's embedding row delta."""
+    import torch
+
+    s = slots.clamp(min=0)
+    bits = unpack(signs[s, ids], y.shape[1], torch.float32)
+    keep = (slots >= 0) & (active[s] > 0)
+    d = torch.where(keep.view(-1, 1), bits * row_scale[s, ids].view(-1, 1), 0.0)
+    y.copy_((y.float() + d).to(y.dtype))

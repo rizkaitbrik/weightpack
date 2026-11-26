@@ -431,6 +431,7 @@ def _activate_delta(index: int, placed) -> None:
 def _patch_forward() -> None:
     """Adds each token's delta to the outputs of the layers that hold delta
     buffers. A layer without them is left as it is."""
+    import torch
     from vllm.model_executor.layers.layernorm import RMSNorm
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -438,6 +439,7 @@ def _patch_forward() -> None:
     )
 
     _register_ops()
+    ops = torch.ops.weightpack
     linear_apply = UnquantizedLinearMethod.apply
 
     def apply_linear(self, layer, x, bias=None):
@@ -447,11 +449,18 @@ def _patch_forward() -> None:
             return y
         xs = x.reshape(-1, x.shape[-1])
         slots = _punica._token_lora_indices[: xs.shape[0]]
-        d = _product(xs, slots, ps)
-        pb = getattr(layer, "_wp_bias", None)
-        if pb is not None and bias is not None:
-            d = d + deltas.vector_delta(slots, pb)
-        return y + d.to(y.dtype).view(y.shape)
+        pb = getattr(layer, "_wp_bias", None) if bias is not None else None
+        ops.bit1_linear_(
+            y.view(-1, y.shape[-1]),
+            xs,
+            slots,
+            ps.signs,
+            ps.row_scale,
+            ps.active,
+            None if pb is None else pb.vector,
+            None if pb is None else pb.active,
+        )
+        return y
 
     UnquantizedLinearMethod.apply = apply_linear
 
@@ -464,8 +473,10 @@ def _patch_forward() -> None:
             return e
         ids = input_.reshape(-1)
         slots = _punica._token_lora_indices[: ids.shape[0]]
-        d = deltas.rows_delta(ids, slots, ps, e.dtype)
-        return e + d.to(e.dtype).view(e.shape)
+        ops.bit1_rows_(
+            e.view(-1, e.shape[-1]), ids, slots, ps.signs, ps.row_scale, ps.active
+        )
+        return e
 
     UnquantizedEmbeddingMethod.embedding = embedding
 
@@ -479,8 +490,17 @@ def _patch_forward() -> None:
         xs = x.reshape(-1, x.shape[-1])
         # The output head sees the rows to sample, one per sequence.
         slots = _punica._sampler_indices[: xs.shape[0]]
-        d = _product(xs, slots, ps)
-        return y + d[:, : y.shape[-1]].to(y.dtype).view(y.shape)
+        ops.bit1_linear_(
+            y.view(-1, y.shape[-1]),
+            xs,
+            slots,
+            ps.signs,
+            ps.row_scale,
+            ps.active,
+            None,
+            None,
+        )
+        return y
 
     UnquantizedEmbeddingMethod.apply = apply_head
 
@@ -493,54 +513,81 @@ def _patch_forward() -> None:
             return out
         y, res = (out, None) if residual is None else out
         base = x if residual is None else res
-        slots = _punica._token_lora_indices[: base.shape[0]]
-        d = deltas.vector_delta(slots, ps)
-        shape = (base.shape[0],) + (1,) * (base.dim() - 2) + (ps.shape[0],)
-        n = deltas.rms_normalized(
-            base, self.variance_epsilon, self.variance_size_override
+        h = ps.shape[0]
+        var = self.variance_size_override
+        ops.bit1_norm_(
+            y.view(-1, h),
+            base.reshape(-1, h),
+            _punica._token_lora_indices[: base.shape[0]],
+            ps.vector,
+            ps.active,
+            float(self.variance_epsilon),
+            -1 if var is None else int(var),
         )
-        y = y + (n * d.view(shape)).to(y.dtype)
-        return y if residual is None else (y, res)
+        return out
 
     RMSNorm.forward = rms_forward
     logger.info("weightpack: bit1 deltas apply per token")
-
-
-def _product(x, slots, ps: deltas.ParamSlots):
-    import torch
-
-    return torch.ops.weightpack.bit1_linear(x, slots, ps.signs, ps.row_scale, ps.active)
 
 
 _ops_registered = False
 
 
 def _register_ops() -> None:
-    """weightpack::bit1_linear, opaque to torch.compile: the Triton kernel
-    on CUDA, deltas.linear_delta elsewhere."""
+    """The in-place delta ops, opaque to torch.compile: bit1_kernel's Triton
+    kernels on CUDA, deltas.py's torch ops elsewhere."""
     global _ops_registered
     if _ops_registered:
         return
     import torch
 
+    # WEIGHTPACK_KERNELS=triton runs the Triton kernels on the CPU too, under
+    # TRITON_INTERPRET=1, to test them inside vLLM without a GPU.
+    forced = os.environ.get("WEIGHTPACK_KERNELS") == "triton"
+
+    chosen = []
+
+    def kernels(t):
+        if not (t.is_cuda or forced):
+            return deltas
+        from . import bit1_kernel
+
+        use = bit1_kernel if bit1_kernel.available() else deltas
+        if not chosen:
+            chosen.append(use)
+            logger.info(
+                "weightpack: bit1 deltas run on %s",
+                "Triton kernels" if use is bit1_kernel else "torch ops (no Triton)",
+            )
+        return use
+
     @torch.library.custom_op(
-        "weightpack::bit1_linear",
-        mutates_args=(),
-        schema="(Tensor x, Tensor slots, Tensor signs, Tensor row_scale, "
-        "Tensor active) -> Tensor",
+        "weightpack::bit1_linear_",
+        mutates_args=("y",),
+        schema="(Tensor(a!) y, Tensor x, Tensor slots, Tensor signs, "
+        "Tensor row_scale, Tensor active, Tensor? bias, Tensor? bias_active) -> ()",
     )
-    def bit1_linear(x, slots, signs, row_scale, active):
-        if x.is_cuda:
-            from . import bit1_kernel
+    def bit1_linear_(y, x, slots, signs, row_scale, active, bias, bias_active):
+        kernels(y).linear_(y, x, slots, signs, row_scale, active, bias, bias_active)
 
-            if bit1_kernel.available():
-                return bit1_kernel.linear(x, slots, signs, row_scale, active)
-        return deltas.linear_delta(
-            x, slots, signs, row_scale, active, graph_safe=x.is_cuda
-        )
+    @torch.library.custom_op(
+        "weightpack::bit1_norm_",
+        mutates_args=("y",),
+        schema="(Tensor(a!) y, Tensor x, Tensor slots, Tensor delta, "
+        "Tensor active, float eps, int var_size) -> ()",
+    )
+    def bit1_norm_(y, x, slots, delta, active, eps, var_size):
+        kernels(y).norm_(y, x, slots, delta, active, eps, var_size)
 
-    @bit1_linear.register_fake
-    def _(x, slots, signs, row_scale, active):
-        return x.new_empty((x.shape[0], signs.shape[1]), dtype=torch.float32)
+    @torch.library.custom_op(
+        "weightpack::bit1_rows_",
+        mutates_args=("y",),
+        schema="(Tensor(a!) y, Tensor ids, Tensor slots, Tensor signs, "
+        "Tensor row_scale, Tensor active) -> ()",
+    )
+    def bit1_rows_(y, ids, slots, signs, row_scale, active):
+        kernels(y).rows_(y, ids, slots, signs, row_scale, active)
 
+    for op in (bit1_linear_, bit1_norm_, bit1_rows_):
+        op.register_fake(lambda *args: None)
     _ops_registered = True
