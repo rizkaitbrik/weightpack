@@ -55,7 +55,10 @@ func (b *builder) ingestBase(from weightfile.From, layer *spec.Layer) (*baseMode
 	fail := func(format string, args ...any) error {
 		return &weightfile.Error{File: b.file, Line: from.Line, Msg: step + ": " + fmt.Sprintf(format, args...)}
 	}
-	dir := from.Source.Path(b.dir)
+	dir, err := b.sourceDir(step, from.Line, from.Source, fetchModel)
+	if err != nil {
+		return nil, err
+	}
 	if info, err := os.Stat(dir); err != nil {
 		return nil, fail("%v", err)
 	} else if !info.IsDir() {

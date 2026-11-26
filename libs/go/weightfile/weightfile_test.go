@@ -318,3 +318,26 @@ func TestParseSource(t *testing.T) {
 		}
 	}
 }
+
+func TestHFSources(t *testing.T) {
+	for in, want := range map[string][3]string{
+		"hf://Qwen/Qwen2.5-0.5B-Instruct":                      {"Qwen/Qwen2.5-0.5B-Instruct", "", "main"},
+		"hf://acme/loras/adapters/legal@v2":                    {"acme/loras", "adapters/legal", "v2"},
+		"hf://acme/m@3e2a1f0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a": {"acme/m", "", "3e2a1f0c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a"},
+	} {
+		s, err := ParseSource(in)
+		if err != nil {
+			t.Errorf("%s: %v", in, err)
+			continue
+		}
+		repo, folder, rev := s.HF()
+		if [3]string{repo, folder, rev} != want {
+			t.Errorf("%s: HF() = %q %q %q, want %v", in, repo, folder, rev, want)
+		}
+	}
+	for _, bad := range []string{"hf://acme/m/../x", "hf://acme/m/./x", "hf://acme"} {
+		if _, err := ParseSource(bad); err == nil {
+			t.Errorf("%s accepted", bad)
+		}
+	}
+}

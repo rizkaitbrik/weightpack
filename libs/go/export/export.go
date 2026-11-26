@@ -436,6 +436,21 @@ func (e *exporter) adapter(l spec.Layer, ds []ocispec.Descriptor, base map[strin
 	if err != nil {
 		return err
 	}
+	// modules_to_save copies: full tensors stored under base tensor names.
+	saved, savedFiles, err := e.openTensors(ds, spec.MediaTypeTensor)
+	defer closeAll(savedFiles)
+	if err != nil {
+		return err
+	}
+	var savedModules []string
+	for n, lt := range saved {
+		tensors[n] = lt
+		module := n[:max(strings.LastIndex(n, "."), 0)]
+		if !slices.Contains(savedModules, module) {
+			savedModules = append(savedModules, module)
+		}
+	}
+	sort.Strings(savedModules)
 	names := make([]string, 0, len(tensors))
 	modules := map[string]bool{}
 	for n := range tensors {
@@ -462,7 +477,7 @@ func (e *exporter) adapter(l spec.Layer, ds []ocispec.Descriptor, base map[strin
 		PeftType: "LORA", R: l.Rank, LoraAlpha: l.Alpha, UseRSLoRA: l.RSLoRA,
 		TargetModules: targetModules(modules, base), Bias: "none",
 		RankPattern: map[string]any{}, AlphaPattern: map[string]any{},
-		InferenceMode: true, InitLoraWeights: true,
+		InferenceMode: true, InitLoraWeights: true, ModulesToSave: savedModules,
 	}
 	if err := e.writeJSON(filepath.Join(dir, "adapter_config.json"), cfg); err != nil {
 		return err

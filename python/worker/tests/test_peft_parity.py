@@ -26,7 +26,9 @@ def bf16_bits(t):
     return t.detach().contiguous().view(torch.int16).numpy().view(np.uint16)
 
 
-def tiny_project(tmp_path, use_rslora=False, layers_to_transform=None):
+def tiny_project(
+    tmp_path, use_rslora=False, layers_to_transform=None, modules_to_save=None
+):
     """Write base/ (a tiny BF16 Llama), adapter/ (a PEFT LoRA with random A
     and B, so every delta is non-zero) and a Weightfile stacking them.
     Returns PEFT's merged state dict."""
@@ -53,9 +55,18 @@ def tiny_project(tmp_path, use_rslora=False, layers_to_transform=None):
         lora_dropout=0.0,
         use_rslora=use_rslora,
         layers_to_transform=layers_to_transform,
+        modules_to_save=modules_to_save,
         init_lora_weights=False,
     )
     peft_model = peft.get_peft_model(model, lora)
+    for name in modules_to_save or []:
+        # A saved module starts as a copy of the base's; change it, as
+        # training would, so replacing it is visible.
+        copy = peft_model.base_model.model.get_submodule(name).modules_to_save[
+            "default"
+        ]
+        with torch.no_grad():
+            copy.weight.add_(torch.randn_like(copy.weight) * 0.05)
     peft_model.save_pretrained(tmp_path / "adapter")
     (tmp_path / "Weightfile").write_text("FROM ./base\nLAYER lora ./adapter\n")
     return peft_model.merge_and_unload().state_dict()
@@ -97,11 +108,18 @@ def same_bits(a, b):
     ) and set(a) == set(b)
 
 
-@pytest.mark.parametrize("layers_to_transform", [None, [1]])
+@pytest.mark.parametrize(
+    ("layers_to_transform", "modules_to_save"),
+    [(None, None), ([1], None), (None, ["lm_head"])],
+)
 def test_export_loads_in_transformers_and_peft(
-    weightpack, tmp_path, layers_to_transform
+    weightpack, tmp_path, layers_to_transform, modules_to_save
 ):
-    want = tiny_project(tmp_path, layers_to_transform=layers_to_transform)
+    want = tiny_project(
+        tmp_path,
+        layers_to_transform=layers_to_transform,
+        modules_to_save=modules_to_save,
+    )
     weightpack.wpk("build", "-t", "tiny", str(tmp_path))
     weightpack.wpk("squash", "-t", "tiny-dense", "tiny")
 
@@ -123,6 +141,7 @@ def test_export_loads_in_transformers_and_peft(
     )
     # A LoRA on one block only gets a regex naming its modules exactly.
     assert isinstance(adapter_cfg["target_modules"], str) == bool(layers_to_transform)
+    assert adapter_cfg["modules_to_save"] == modules_to_save
     base = transformers.LlamaForCausalLM.from_pretrained(split / "base")
     merged = peft.PeftModel.from_pretrained(
         base, split / "adapters" / "lora"

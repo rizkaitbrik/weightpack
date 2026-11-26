@@ -43,6 +43,25 @@ func (s Source) String() string {
 	}
 }
 
+// HF splits a Hugging Face source into its repository ("org/name"), the
+// folder inside it ("" for the root) and the revision ("main" when none is
+// given). It returns empty strings for other kinds.
+func (s Source) HF() (repo, folder, rev string) {
+	if s.Kind != SourceHF {
+		return "", "", ""
+	}
+	path, rev, _ := strings.Cut(s.Ref, "@")
+	if rev == "" {
+		rev = "main"
+	}
+	parts := strings.SplitN(path, "/", 3)
+	repo = parts[0] + "/" + parts[1]
+	if len(parts) == 3 {
+		folder = parts[2]
+	}
+	return repo, folder, rev
+}
+
 // Path resolves a local source against the Weightfile's directory. It returns
 // "" for other kinds.
 func (s Source) Path(dir string) string {
@@ -56,7 +75,8 @@ func (s Source) Path(dir string) string {
 }
 
 var (
-	hfRepo     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	// org/name, then optionally a folder inside the repository.
+	hfRepo     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9._-]+)*$`)
 	hfRevision = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]*$`)
 )
 
@@ -98,7 +118,12 @@ func ParseSource(s string) (Source, error) {
 func checkHF(ref string) error {
 	repo, rev, hasRev := strings.Cut(ref, "@")
 	if !hfRepo.MatchString(repo) {
-		return fmt.Errorf("hf source %q: want hf://<org>/<name>[@revision]", ref)
+		return fmt.Errorf("hf source %q: want hf://<org>/<name>[/<folder>][@revision]", ref)
+	}
+	for _, part := range strings.Split(repo, "/") {
+		if part == "." || part == ".." {
+			return fmt.Errorf("hf source %q: a folder cannot be %q", ref, part)
+		}
 	}
 	if hasRev && !hfRevision.MatchString(rev) {
 		return fmt.Errorf("hf source %q: bad revision %q", ref, rev)
