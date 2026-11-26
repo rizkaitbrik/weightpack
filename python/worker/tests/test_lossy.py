@@ -20,10 +20,10 @@ from .test_squash import write_many
 
 def test_bit1_is_signs_and_the_mean_absolute_delta():
     delta = np.array([[0.5, -1.0, 2.0], [-0.25, 0.0, -3.0]], np.float32)
-    entries = {s: v for s, _, v in lossy.encode(lossy.BIT1, delta)}
+    entries = {s: (d, v) for s, d, v in lossy.encode(lossy.BIT1, delta)}
     assert sorted(entries) == [lossy.SCALE, lossy.SIGNS]
     scale = np.mean(np.abs(delta))
-    assert entries[lossy.SCALE][0] == pytest.approx(scale)
+    assert entries[lossy.SCALE][1][0] == pytest.approx(scale)
     got = lossy.decode(entries, delta.shape)
     np.testing.assert_allclose(got, np.where(delta >= 0, scale, -scale))
     # The scale minimises the squared error of scale * sign.
@@ -34,22 +34,38 @@ def test_bit1_is_signs_and_the_mean_absolute_delta():
 def test_sparse_keeps_the_largest_entries():
     rng = np.random.default_rng(0)
     delta = rng.standard_normal((10, 20)).astype(np.float32)
-    entries = {s: v for s, _, v in lossy.encode(lossy.SPARSE, delta, density=0.1)}
-    assert (
-        entries[lossy.INDICES].dtype == np.uint32 and len(entries[lossy.VALUES]) == 20
-    )
+    entries = {s: (d, v) for s, d, v in lossy.encode(lossy.SPARSE, delta, "F32", 0.1)}
+    mask, values = entries[lossy.MASK], entries[lossy.VALUES]
+    assert mask[0] == "U8" and mask[1].shape == (200 // 8,)
+    assert values[0] == "F32" and values[1].shape == (20,)
     got = lossy.decode(entries, delta.shape)
     kept = np.abs(delta).reshape(-1) >= np.sort(np.abs(delta).reshape(-1))[-20]
     np.testing.assert_array_equal(got.reshape(-1)[kept], delta.reshape(-1)[kept])
     assert np.count_nonzero(got) == 20
     with pytest.raises(ValueError, match="density"):
         lossy.encode(lossy.SPARSE, delta, density=0)
+    # A mask that keeps more entries than there are values is refused.
+    bad = dict(entries, **{lossy.MASK: ("U8", np.full_like(mask[1], 0xFF))})
+    with pytest.raises(ValueError, match="keeps 200 entries but holds 20"):
+        lossy.decode(bad, delta.shape)
+
+
+def test_sparse_values_take_the_tensors_dtype():
+    rng = np.random.default_rng(3)
+    delta = rng.standard_normal((8, 9)).astype(np.float32) * 1e-3
+    entries = {s: (d, v) for s, d, v in lossy.encode(lossy.SPARSE, delta, "BF16", 0.5)}
+    dtype, values = entries[lossy.VALUES]
+    assert dtype == "BF16" and values.dtype == np.uint16 and values.shape == (36,)
+    got = lossy.decode(entries, delta.shape).reshape(-1)
+    kept = got != 0
+    want = to_float32("BF16", from_float32("BF16", delta.reshape(-1)[kept]))
+    np.testing.assert_array_equal(got[kept], want)
 
 
 def test_vectors_are_kept_whole():
     delta = np.array([0.1, -0.2, 0.3], np.float32)
     for codec in (lossy.BIT1, lossy.SPARSE):
-        entries = {s: v for s, _, v in lossy.encode(codec, delta)}
+        entries = {s: (d, v) for s, d, v in lossy.encode(codec, delta)}
         assert list(entries) == [lossy.DELTA]
         np.testing.assert_array_equal(lossy.decode(entries, delta.shape), delta)
 
@@ -115,13 +131,16 @@ def test_encode_lossy(tmp_path, codec):
             np.testing.assert_array_equal(value, raw)
     assert (recon / "config.json").read_text() == '{"model_type": "llama"}'
     assert not (recon / "model.safetensors").exists()
-    # bit1 stores a byte per 8 weights; sparse a quarter of the entries.
+    # bit1 stores a byte per 8 weights; sparse that bitmap too, and a
+    # quarter of the entries in the tensor's dtype.
     q_file = dict(res.tensors)["m.q_proj.weight"]
     header = read_header(out / q_file)
     if codec == lossy.BIT1:
         assert header["m.q_proj.weight.signs"].shape == (16,)
     else:
-        assert header["m.q_proj.weight.values"].shape == (32,)
+        assert header["m.q_proj.weight.mask"].shape == (16,)
+        values = header["m.q_proj.weight.values"]
+        assert values.dtype == "BF16" and values.shape == (32,)
 
 
 def test_lossy_refuses_non_float_changes(tmp_path):
@@ -143,7 +162,8 @@ def test_lossy_refuses_non_float_changes(tmp_path):
         )
 
 
-def test_squash_gives_what_was_evaluated(tmp_path):
+@pytest.mark.parametrize("codec", [lossy.BIT1, lossy.SPARSE])
+def test_squash_gives_what_was_evaluated(tmp_path, codec):
     """Squashing a lossy layer gives exactly the model encode_lossy wrote
     for the eval, so the measured drop is the served model's."""
     from weightpack_worker.squash import squash
@@ -172,7 +192,7 @@ def test_squash_gives_what_was_evaluated(tmp_path):
     for d in (out, recon, merged):
         d.mkdir()
     res = lossy.encode_lossy(
-        lossy.BIT1, blobs, [], [str(src / "model.safetensors")], out, 0.1, recon
+        codec, blobs, [], [str(src / "model.safetensors")], out, 0.1, recon
     )
     files = [str(out / f) for _, f in res.tensors]
     pairs = squash(blobs, [], merged, [], [files])

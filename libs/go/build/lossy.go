@@ -16,6 +16,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
+	"github.com/rizkaitbrik/weightpack/libs/go/entropy"
 	"github.com/rizkaitbrik/weightpack/libs/go/safetensors"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/weightfile"
@@ -25,19 +26,23 @@ import (
 // Lossy delta entries, as weightpack_worker/lossy.py writes them: a
 // tensor's delta file holds these, named <tensor><suffix>.
 const (
-	lossySigns   = ".signs"   // bit1: U8, the sign bits packed eight to a byte
-	lossyScale   = ".scale"   // bit1: F32[1]
-	lossyIndices = ".indices" // sparse: U32 or I64, flat indices, ascending
-	lossyValues  = ".values"  // sparse: F32
-	lossyDelta   = ".delta"   // a tensor kept whole: F32, the tensor's shape
+	lossySigns  = ".signs"  // bit1: U8, the sign bits packed eight to a byte
+	lossyScale  = ".scale"  // bit1: F32[1]
+	lossyMask   = ".mask"   // sparse: U8, one bit per weight, 1 for a kept entry
+	lossyValues = ".values" // sparse: the kept entries, in the tensor's dtype
+	lossyDelta  = ".delta"  // a tensor kept whole: F32, the tensor's shape
 )
 
+// lossyCodecs maps a codec to the worker's and to the media type its blobs
+// are stored under. Sparse blobs are compressed: their mask has about half a
+// bit of entropy per weight at the default density, where it takes a whole
+// one plain. bit1's sign bits are close to random, so zstd would not pay.
 var lossyCodecs = map[string]struct {
 	codec     workerpb.Codec
 	mediaType string
 }{
 	weightfile.CodecBit1:   {workerpb.Codec_CODEC_BIT1, spec.MediaTypeDeltaBit1},
-	weightfile.CodecSparse: {workerpb.Codec_CODEC_SPARSE, spec.MediaTypeDeltaSparse},
+	weightfile.CodecSparse: {workerpb.Codec_CODEC_SPARSE, spec.MediaTypeDeltaSparse + "+" + entropy.Zstd},
 }
 
 // cachedLossy is what a lossy import of these files over this chain gave:
@@ -99,7 +104,7 @@ func (b *builder) ingestLossy(step string, src weightfile.Layer, layer, parent *
 
 	key := ""
 	if fk := b.cache.xorKey(parent.Chain, ft.files); fk != "" {
-		key = hashKey("lossy", src.Codec, strconv.FormatFloat(density, 'g', -1, 64), fk, suiteDigest, template.digest, info.Version)
+		key = hashKey("lossy", src.Codec, codec.mediaType, strconv.FormatFloat(density, 'g', -1, 64), fk, suiteDigest, template.digest, info.Version)
 	}
 	var entry cachedLossy
 	cached := b.cache.load(key, &entry) && entry.Tensors != nil && b.storeHas(entry.Tensors)
@@ -224,7 +229,8 @@ func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *
 }
 
 // putLossy checks a worker's delta file for one tensor against the codec's
-// layout and the base tensor, and stores it as a canonical blob.
+// layout and the base tensor, and stores it as a canonical blob, compressed
+// when the media type names an entropy coder.
 func (b *builder) putLossy(path, name string, want safetensors.Tensor, codec, mediaType, layerID string) (ocispec.Descriptor, error) {
 	f, err := safetensors.Open(path)
 	if err != nil {
@@ -256,9 +262,9 @@ func (b *builder) putLossy(path, name string, want safetensors.Tensor, codec, me
 				k = t.Shape[0]
 			}
 		}
-		count := func(s []int64) bool { return len(s) == 1 && s[0] == k && k >= 1 && k <= n }
-		expect[lossyIndices] = entry{[]string{"U32", "I64"}, count}
-		expect[lossyValues] = entry{[]string{"F32"}, count}
+		// The worker checks, as it decodes, that the mask keeps k entries.
+		expect[lossyMask] = entry{[]string{"U8"}, func(s []int64) bool { return equalShape(s, []int64{(n + 7) / 8}) }}
+		expect[lossyValues] = entry{[]string{want.DType}, func(s []int64) bool { return len(s) == 1 && s[0] == k && k >= 1 && k <= n }}
 	}
 	if len(f.Tensors) != len(expect) {
 		return ocispec.Descriptor{}, fmt.Errorf("%d tensors, want %d", len(f.Tensors), len(expect))

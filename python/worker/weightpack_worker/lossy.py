@@ -7,7 +7,10 @@ approximation of the float32 difference ``target - parent``:
   sign bit per weight and one scale, the mean absolute delta, which is the
   scale that minimises the squared error of ``scale * sign``.
 - ``sparse``: a matrix's delta keeps the ``density`` fraction of its entries
-  with the largest magnitudes, as flat indices and float32 values.
+  with the largest magnitudes: a bitmap of which entries it keeps, and their
+  values rounded to the tensor's own dtype. The daemon stores these blobs
+  zstd-compressed, which takes the bitmap to about half a bit per weight at
+  the default density.
 
 A tensor that is not a matrix (a norm's weight, a bias) is small, so its
 delta is kept whole, in float32. Decoding adds a delta to the parent in
@@ -18,8 +21,9 @@ Each tensor's delta is a safetensors file of its own:
 - bit1: ``<name>.signs`` (U8, the sign bits packed eight to a byte, most
   significant first, in row-major order, 1 for a delta >= 0) and
   ``<name>.scale`` (F32, one value);
-- sparse: ``<name>.indices`` (U32, or I64 past 2^32 entries; flat row-major
-  indices, ascending) and ``<name>.values`` (F32);
+- sparse: ``<name>.mask`` (U8, one bit per weight packed as the signs are,
+  1 for a kept entry) and ``<name>.values`` (the tensor's dtype, the kept
+  entries in row-major order);
 - a tensor kept whole: ``<name>.delta`` (F32, the tensor's shape).
 
 Lossy layers sit on the base or on XOR layers, as XOR layers do: the
@@ -50,13 +54,14 @@ from weightpack_worker.safetensors_io import (
 
 BIT1, SPARSE = "bit1", "sparse"
 SIGNS, SCALE = ".signs", ".scale"
-INDICES, VALUES = ".indices", ".values"
+MASK, VALUES = ".mask", ".values"
 DELTA = ".delta"
-SUFFIXES = (SIGNS, SCALE, INDICES, VALUES, DELTA)
+SUFFIXES = (SIGNS, SCALE, MASK, VALUES, DELTA)
 
 
-def encode(codec: str, delta: np.ndarray, density: float = 0.1) -> list:
-    """A tensor's delta as (suffix, dtype, values) entries."""
+def encode(codec: str, delta: np.ndarray, dtype: str = "F32", density: float = 0.1):
+    """A tensor's delta as (suffix, dtype, raw values) entries; dtype is the
+    tensor's own, which sparse values are rounded to."""
     if delta.ndim < 2:
         return [(DELTA, "F32", delta.astype(np.float32))]
     flat = delta.reshape(-1)
@@ -68,33 +73,41 @@ def encode(codec: str, delta: np.ndarray, density: float = 0.1) -> list:
         if not 0 < density <= 1:
             raise ValueError(f"density {density} is not in (0, 1]")
         k = max(1, int(np.ceil(density * flat.size)))
-        keep = np.argpartition(np.abs(flat), flat.size - k)[flat.size - k :]
-        keep.sort()
-        idx_dtype = "U32" if flat.size <= np.iinfo(np.uint32).max else "I64"
-        indices = keep.astype(storage_dtype(idx_dtype))
-        return [(INDICES, idx_dtype, indices), (VALUES, "F32", flat[keep])]
+        mask = np.zeros(flat.size, bool)
+        mask[np.argpartition(np.abs(flat), flat.size - k)[flat.size - k :]] = True
+        values = from_float32(dtype, flat[mask])
+        return [(MASK, "U8", np.packbits(mask)), (VALUES, dtype, values)]
     raise ValueError(f"unknown lossy codec {codec!r}")
 
 
-def decode(tensors: dict[str, np.ndarray], shape: tuple[int, ...]) -> np.ndarray:
-    """The float32 delta of shape that encode's entries (by suffix) give."""
+def decode(entries: dict[str, tuple[str, np.ndarray]], shape) -> np.ndarray:
+    """The float32 delta of shape that encode's entries give, by suffix, each
+    as (dtype, raw values)."""
     n = int(np.prod(shape, dtype=np.int64))
-    if DELTA in tensors:
-        return np.asarray(tensors[DELTA], np.float32).reshape(shape)
-    if SIGNS in tensors:
-        signs = np.unpackbits(np.asarray(tensors[SIGNS]), count=n)
-        scale = np.float32(np.asarray(tensors[SCALE]).reshape(-1)[0])
+    if DELTA in entries:
+        return to_float32(*entries[DELTA]).reshape(shape)
+    if SIGNS in entries:
+        signs = np.unpackbits(np.asarray(entries[SIGNS][1]), count=n)
+        scale = np.float32(to_float32(*entries[SCALE]).reshape(-1)[0])
         out = signs.astype(np.float32) * (2 * scale) - scale
         return out.reshape(shape)
-    if INDICES in tensors:
+    if MASK in entries:
+        mask = np.unpackbits(np.asarray(entries[MASK][1]), count=n).astype(bool)
+        values = to_float32(*entries[VALUES]).reshape(-1)
+        if int(mask.sum()) != values.size:
+            raise ValueError(
+                f"sparse delta keeps {int(mask.sum())} entries but holds "
+                f"{values.size} values"
+            )
         out = np.zeros(n, np.float32)
-        out[np.asarray(tensors[INDICES], np.int64)] = tensors[VALUES]
+        out[mask] = values
         return out.reshape(shape)
-    raise ValueError(f"no delta among {sorted(tensors)}")
+    raise ValueError(f"no delta among {sorted(entries)}")
 
 
-def read_delta(path: str) -> tuple[str, dict[str, np.ndarray]]:
-    """A delta file's tensor name and its entries by suffix."""
+def read_delta(path: str) -> tuple[str, dict[str, tuple[str, np.ndarray]]]:
+    """A delta file's tensor name and its entries by suffix, each as (dtype,
+    raw values)."""
     header = read_header(path)
     names = set()
     entries = {}
@@ -103,7 +116,7 @@ def read_delta(path: str) -> tuple[str, dict[str, np.ndarray]]:
         if suffix is None:
             raise ValueError(f"{path}: {key} is no lossy delta entry")
         names.add(key[: -len(suffix)])
-        entries[suffix] = load_raw(path, info)
+        entries[suffix] = (info.dtype, load_raw(path, info))
     if len(names) != 1:
         raise ValueError(f"{path} must hold one tensor's delta, found {sorted(names)}")
     return names.pop(), entries
@@ -154,8 +167,8 @@ def encode_lossy(
                 )
             w = to_float32(info.dtype, raw)
             delta = to_float32(info.dtype, new.view(storage_dtype(info.dtype))) - w
-            entries = encode(codec, delta, density)
-            approx = decode({s: v for s, _, v in entries}, info.shape)
+            entries = encode(codec, delta, info.dtype, density)
+            approx = decode({s: (d, v) for s, d, v in entries}, info.shape)
             err2 += float(np.sum((delta - approx) ** 2, dtype=np.float64))
             norm2 += float(np.sum(delta**2, dtype=np.float64))
             file = f"{i:06d}.safetensors"

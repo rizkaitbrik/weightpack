@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
+	"github.com/rizkaitbrik/weightpack/libs/go/entropy"
 	"github.com/rizkaitbrik/weightpack/libs/go/safetensors"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/weightfile"
@@ -205,7 +207,8 @@ type tensorRef struct {
 	name string
 }
 
-// putTensors stores tensors as one canonical safetensors blob. The build
+// putTensors stores tensors as one canonical safetensors blob, compressed
+// with the entropy coder the media type names, if any. The build
 // cache remembers which blob these exact source bytes became, so a rebuild
 // of unchanged files does not read them again.
 func (b *builder) putTensors(refs []tensorRef, mediaType string, annotations map[string]string) (ocispec.Descriptor, error) {
@@ -222,7 +225,16 @@ func (b *builder) putTensors(refs []tensorRef, mediaType string, annotations map
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	d, err := b.put(rd, mediaType, annotations)
+	var r io.Reader = rd
+	if coder := entropy.Suffix(mediaType); coder != "" {
+		zr, err := entropy.Encode(coder, rd)
+		if err != nil {
+			return ocispec.Descriptor{}, err
+		}
+		defer zr.Close() // stops the encoder if put gave up before reading it all
+		r = zr
+	}
+	d, err := b.put(r, mediaType, annotations)
 	if err == nil {
 		b.cache.set(key, d)
 	}

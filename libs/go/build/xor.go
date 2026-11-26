@@ -374,13 +374,35 @@ func tokenizerSemantics(raw []byte) (map[string]any, error) {
 }
 
 // DecodeXORLayer writes a stored XOR layer's blobs into dir as plain
-// safetensors, for a worker to read, and describes them. The files get
-// random names made inside dir: the layer id comes from an image's config,
-// which a pulled image controls, so it never takes part in a path.
+// safetensors, for a worker to read, and describes them.
 func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir string) (*workerpb.XORLayer, error) {
-	out := &workerpb.XORLayer{Id: id}
+	var xor []ocispec.Descriptor
 	for _, d := range blobs {
-		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeDeltaXOR {
+		if spec.BaseMediaType(d.MediaType) == spec.MediaTypeDeltaXOR {
+			xor = append(xor, d)
+		}
+	}
+	out, err := DecodeBlobs(s, xor, dir)
+	if err != nil {
+		return nil, err
+	}
+	return &workerpb.XORLayer{Id: id, Blobs: out}, nil
+}
+
+// DecodeBlobs gives a worker stored blobs as plain safetensors: a blob
+// stored plain as its own path in the store, and a compressed one as a file
+// decoded into dir. The files get random names made inside dir: a layer id
+// comes from an image's config, which a pulled image controls, so it never
+// takes part in a path.
+func DecodeBlobs(s *store.Store, blobs []ocispec.Descriptor, dir string) ([]*workerpb.Blob, error) {
+	var out []*workerpb.Blob
+	for _, d := range blobs {
+		if entropy.Suffix(d.MediaType) == "" {
+			p, err := s.Path(d.Digest.String())
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
 			continue
 		}
 		rc, err := s.Open(d.Digest.String())
@@ -391,7 +413,7 @@ func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir s
 		if err != nil {
 			return nil, err
 		}
-		f, err := os.CreateTemp(dir, "xor-*.safetensors")
+		f, err := os.CreateTemp(dir, "blob-*.safetensors")
 		if err != nil {
 			_ = plain.Close()
 			return nil, err
@@ -403,9 +425,9 @@ func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir s
 			err = cerr
 		}
 		if err != nil {
-			return nil, fmt.Errorf("decode XOR blob %s: %w", d.Digest, err)
+			return nil, fmt.Errorf("decode blob %s: %w", d.Digest, err)
 		}
-		out.Blobs = append(out.Blobs, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
+		out = append(out, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
 	}
 	return out, nil
 }

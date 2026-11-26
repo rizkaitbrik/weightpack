@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"google.golang.org/grpc"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
@@ -84,7 +85,7 @@ func (w *lossyWorker) EncodeLayer(_ context.Context, req *workerpb.EncodeLayerRe
 			es = []e{{lossySigns, "U8", []int64{signs}}, {lossyScale, "F32", []int64{1}}}
 		default:
 			k := int64(math.Ceil(req.Density * float64(count)))
-			es = []e{{lossyIndices, "U32", []int64{k}}, {lossyValues, "F32", []int64{k}}}
+			es = []e{{lossyMask, "U8", []int64{(count + 7) / 8}}, {lossyValues, info[n].DType, []int64{k}}}
 		}
 		var entries []safetensors.Entry
 		for _, x := range es {
@@ -196,6 +197,33 @@ func TestSparseLayerOnASuite(t *testing.T) {
 	}
 	if w.req.Density != 0.25 || w.evalReq.Suite != filepath.Join(f.dir, "finance.jsonl") {
 		t.Errorf("encode %+v, eval %+v", w.req, w.evalReq)
+	}
+	// Sparse blobs are stored zstd-compressed, and decode to the worker's
+	// file: the mask, and the values in the tensor's own dtype.
+	m, _ := f.load(t, res.Manifest.Digest.String())
+	var blobs []ocispec.Descriptor
+	for _, d := range m.Layers {
+		if d.Annotations[spec.AnnotationLayer] == "finance" {
+			blobs = append(blobs, d)
+			if d.MediaType != spec.MediaTypeDeltaSparse+"+zstd" {
+				t.Errorf("blob %+v", d)
+			}
+		}
+	}
+	plain, err := DecodeBlobs(f.store, blobs, t.TempDir())
+	if err != nil || len(plain) != 4 {
+		t.Fatalf("decode: %v, %d blobs", err, len(plain))
+	}
+	sf, err := safetensors.Open(plain[0].Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sf.Close()
+	name := blobs[0].Annotations[spec.AnnotationTensor]
+	mask, ok1 := sf.Lookup(name + lossyMask)
+	values, ok2 := sf.Lookup(name + lossyValues)
+	if !ok1 || !ok2 || len(sf.Tensors) != 2 || mask.DType != "U8" || values.DType != "F32" {
+		t.Errorf("decoded blob holds %+v", sf.Tensors)
 	}
 }
 

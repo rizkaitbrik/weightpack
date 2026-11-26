@@ -138,15 +138,11 @@ func Squash(ctx context.Context, s *store.Store, w workerpb.WorkerClient, ref st
 				return nil, fmt.Errorf("squash %s: lossy layer %q sits above a LoRA layer", ref, l.ID)
 			}
 			sawLossy = true
-			dl := &workerpb.DeltaLayer{Id: l.ID}
-			for _, d := range byLayer[l.ID] {
-				p, err := s.Path(d.Digest.String())
-				if err != nil {
-					return nil, err
-				}
-				dl.Blobs = append(dl.Blobs, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
+			blobs, err := build.DecodeBlobs(s, byLayer[l.ID], inDir)
+			if err != nil {
+				return nil, err
 			}
-			req.LossyLayers = append(req.LossyLayers, dl)
+			req.LossyLayers = append(req.LossyLayers, &workerpb.DeltaLayer{Id: l.ID, Blobs: blobs})
 			ids = append(ids, l.ID)
 			continue
 		case spec.KindLoRA:
