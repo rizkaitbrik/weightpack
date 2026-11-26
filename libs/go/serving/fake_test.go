@@ -149,7 +149,7 @@ func fakeEngine(args []string) int {
 				Files   []string `json:"files"`
 			}
 			_ = json.Unmarshal(raw, &meta)
-			if meta.Version != 1 || meta.Codec != "bit1" || len(meta.Files) == 0 {
+			if meta.Version != 1 || meta.Codec != "bit1" || meta.Files == nil {
 				fail400(w, 400, "bad delta at "+b.LoraPath)
 				return
 			}

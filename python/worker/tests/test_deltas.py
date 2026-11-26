@@ -257,3 +257,19 @@ def _info(file, key):
     from weightpack_worker.safetensors_io import read_header
 
     return read_header(file)[key]
+
+
+def test_a_fine_tune_that_changed_nothing(tmp_path):
+    """A bit1 layer with no deltas, as an import of an unchanged checkpoint
+    gives: the engine serves it as the base."""
+    base, _, _, _ = finetune(tmp_path)
+    path = tmp_path / "same"
+    path.mkdir()
+    meta = {"version": 1, "codec": "bit1", "layer": "same", "files": []}
+    (path / deltas.DELTA_FILE).write_text(json.dumps(meta))
+    engine = Engine(str(base), device="cpu")
+    engine.load_adapter("same", str(path))
+    ids = engine.encode_chat(PROMPT)
+    params = {"max_tokens": 8, "temperature": 0}
+    assert engine.generate("same", ids, params) == engine.generate("base", ids, params)
+    assert_weights(engine, weights(base, engine.model.dtype))

@@ -771,9 +771,11 @@ func TestBit1LayersShareTheBase(t *testing.T) {
 	f := newFixture(t)
 	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
 	writeFinetune(t, filepath.Join(f.dir, "legal-ft"), 9)
+	writeFinetune(t, filepath.Join(f.dir, "same"), 0) // changes nothing
 	f.build(t, "plain", "FROM ./base\n")
 	f.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
 	f.build(t, "legal", "FROM ./base\nLAYER legal ./legal-ft codec=bit1 calibrate=0 max_drop=1\n")
+	f.build(t, "same", "FROM ./base\nLAYER same ./same codec=bit1 calibrate=0 max_drop=1\n")
 
 	plain := f.run(t, api.RunRequest{Ref: "plain"})
 	var events []string
@@ -784,6 +786,17 @@ func TestBit1LayersShareTheBase(t *testing.T) {
 	legal := f.run(t, api.RunRequest{Ref: "legal"})
 	if finance.EngineID != plain.EngineID || legal.EngineID != plain.EngineID || finance.Base != plain.Base || legal.Base != plain.Base {
 		t.Errorf("engines %s %s %s, bases %s %s %s: want one", plain.EngineID, finance.EngineID, legal.EngineID, plain.Base, finance.Base, legal.Base)
+	}
+	// A fine-tune that changed nothing is a bit1 layer with no deltas: it
+	// runs as the base does.
+	same := f.run(t, api.RunRequest{Ref: "same"})
+	_, sameCfg, _, _ := f.rt.read("same")
+	raw, err := os.ReadFile(filepath.Join(f.store.Root(), "run", "deltas", hexOf(sameCfg.Layers[1].Chain)+"-same", "deltas", "same", "weightpack_delta.json"))
+	if err != nil || same.EngineID != plain.EngineID || !strings.Contains(string(raw), `"files": []`) {
+		t.Errorf("unchanged fine-tune: engine %s (base %s), %s, %v", same.EngineID, plain.EngineID, raw, err)
+	}
+	if _, err := f.rt.Stop([]string{"same"}); err != nil {
+		t.Fatal(err)
 	}
 	if n := f.engineStarts(t); n != 1 {
 		t.Errorf("%d engine starts, want 1", n)
@@ -802,7 +815,7 @@ func TestBit1LayersShareTheBase(t *testing.T) {
 	_, cfg, _, _ := f.rt.read("finance")
 	layer := cfg.Layers[1]
 	dir := filepath.Join(f.store.Root(), "run", "deltas", hexOf(layer.Chain)+"-finance", "deltas", "finance")
-	raw, err := os.ReadFile(filepath.Join(dir, "weightpack_delta.json"))
+	raw, err = os.ReadFile(filepath.Join(dir, "weightpack_delta.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
