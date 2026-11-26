@@ -90,20 +90,20 @@ class Worker(worker_pb2_grpc.WorkerServicer):
         )
 
     def Evaluate(self, request, context):  # noqa: N802
-        try:
-            from weightpack_worker import evaluate
-        except ImportError as exc:  # pragma: no cover - needs a bare install
-            context.abort(
-                grpc.StatusCode.FAILED_PRECONDITION,
-                f"evals need torch and transformers "
-                f"(pip install 'weightpack-worker[serve]'): {exc}",
-            )
+        from weightpack_worker import evaluate
+
         try:
             res = evaluate.evaluate(
                 list(request.models),
                 request.suite,
                 request.device or "auto",
                 request.chat_template or None,
+            )
+        except ImportError as exc:  # torch and transformers load on first use
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"evals need torch and transformers "
+                f"(pip install 'weightpack-worker[serve]'): {exc}",
             )
         except (ValueError, OSError, KeyError) as exc:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"{exc}")

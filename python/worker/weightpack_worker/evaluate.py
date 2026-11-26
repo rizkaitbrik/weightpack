@@ -204,14 +204,14 @@ def evaluate(
 ) -> Result:
     """Scores each model directory on a suite; without one, on the first
     model's SELF suite."""
+    if not models:
+        raise ValueError("no model to evaluate")
     import gc
 
     import torch
 
     from .engine import pick_device
 
-    if not models:
-        raise ValueError("no model to evaluate")
     device = pick_device(device)
     the_suite = load_suite(suite) if suite else None
     result = None
