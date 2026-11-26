@@ -7,6 +7,9 @@ through the same endpoints vLLM exposes with runtime LoRA updating
 and vLLM alike. The base and every adapter are separate model names; a
 request picks one with its ``model`` field. Requests run one at a time.
 
+Beyond vLLM's API, ``/v1/load_mix`` and ``/v1/unload_mix`` name a MIX of
+loaded adapters that routes each token to its own experts (see mixing.py).
+
 It is the engine for machines without vLLM (Macs, CPU servers), and the
 reference vLLM is checked against.
 
@@ -132,6 +135,7 @@ class Engine:
         self.served_name = served_name
         self.peft = None  # a PeftModel once the first adapter is loaded
         self.adapters: dict[str, str] = {}
+        self.mixes: dict = {}  # name -> mixing.Mix
         self.lock = threading.Lock()
 
     # Adapters -----------------------------------------------------------
@@ -140,8 +144,7 @@ class Engine:
         import peft
 
         with self.lock:
-            if name == self.served_name or name in self.adapters:
-                raise ValueError(f"model name {name!r} is already in use")
+            self._check_free(name)
             if self.peft is None:
                 self.peft = peft.PeftModel.from_pretrained(
                     self.model, path, adapter_name=name
@@ -156,11 +159,43 @@ class Engine:
         with self.lock:
             if name not in self.adapters:
                 raise KeyError(name)
+            users = [m for m, mix in self.mixes.items() if name in mix.experts]
+            if users:
+                raise ValueError(f"adapter {name!r} is an expert of mix {users[0]!r}")
             self.peft.delete_adapter(name)
             del self.adapters[name]
 
+    def load_mix(
+        self,
+        name: str,
+        experts: list[str],
+        top_k: int,
+        targets: list[str],
+        blocks: str = "",
+        router: str = "arrow",
+    ) -> None:
+        """Name a mix of loaded adapters, routed per token."""
+        from .mixing import Mix
+
+        with self.lock:
+            self._check_free(name)
+            for e in experts:
+                if e not in self.adapters:
+                    raise KeyError(e)
+            self.mixes[name] = Mix(self.peft, experts, top_k, targets, blocks, router)
+
+    def unload_mix(self, name: str) -> None:
+        with self.lock:
+            if name not in self.mixes:
+                raise KeyError(name)
+            del self.mixes[name]
+
+    def _check_free(self, name: str) -> None:
+        if name == self.served_name or name in self.adapters or name in self.mixes:
+            raise ValueError(f"model name {name!r} is already in use")
+
     def models(self) -> list[str]:
-        return [self.served_name, *self.adapters]
+        return [self.served_name, *self.adapters, *self.mixes]
 
     # Generation ---------------------------------------------------------
 
@@ -173,10 +208,26 @@ class Engine:
             if self.peft is None:
                 return self.model, contextlib.nullcontext()
             return self.peft, self.peft.disable_adapter()
+        if name in self.mixes:
+            return self.peft, self._routing(self.mixes[name])
         if name not in self.adapters:
             raise KeyError(name)
         self.peft.set_adapter(name)
         return self.peft, contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def _routing(self, mix):
+        """Runs the model with its adapters off and the mix's routed
+        updates added in the modules it covers."""
+        handles = []
+        try:
+            with self.peft.disable_adapter():
+                for module, hook in mix.hooks():
+                    handles.append(module.register_forward_hook(hook))
+                yield
+        finally:
+            for h in handles:
+                h.remove()
 
     def encode_chat(
         self, messages: list[dict], chat_template: str | None = None
@@ -385,6 +436,21 @@ def make_handler(engine: Engine):
                     return self._text(
                         200,
                         f"Success: LoRA adapter '{body['lora_name']}' removed.",
+                    )
+                if self.path == "/v1/load_mix":
+                    engine.load_mix(
+                        body["mix_name"],
+                        list(body["experts"]),
+                        int(body["top_k"]),
+                        list(body["targets"]),
+                        body.get("blocks") or "",
+                        body.get("router") or "arrow",
+                    )
+                    return self._text(200, f"Success: mix '{body['mix_name']}' added.")
+                if self.path == "/v1/unload_mix":
+                    engine.unload_mix(body["mix_name"])
+                    return self._text(
+                        200, f"Success: mix '{body['mix_name']}' removed."
                     )
                 if self.path == "/v1/chat/completions":
                     return self._complete(body, chat=True)

@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 )
 
 // Engine kinds.
@@ -63,6 +65,7 @@ type engine struct {
 
 	amu      sync.Mutex
 	adapters map[string]int // adapter name -> containers using it
+	mixes    map[string]int // mix name -> containers using it
 }
 
 func (e *engine) hasExited() bool {
@@ -226,6 +229,41 @@ func (e *engine) loadAdapter(ctx context.Context, name, dir string) error {
 	}
 	e.adapters[name] = 1
 	return nil
+}
+
+// loadMix names, in the reference engine, a MIX of loaded adapters that
+// routes each token to its own experts, or counts one more user of it.
+func (e *engine) loadMix(ctx context.Context, name string, experts []string, mix spec.Layer) error {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	if e.mixes[name] > 0 {
+		e.mixes[name]++
+		return nil
+	}
+	body := map[string]any{
+		"mix_name": name, "experts": experts, "top_k": mix.TopK,
+		"targets": mix.Targets, "blocks": mix.Blocks, "router": mix.Router,
+	}
+	if err := e.post(ctx, "/v1/load_mix", body); err != nil {
+		return fmt.Errorf("set up per-token routing in the %s engine: %w", e.kind, err)
+	}
+	e.mixes[name] = 1
+	return nil
+}
+
+// unloadMix drops one user of a mix and unloads it after the last.
+func (e *engine) unloadMix(name string) {
+	e.amu.Lock()
+	defer e.amu.Unlock()
+	if e.mixes[name]--; e.mixes[name] > 0 {
+		return
+	}
+	delete(e.mixes, name)
+	if !e.hasExited() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = e.post(ctx, "/v1/unload_mix", map[string]string{"mix_name": name})
+	}
 }
 
 // unloadAdapter drops one user of an adapter and unloads it after the last.

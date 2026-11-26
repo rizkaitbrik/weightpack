@@ -145,7 +145,10 @@ func TestImagesOnOneBaseShareAnEngine(t *testing.T) {
 	}
 	french := f.run(t, api.RunRequest{Ref: "french", Name: "fr"})
 	domains := f.run(t, api.RunRequest{Ref: "domains"})
-	if !slices.Equal(domains.Models, []string{"domains/legal", "domains/medical"}) || !slices.Equal(french.Models, []string{"fr"}) {
+	// The MIX answers to its own name, routing each token, and to each
+	// expert's.
+	if !slices.Equal(domains.Models, []string{"domains", "domains/legal", "domains/medical"}) || domains.Router != "arrow" ||
+		!slices.Equal(french.Models, []string{"fr"}) || french.Router != "" {
 		t.Errorf("models: %v, %v", french.Models, domains.Models)
 	}
 	if french.EngineID != plain.EngineID || domains.EngineID != plain.EngineID || french.Base != plain.Base {
@@ -155,7 +158,7 @@ func TestImagesOnOneBaseShareAnEngine(t *testing.T) {
 		t.Errorf("%d engine starts, want 1", n)
 	}
 	e := f.rt.containers["plain"].engine
-	if got := f.loaded(t, e); len(got) != 4 { // the base and three adapters
+	if got := f.loaded(t, e); len(got) != 5 { // the base, three adapters and the mix
 		t.Errorf("engine models %v", got)
 	}
 
@@ -180,6 +183,11 @@ func TestImagesOnOneBaseShareAnEngine(t *testing.T) {
 	_, body = f.chat(t, map[string]any{"model": "domains/medical", "messages": []any{}})
 	if got := strings.Split(content(t, body), "|")[1]; got != "medical" || body["model"] != "domains/medical" {
 		t.Errorf("domains/medical reached %q (%v)", got, body["model"])
+	}
+	// The engine got the MIX's experts, top_k and targets.
+	_, body = f.chat(t, map[string]any{"model": "domains", "messages": []any{}})
+	if got := strings.Split(content(t, body), "|")[1]; !strings.HasPrefix(got, "top1 of lora-") || !strings.HasSuffix(got, "-medical on gate,up,down") || body["model"] != "domains" {
+		t.Errorf("domains reached %q (%v)", got, body["model"])
 	}
 
 	// Streams are relayed event by event, renamed.
@@ -230,7 +238,7 @@ func TestImagesOnOneBaseShareAnEngine(t *testing.T) {
 	for _, m := range models.Data {
 		ids = append(ids, m.ID)
 	}
-	if !slices.Equal(ids, []string{"domains/legal", "domains/medical", "fr", "plain"}) {
+	if !slices.Equal(ids, []string{"domains", "domains/legal", "domains/medical", "fr", "plain"}) {
 		t.Errorf("models %v", ids)
 	}
 
@@ -257,7 +265,7 @@ func TestImagesOnOneBaseShareAnEngine(t *testing.T) {
 	if e.hasExited() {
 		t.Fatal("stopping one container twice stopped the shared engine")
 	}
-	if got := f.loaded(t, e); len(got) != 3 || slices.ContainsFunc(got, func(n string) bool { return strings.HasSuffix(n, "-french") }) {
+	if got := f.loaded(t, e); len(got) != 4 || slices.ContainsFunc(got, func(n string) bool { return strings.HasSuffix(n, "-french") }) {
 		t.Errorf("after stopping fr the engine has %v", got)
 	}
 	if status, _ := f.chat(t, map[string]any{"model": "fr", "messages": []any{}}); status != 404 {
@@ -288,7 +296,7 @@ func TestServingBaseBakesLowerLayers(t *testing.T) {
 	f := newFixture(t)
 	f.build(t, "assistant", buildtest.Assistant)
 	c := f.run(t, api.RunRequest{Ref: "assistant"})
-	if !slices.Equal(c.Models, []string{"assistant/legal", "assistant/medical"}) || !slices.Equal(c.Adapters, []string{"legal", "medical"}) {
+	if !slices.Equal(c.Models, []string{"assistant", "assistant/legal", "assistant/medical"}) || !slices.Equal(c.Adapters, []string{"legal", "medical"}) {
 		t.Errorf("container = %+v", c)
 	}
 	if f.worker.count() != 1 {
@@ -523,4 +531,30 @@ func TestMaxEngines(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.run(t, api.RunRequest{Ref: "assistant"})
+}
+
+func TestMixWithoutTokenRouting(t *testing.T) {
+	f := newFixture(t, "--reject-mixes")
+	f.build(t, "domains", "FROM ./base\nMIX domain targets=mlp top_k=1\n  EXPERT legal ./adapters/legal\n  EXPERT medical ./adapters/medical\n")
+	var warnings []string
+	c, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "domains"}, func(e api.Event) {
+		if e.Warning {
+			warnings = append(warnings, e.Message)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(c.Models, []string{"domains/legal", "domains/medical"}) || c.Router != "" {
+		t.Errorf("container = %+v", c)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "replaces whole modules") {
+		t.Errorf("warnings = %q", warnings)
+	}
+	if status, _ := f.chat(t, map[string]any{"model": "domains/legal", "messages": []any{}}); status != 200 {
+		t.Errorf("an expert answered %d", status)
+	}
+	if _, err := f.rt.Stop([]string{"domains"}); err != nil {
+		t.Fatal(err)
+	}
 }
