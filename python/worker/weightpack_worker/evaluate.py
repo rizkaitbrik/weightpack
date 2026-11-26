@@ -118,23 +118,32 @@ def _load(model_dir: str, device: str, chat_template: str | None):
     return model, tok
 
 
+def greedy(model, ids: list[int], max_new_tokens: int, eos: set[int]) -> list[int]:
+    """The model's first choice at each step, until an end token. Written
+    out rather than through generate(), which merges in a checkpoint's own
+    generation settings (Qwen's add a repetition penalty), so its replies
+    would not be the model's first choices."""
+    import torch
+
+    out = model(input_ids=torch.tensor([ids], device=model.device), use_cache=True)
+    past, nxt, tokens = out.past_key_values, out.logits[0, -1].argmax(), []
+    for _ in range(max_new_tokens):
+        t = int(nxt)
+        if t in eos:
+            break
+        tokens.append(t)
+        out = model(input_ids=nxt.view(1, 1), past_key_values=past, use_cache=True)
+        past, nxt = out.past_key_values, out.logits[0, -1].argmax()
+    return tokens
+
+
 def self_suite(model, tok, max_new_tokens: int = 128) -> Suite:
     """The source's own greedy replies to SELF_PROMPTS."""
     import torch
-    import transformers
 
     chat = bool(getattr(tok, "chat_template", None))
-    # Plain greedy decoding: a checkpoint's own generation config may add a
-    # repetition penalty, and the replies would then not be the model's
-    # first choices.
-    greedy = transformers.GenerationConfig(
-        do_sample=False,
-        max_new_tokens=max_new_tokens,
-        eos_token_id=model.generation_config.eos_token_id,
-        pad_token_id=tok.pad_token_id
-        if tok.pad_token_id is not None
-        else tok.eos_token_id,
-    )
+    eos = model.generation_config.eos_token_id
+    eos = set(eos if isinstance(eos, list) else [eos]) | {tok.eos_token_id}
     examples = []
     for prompt in SELF_PROMPTS:
         if chat:
@@ -144,14 +153,8 @@ def self_suite(model, tok, max_new_tokens: int = 128) -> Suite:
             )["input_ids"]
         else:
             ids = tok(prompt)["input_ids"]
-        x = torch.tensor([ids], device=model.device)
         with torch.no_grad():
-            out = model.generate(
-                x,
-                attention_mask=torch.ones_like(x),
-                generation_config=greedy,
-            )
-        reply = tok.decode(out[0, x.shape[1] :], skip_special_tokens=True)
+            reply = tok.decode(greedy(model, ids, max_new_tokens, eos))
         if chat:
             examples.append(
                 {"messages": [*msgs, {"role": "assistant", "content": reply}]}
