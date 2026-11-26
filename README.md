@@ -60,10 +60,22 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `python/vllm-plugin` | `vllm-plugin` | Python | vLLM plugin: composition loading, expert pool, routers |
 | `proto/` | `proto` | Protobuf | gRPC contract between `wpkd` and the workers (`npx nx run proto:generate`) |
 | `docs/` | | | Quickstart, design doc, Weightfile reference |
+| `scripts/` | `scripts` | Shell | `install.sh`, tested against a fake release server |
+| `docker/` | | Docker | CPU and CUDA images of wpkd with its worker and engines |
+| `.goreleaser.yaml` | | | Release archives for macOS (Apple Silicon) and Linux, with checksums |
 
 ## Getting started
 
-To use Weightpack, follow the [quickstart](docs/quickstart.md): install, check the machine with `wpk doctor`, build a mix of fine-tunes from the Hugging Face Hub and serve it behind one OpenAI endpoint. To work on it:
+To use Weightpack, follow the [quickstart](docs/quickstart.md): install, check the machine with `wpk doctor`, build a mix of fine-tunes from the Hugging Face Hub and serve it behind one OpenAI endpoint. In short:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rizkaitbrik/weightpack/main/scripts/install.sh | sh
+wpk service install && wpk doctor
+```
+
+Container images (`ghcr.io/rizkaitbrik/weightpack:cpu` and `:cuda`, from `docker/Dockerfile`) bundle the daemon, the worker and an engine.
+
+To work on it:
 
 Requirements: Node.js 22+, Go 1.24+, Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 

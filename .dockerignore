@@ -1,0 +1,11 @@
+# Only go.mod, go.sum, apps/, libs/ and python/worker/ go into the images.
+*
+!go.mod
+!go.sum
+!apps/
+!libs/
+!python/worker/
+python/worker/.venv/
+python/worker/dist/
+**/__pycache__/
+**/*_test.go
