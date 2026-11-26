@@ -171,6 +171,27 @@ func (c *Client) Pull(ctx context.Context, req PullRequest, onEvent func(Event))
 	return c.transfer(ctx, "/v1/pull", req, onEvent)
 }
 
+// Rm untags images.
+func (c *Client) Rm(ctx context.Context, req RmRequest) (*RmResponse, error) {
+	var out RmResponse
+	return &out, c.postJSON(ctx, "/v1/rm", req, &out)
+}
+
+// Prune deletes blobs no tagged image reaches.
+func (c *Client) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, error) {
+	var out PruneResponse
+	return &out, c.postJSON(ctx, "/v1/prune", req, &out)
+}
+
+func (c *Client) postJSON(ctx context.Context, path string, req, out any) error {
+	resp, err := c.do(ctx, http.MethodPost, path, req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 // Tag points req.Target at the image req.Source names.
 func (c *Client) Tag(ctx context.Context, req TagRequest) (*TagResponse, error) {
 	resp, err := c.do(ctx, http.MethodPost, "/v1/tag", req)

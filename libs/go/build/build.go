@@ -50,6 +50,9 @@ type Options struct {
 	Worker workerpb.WorkerClient
 	// HF fetches hf:// sources. Nil means such sources cannot be built.
 	HF *hf.Client
+	// NoCache reads and hashes every source again instead of reusing what
+	// the build cache remembers.
+	NoCache bool
 }
 
 // PullFunc fetches ref into the store, reporting progress.
@@ -70,6 +73,7 @@ type builder struct {
 	pull     PullFunc
 	worker   workerpb.WorkerClient
 	hf       *hf.Client
+	cache    *buildCache
 
 	// inherited is what a FROM image passes on, nil for a local FROM.
 	inherited *inherited
@@ -109,9 +113,13 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	}
 
 	b := &builder{
-		ctx: ctx, store: s, progress: progress, pull: opts.Pull, worker: opts.Worker, hf: opts.HF,
+		ctx: ctx, store: s, progress: progress, pull: opts.Pull, worker: opts.Worker, hf: opts.HF, cache: newBuildCache(CacheDir(s.Root())),
 		dir: filepath.Dir(opts.Weightfile), file: opts.Weightfile,
 		blobs: map[string][]ocispec.Descriptor{},
+	}
+
+	if opts.NoCache {
+		b.cache.dir = ""
 	}
 
 	var base *baseModel
@@ -165,6 +173,9 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	annotations, err := b.imageMeta(wf)
 	if err != nil {
 		return nil, err
+	}
+	if b.cache.hits > 0 {
+		b.progress(api.Event{Step: "cache", Message: fmt.Sprintf("reused %d blobs without reading their sources", b.cache.hits)})
 	}
 	return b.finish(cfg, annotations, opts.Tags)
 }
@@ -231,7 +242,16 @@ func (b *builder) putFile(path string, annotations map[string]string) (ocispec.D
 	} else if !info.Mode().IsRegular() {
 		return ocispec.Descriptor{}, fmt.Errorf("%s is not a regular file", path)
 	}
-	return b.put(f, spec.MediaTypeMeta, annotations)
+	key := b.cache.fileBlobKey(path)
+	if d, ok := b.cache.get(b.store, key); ok {
+		d.MediaType, d.Annotations = spec.MediaTypeMeta, annotations
+		return d, nil
+	}
+	d, err := b.put(f, spec.MediaTypeMeta, annotations)
+	if err == nil {
+		b.cache.set(key, d)
+	}
+	return d, err
 }
 
 // resolve turns a path written in the Weightfile into a path on disk.

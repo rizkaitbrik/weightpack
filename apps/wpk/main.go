@@ -48,6 +48,8 @@ func commands() map[string]command {
 		"squash":   {"Bake an image's LoRA layers into a dense image", runSquash},
 		"export":   {"Write an image out as Hugging Face and PEFT files", runExport},
 		"import":   {"Store a full fine-tune as a lossless delta over a parent", runImport},
+		"rm":       {"Untag images (their blobs stay until prune)", runRm},
+		"prune":    {"Delete blobs no tagged image reaches", runPrune},
 	}
 	for name, summary := range planned {
 		cmds[name] = command{summary, notImplemented(name)}

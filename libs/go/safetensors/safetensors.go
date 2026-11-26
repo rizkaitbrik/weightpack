@@ -189,7 +189,9 @@ func ByteSize(dtype string, shape []int64) (int64, error) {
 // File is an open safetensors file.
 type File struct {
 	*Header
-	f *os.File
+	// Path is the file's path as given to Open.
+	Path string
+	f    *os.File
 }
 
 // Open opens a safetensors file and reads its header.
@@ -208,7 +210,7 @@ func Open(path string) (*File, error) {
 		_ = f.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	return &File{Header: h, f: f}, nil
+	return &File{Header: h, Path: path, f: f}, nil
 }
 
 // Data returns a reader over one tensor's bytes.

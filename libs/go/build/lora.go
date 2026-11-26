@@ -133,11 +133,11 @@ func (b *builder) ingestLoRA(step string, src weightfile.Layer, layer, parent *s
 
 	for _, n := range names {
 		mod := modules[n]
-		entries := []safetensors.Entry{
-			{Name: n + ".lora_A.weight", DType: mod.a.DType, Shape: mod.a.Shape, Data: f.Data(*mod.a)},
-			{Name: n + ".lora_B.weight", DType: mod.b.DType, Shape: mod.b.Shape, Data: f.Data(*mod.b)},
+		refs := []tensorRef{
+			{file: f, t: *mod.a, name: n + ".lora_A.weight"},
+			{file: f, t: *mod.b, name: n + ".lora_B.weight"},
 		}
-		d, err := b.putTensors(entries, spec.MediaTypeLoRA,
+		d, err := b.putTensors(refs, spec.MediaTypeLoRA,
 			map[string]string{spec.AnnotationLayer: layer.ID, spec.AnnotationTensor: n + ".weight"})
 		if err != nil {
 			return fail("%s: %v", n, err)
@@ -150,7 +150,7 @@ func (b *builder) ingestLoRA(step string, src weightfile.Layer, layer, parent *s
 	sort.Slice(saved, func(i, j int) bool { return saved[i].Name < saved[j].Name })
 	for _, t := range saved {
 		name := strings.TrimPrefix(t.Name, peftPrefix)
-		d, err := b.putTensors([]safetensors.Entry{{Name: name, DType: t.DType, Shape: t.Shape, Data: f.Data(*t)}}, spec.MediaTypeTensor,
+		d, err := b.putTensors([]tensorRef{{file: f, t: *t, name: name}}, spec.MediaTypeTensor,
 			map[string]string{spec.AnnotationLayer: layer.ID, spec.AnnotationTensor: name})
 		if err != nil {
 			return fail("%s: %v", name, err)

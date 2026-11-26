@@ -115,4 +115,4 @@ Building `FROM` a pushed base gives the same image digest as building from the b
 
 Not yet supported, each with a clear error: lossy imports (`codec=bit1|sparse`), `ROUTER train`, pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `rank_pattern` or `alpha_pattern`.
 
-Building the same inputs twice gives the same image digest and stores nothing new. Two images on the same base share its blobs, so the second stores only its own layers.
+Building the same inputs twice gives the same image digest and stores nothing new; the build cache also lets a rebuild skip reading unchanged source files (`wpk build --no-cache` reads them anyway). Two images on the same base share its blobs, so the second stores only its own layers.

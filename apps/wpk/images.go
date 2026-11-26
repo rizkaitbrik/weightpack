@@ -47,6 +47,7 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	var tags stringList
 	fs.Var(&tags, "t", "name and optional tag, such as assistant:v1 (repeatable)")
+	noCache := fs.Bool("no-cache", false, "read and hash every source again")
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: wpk build [-t name[:tag]]... [directory | Weightfile]\n\nBuilds the Weightfile in the directory (default .). Local sources resolve\nagainst the Weightfile's directory.")
 		fs.PrintDefaults()
@@ -74,7 +75,7 @@ func runBuild(args []string, stdout, stderr io.Writer) int {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	res, err := client().Build(ctx, api.BuildRequest{Weightfile: abs, Tags: tags}, printEvent(stdout, stderr))
+	res, err := client().Build(ctx, api.BuildRequest{Weightfile: abs, Tags: tags, NoCache: *noCache}, printEvent(stdout, stderr))
 	if err != nil {
 		fmt.Fprintf(stderr, "wpk build: %v\n", err)
 		return 1

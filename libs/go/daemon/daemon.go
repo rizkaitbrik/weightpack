@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 
@@ -33,6 +34,16 @@ type server struct {
 	log     *slog.Logger
 	worker  *worker.Client
 	hf      *hf.Client
+	ops     sync.RWMutex // shared by store operations, exclusive for prune
+}
+
+// shared runs h holding the store lock shared.
+func (s *server) shared(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.ops.RLock()
+		defer s.ops.RUnlock()
+		h(w, r)
+	}
 }
 
 // Option configures the handler.
@@ -57,12 +68,17 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
 	mux.HandleFunc("GET /v1/blobs/{digest}", srv.blob)
-	mux.HandleFunc("POST /v1/build", srv.build)
-	mux.HandleFunc("POST /v1/push", srv.push)
-	mux.HandleFunc("POST /v1/pull", srv.pull)
-	mux.HandleFunc("POST /v1/tag", srv.tag)
-	mux.HandleFunc("POST /v1/squash", srv.squash)
-	mux.HandleFunc("POST /v1/export", srv.export)
+	// Everything that writes blobs, reads them for a transfer, or changes
+	// tags shares the store; prune takes it alone, so it never deletes a
+	// blob in use.
+	mux.HandleFunc("POST /v1/build", srv.shared(srv.build))
+	mux.HandleFunc("POST /v1/push", srv.shared(srv.push))
+	mux.HandleFunc("POST /v1/pull", srv.shared(srv.pull))
+	mux.HandleFunc("POST /v1/tag", srv.shared(srv.tag))
+	mux.HandleFunc("POST /v1/squash", srv.shared(srv.squash))
+	mux.HandleFunc("POST /v1/export", srv.shared(srv.export))
+	mux.HandleFunc("POST /v1/rm", srv.shared(srv.rm))
+	mux.HandleFunc("POST /v1/prune", srv.prune)
 	mux.HandleFunc("GET /v1/images", srv.images)
 	mux.HandleFunc("GET /v1/images/inspect", srv.inspect)
 	return mux
@@ -136,7 +152,7 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	}
 	send := startStream(w)
 	s.log.Info("build started", "weightfile", req.Weightfile, "tags", req.Tags)
-	opts := build.Options{Weightfile: req.Weightfile, Tags: req.Tags, Pull: s.pullForBuild}
+	opts := build.Options{Weightfile: req.Weightfile, Tags: req.Tags, Pull: s.pullForBuild, NoCache: req.NoCache}
 	if s.worker != nil {
 		opts.Worker = s.worker
 	}
@@ -241,6 +257,74 @@ func (s *server) export(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Info("export finished", "ref", req.Ref, "dir", res.Dir, "bytes", res.Bytes)
 	send(api.Event{Export: res})
+}
+
+// rm untags images; their blobs stay until a prune.
+func (s *server) rm(w http.ResponseWriter, r *http.Request) {
+	var req api.RmRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	var removed []string
+	for _, ref := range req.Refs {
+		if err := s.store.Untag(ref); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, store.ErrUnknownImage) {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, err)
+			return
+		}
+		removed = append(removed, ref)
+	}
+	writeJSON(w, http.StatusOK, api.RmResponse{Removed: removed})
+}
+
+// prune deletes unreachable blobs, stale build-cache entries and, if asked,
+// the hf:// download cache. It holds the store alone.
+func (s *server) prune(w http.ResponseWriter, r *http.Request) {
+	var req api.PruneRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	s.ops.Lock()
+	defer s.ops.Unlock()
+	res, err := s.store.Prune(req.DryRun)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	out := api.PruneResponse{Blobs: res.Blobs, Bytes: res.Bytes, KeptBlobs: res.KeptBlobs, KeptBytes: res.KeptBytes}
+	if !req.DryRun {
+		if out.CacheEntries, err = build.PruneCache(s.store.Root(), s.store); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+	if req.Downloads && s.hf != nil && s.hf.CacheDir != "" {
+		out.DownloadBytes = dirSize(s.hf.CacheDir)
+		if !req.DryRun {
+			if err := os.RemoveAll(s.hf.CacheDir); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+		}
+	}
+	s.log.Info("prune", "dry_run", req.DryRun, "blobs", out.Blobs, "bytes", out.Bytes, "downloads", out.DownloadBytes)
+	writeJSON(w, http.StatusOK, out)
+}
+
+func dirSize(dir string) int64 {
+	var n int64
+	_ = filepath.WalkDir(dir, func(_ string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if info, err := d.Info(); err == nil {
+				n += info.Size()
+			}
+		}
+		return nil
+	})
+	return n
 }
 
 func (s *server) tag(w http.ResponseWriter, r *http.Request) {

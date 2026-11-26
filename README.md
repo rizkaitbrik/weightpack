@@ -85,6 +85,7 @@ npx nx run-many -t build --projects=wpk,wpkd
 ./dist/apps/wpk history assistant:v1
 ./dist/apps/wpk squash -t assistant-legal --expert legal assistant:v1   # dense weights, one expert baked in
 ./dist/apps/wpk import --parent ./base -t finance ./finance-finetune         # a full fine-tune, stored as XOR deltas
+./dist/apps/wpk rm assistant-legal && ./dist/apps/wpk prune                    # untag, then delete unreachable blobs
 ./dist/apps/wpk export -o ./assistant-legal assistant-legal               # ./assistant-legal/base loads in transformers or vLLM
 ./dist/apps/wpk tag assistant:v1 registry.example.com/team/assistant:v1
 ./dist/apps/wpk push registry.example.com/team/assistant:v1
