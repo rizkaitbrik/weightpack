@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -32,6 +33,9 @@ type lossyWorker struct {
 	evalReq        *workerpb.EvaluateRequest
 	source, score  float64
 	corrupt        bool // write a bit1 signs tensor one byte too long
+	// evalSource maps each file in the first model Evaluate scores to its
+	// contents ("" for weights), read while the build still has it.
+	evalSource map[string]string
 }
 
 func (w *lossyWorker) Info(context.Context, *workerpb.InfoRequest, ...grpc.CallOption) (*workerpb.InfoResponse, error) {
@@ -110,6 +114,21 @@ func (w *lossyWorker) EncodeLayer(_ context.Context, req *workerpb.EncodeLayerRe
 func (w *lossyWorker) Evaluate(_ context.Context, req *workerpb.EvaluateRequest, _ ...grpc.CallOption) (*workerpb.EvaluateResponse, error) {
 	w.evals++
 	w.evalReq = req
+	w.evalSource = map[string]string{}
+	entries, err := os.ReadDir(req.Models[0])
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		raw, err := os.ReadFile(filepath.Join(req.Models[0], e.Name()))
+		if err != nil {
+			return nil, err
+		}
+		if filepath.Ext(e.Name()) == ".safetensors" {
+			raw = nil
+		}
+		w.evalSource[e.Name()] = string(raw)
+	}
 	name := "self"
 	if req.Suite != "" {
 		name = strings.TrimSuffix(filepath.Base(req.Suite), filepath.Ext(req.Suite))
@@ -160,7 +179,7 @@ func TestLossyLayer(t *testing.T) {
 		t.Errorf("%d delta blobs", blobs)
 	}
 	if w.req.Codec != workerpb.Codec_CODEC_BIT1 || w.req.ReconstructDir == "" || w.evalReq.Suite != "" ||
-		!slices.Equal(w.evalReq.Models, []string{filepath.Join(f.dir, "finance"), w.req.ReconstructDir}) {
+		!slices.Equal(w.evalReq.Models, []string{filepath.Dir(w.req.TargetFiles[0]), w.req.ReconstructDir}) {
 		t.Errorf("encode %+v, eval %+v", w.req, w.evalReq)
 	}
 	if !slices.ContainsFunc(f.events, func(e api.Event) bool { return strings.Contains(e.Message, "a drop of 0.50 points (max_drop 1)") }) {
@@ -243,5 +262,40 @@ func TestLossyLayerRefuses(t *testing.T) {
 		if _, err := f.buildLossy(t, name+".Weightfile", c.body, c.w); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: %v, want %q", name, err, c.want)
 		}
+	}
+}
+
+// The eval scores the fine-tune as the image will serve it: with the
+// parent's config, tokenizer and chat template, whatever the fine-tune's
+// directory has; and the worker encodes from the same directory, whose
+// other files it copies into the model the layer gives back.
+func TestLossyEvalUsesTheImagesMetadata(t *testing.T) {
+	f := newFixture(t)
+	dir := filepath.Join(f.dir, "finance")
+	writeFinetune(t, dir, 7)
+	for _, n := range []string{"config.json", "tokenizer.json"} {
+		if err := os.Remove(filepath.Join(dir, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for n, body := range map[string]string{"tokenizer_config.json": `{"chat_template": "mine"}`, "chat_template.jinja": "mine"} {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &lossyWorker{source: 90, score: 90}
+	if _, err := f.buildLossy(t, "Weightfile", "FROM ./base\nLAYER finance ./finance codec=bit1 max_drop=1\n", w); err != nil {
+		t.Fatal(err)
+	}
+	base, err := os.ReadFile(filepath.Join(f.dir, "base", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := slices.Sorted(maps.Keys(w.evalSource))
+	if !slices.Equal(got, []string{"config.json", "model.safetensors", "tokenizer.json"}) || w.evalSource["config.json"] != string(base) {
+		t.Errorf("eval source has %v", got)
+	}
+	if filepath.Dir(w.req.TargetFiles[0]) != w.evalReq.Models[0] {
+		t.Errorf("encoded %v, evaluated %s", w.req.TargetFiles, w.evalReq.Models[0])
 	}
 }

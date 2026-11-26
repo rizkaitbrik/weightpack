@@ -4,9 +4,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -174,7 +176,14 @@ func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *
 			return entry, err
 		}
 	}
-	req := &workerpb.EncodeLayerRequest{Codec: codec, TargetFiles: ft.files, OutDir: outDir, Density: density, ReconstructDir: recon}
+	// The worker copies the source's other files into the reconstruction, so
+	// both models it scores carry the parent's config and tokenizer.
+	source := filepath.Join(staging, "source")
+	targets, err := b.stageSource(ft, source)
+	if err != nil {
+		return entry, err
+	}
+	req := &workerpb.EncodeLayerRequest{Codec: codec, TargetFiles: targets, OutDir: outDir, Density: density, ReconstructDir: recon}
 	if req.Base, req.Parents, err = b.parentBlobs(ft, inDir); err != nil {
 		return entry, err
 	}
@@ -216,7 +225,7 @@ func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *
 	if err != nil {
 		return entry, err
 	}
-	ev, err := b.worker.Evaluate(b.ctx, &workerpb.EvaluateRequest{Models: []string{ft.dir, recon}, Suite: suite, ChatTemplate: templatePath})
+	ev, err := b.worker.Evaluate(b.ctx, &workerpb.EvaluateRequest{Models: []string{source, recon}, Suite: suite, ChatTemplate: templatePath})
 	if err != nil {
 		return entry, fail("eval: %s", WorkerError(err))
 	}
@@ -226,6 +235,77 @@ func (b *builder) encodeLossy(step string, src weightfile.Layer, layer, parent *
 	entry.Suite, entry.Examples, entry.Tokens = ev.Suite, ev.Examples, ev.Tokens
 	entry.SourceScore, entry.Score = ev.Scores[0].Accuracy, ev.Scores[1].Accuracy
 	return entry, nil
+}
+
+// stageSource lays the fine-tune out in dir as the image will serve it, for
+// the eval: links to its weight files and their index, beside the parent's
+// config, tokenizer and chat template, which the image keeps in place of
+// the fine-tune's own (which may be missing, or carry another template). It
+// returns the weight files' paths in dir. Meta file names come from
+// manifest annotations, which a pulled image controls, so only the names a
+// base keeps are written.
+func (b *builder) stageSource(ft *fineTune, dir string) ([]string, error) {
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		return nil, err
+	}
+	link := func(src string) (string, error) {
+		abs, err := filepath.Abs(src)
+		if err != nil {
+			return "", err
+		}
+		dst := filepath.Join(dir, filepath.Base(src))
+		return dst, os.Symlink(abs, dst)
+	}
+	var files []string
+	for _, p := range ft.files {
+		dst, err := link(p)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, dst)
+	}
+	if index := filepath.Join(ft.dir, "model.safetensors.index.json"); fileExists(index) {
+		if _, err := link(index); err != nil {
+			return nil, err
+		}
+	}
+	for _, d := range b.blobs[ft.baseLayer.ID] {
+		name := d.Annotations[spec.AnnotationTitle]
+		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeMeta || !slices.Contains(baseMetaFiles, name) {
+			continue
+		}
+		if err := b.writeBlob(d, filepath.Join(dir, name)); err != nil {
+			return nil, err
+		}
+	}
+	return files, nil
+}
+
+// writeBlob writes a stored blob's plain bytes to path.
+func (b *builder) writeBlob(d ocispec.Descriptor, path string) error {
+	rc, err := b.store.Open(d.Digest.String())
+	if err != nil {
+		return err
+	}
+	plain, err := entropy.Decode(d.MediaType, rc)
+	if err != nil {
+		return err
+	}
+	defer plain.Close()
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, plain)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // putLossy checks a worker's delta file for one tensor against the codec's
