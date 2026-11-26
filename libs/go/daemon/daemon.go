@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -20,6 +21,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/export"
 	"github.com/rizkaitbrik/weightpack/libs/go/hf"
 	"github.com/rizkaitbrik/weightpack/libs/go/registry"
+	"github.com/rizkaitbrik/weightpack/libs/go/serving"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/squash"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
@@ -34,6 +36,7 @@ type server struct {
 	log     *slog.Logger
 	worker  *worker.Client
 	hf      *hf.Client
+	runtime *serving.Runtime
 	ops     sync.RWMutex // shared by store operations, exclusive for prune
 }
 
@@ -56,6 +59,10 @@ func WithHF(c *hf.Client) Option { return func(s *server) { s.hf = c } }
 // evals) run on. Without one, those endpoints explain how to start one.
 func WithWorker(c *worker.Client) Option { return func(s *server) { s.worker = c } }
 
+// WithRuntime sets the runtime that wpk run, ps, stop and logs drive.
+// Without one, those endpoints say serving is off.
+func WithRuntime(rt *serving.Runtime) Option { return func(s *server) { s.runtime = rt } }
+
 // NewHandler returns the daemon's API over s.
 func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Option) http.Handler {
 	if logger == nil {
@@ -64,6 +71,9 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	srv := &server{store: s, version: version, log: logger}
 	for _, o := range opts {
 		o(srv)
+	}
+	if srv.runtime != nil {
+		srv.runtime.SetStoreLock(srv.ops.RLocker())
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", srv.health)
@@ -81,6 +91,12 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	mux.HandleFunc("POST /v1/prune", srv.prune)
 	mux.HandleFunc("GET /v1/images", srv.images)
 	mux.HandleFunc("GET /v1/images/inspect", srv.inspect)
+	// The runtime takes the store lock itself, only while it reads the
+	// store or writes to it: an engine can take minutes to load.
+	mux.HandleFunc("POST /v1/run", srv.serving(srv.run))
+	mux.HandleFunc("GET /v1/containers", srv.serving(srv.containers))
+	mux.HandleFunc("POST /v1/stop", srv.serving(srv.stop))
+	mux.HandleFunc("GET /v1/containers/logs", srv.serving(srv.logs))
 	return mux
 }
 
@@ -301,6 +317,12 @@ func (s *server) prune(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if s.runtime != nil {
+		if out.ServingBytes, err = s.runtime.PruneFiles(req.DryRun); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
 	if req.Downloads && s.hf != nil && s.hf.CacheDir != "" {
 		out.DownloadBytes = dirSize(s.hf.CacheDir)
 		if !req.DryRun {
@@ -421,4 +443,85 @@ func imageSize(m *ocispec.Manifest, manifestSize int64) int64 {
 		}
 	}
 	return total
+}
+
+// serving answers 503 when wpkd runs without a runtime.
+func (s *server) serving(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.runtime == nil {
+			writeError(w, http.StatusServiceUnavailable, errors.New("serving is off in this wpkd"))
+			return
+		}
+		h(w, r)
+	}
+}
+
+// run streams progress like build; the last line has the container. A
+// client that disconnects before the engine is up cancels the run.
+func (s *server) run(w http.ResponseWriter, r *http.Request) {
+	var req api.RunRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Ref == "" {
+		writeError(w, http.StatusBadRequest, errors.New("missing ref"))
+		return
+	}
+	send := startStream(w)
+	s.log.Info("run started", "ref", req.Ref, "name", req.Name, "engine", req.Engine, "device", req.Device)
+	c, err := s.runtime.Run(r.Context(), req, send)
+	if err != nil {
+		if s.worker != nil {
+			err = worker.Explain(err, s.worker.Socket())
+		}
+		s.log.Info("run failed", "ref", req.Ref, "err", err)
+		send(api.Event{Error: err.Error()})
+		return
+	}
+	send(api.Event{Container: c})
+}
+
+func (s *server) containers(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.runtime.List())
+}
+
+func (s *server) stop(w http.ResponseWriter, r *http.Request) {
+	var req api.StopRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	stopped, err := s.runtime.Stop(req.Names)
+	if errors.Is(err, serving.ErrNoContainer) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, api.StopResponse{Stopped: stopped})
+}
+
+func (s *server) logs(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	follow, _ := strconv.ParseBool(r.URL.Query().Get("follow"))
+	if name == "" {
+		writeError(w, http.StatusBadRequest, errors.New("missing name"))
+		return
+	}
+	if !s.runtime.Has(name) {
+		writeError(w, http.StatusNotFound, fmt.Errorf("%w: %s", serving.ErrNoContainer, name))
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	if err := s.runtime.Logs(r.Context(), name, follow, w, flush); err != nil {
+		s.log.Info("logs failed", "name", name, "err", err)
+	}
 }

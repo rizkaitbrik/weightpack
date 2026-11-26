@@ -14,10 +14,18 @@
 //	POST /v1/prune                 PruneRequest -> PruneResponse
 //	GET  /v1/images                -> []Image
 //	GET  /v1/images/inspect?ref=R  -> ImageDetail
+//	POST /v1/run                   RunRequest -> NDJSON stream of Event
+//	GET  /v1/containers            -> []Container
+//	POST /v1/stop                  StopRequest -> StopResponse
+//	GET  /v1/containers/logs?name=N[&follow=1]  -> the engine's log, as text
+//
+// Containers answer on wpkd's gateway, a separate TCP listener that speaks
+// the OpenAI API and routes each request by its model field.
 package api
 
 import (
 	"fmt"
+	"time"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
@@ -58,6 +66,63 @@ type PruneResponse struct {
 	KeptBytes     int64 `json:"kept_bytes"`
 	CacheEntries  int   `json:"cache_entries"`
 	DownloadBytes int64 `json:"download_bytes"`
+	// ServingBytes counts serving files (exported bases and adapters) that
+	// no running engine uses; the next wpk run of their images makes them
+	// again.
+	ServingBytes int64 `json:"serving_bytes"`
+}
+
+// RunRequest asks the daemon to serve an image.
+type RunRequest struct {
+	Ref string `json:"ref"`
+	// Name is the model name clients send; it defaults to Ref. An image
+	// with a MIX answers to Name/<expert> for each expert.
+	Name string `json:"name,omitempty"`
+	// Engine is "reference" (transformers and PEFT: cuda, mps or cpu) or
+	// "vllm" (cuda). "" picks vllm on NVIDIA GPUs when it is installed and
+	// the reference engine otherwise.
+	Engine string `json:"engine,omitempty"`
+	// Device is "cuda", "mps" or "cpu"; "" detects the best one.
+	Device string `json:"device,omitempty"`
+}
+
+// StopRequest stops containers by name.
+type StopRequest struct {
+	Names []string `json:"names"`
+}
+
+// StopResponse lists the containers stopped.
+type StopResponse struct {
+	Stopped []string `json:"stopped"`
+}
+
+// Container is a running image: the model names the gateway routes to it
+// and the engine that serves them. Containers on the same serving base
+// share one engine and one copy of the base weights.
+type Container struct {
+	Name   string `json:"name"`
+	Image  string `json:"image"`
+	Digest string `json:"digest"`
+	// Models are the names requests use: Name, or Name/<expert> for each
+	// expert of a MIX.
+	Models []string `json:"models"`
+	Engine string   `json:"engine"`
+	Device string   `json:"device"`
+	// EngineID names the engine process; containers that share it share
+	// its log.
+	EngineID string `json:"engine_id"`
+	// Base is the chain ID of the serving base: the image's base with
+	// every layer below its adapters baked in.
+	Base string `json:"base"`
+	// Adapters are the layers served as LoRA adapters on that base.
+	Adapters []string `json:"adapters,omitempty"`
+	// Status is "running", or "exited" when the engine died (Error says
+	// why; wpk logs shows its output).
+	Status  string    `json:"status"`
+	Error   string    `json:"error,omitempty"`
+	Created time.Time `json:"created"`
+	// Endpoint is the gateway's OpenAI base URL.
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // PushRequest asks the daemon to push a local image. Ref must name a
@@ -119,17 +184,18 @@ type TagResponse struct {
 	Digest string `json:"digest"`
 }
 
-// Event is one line of a build, squash, push, pull or export NDJSON stream.
-// The last line carries Result (build, squash), Transfer (push, pull),
-// Export or Error.
+// Event is one line of a build, squash, push, pull, export or run NDJSON
+// stream. The last line carries Result (build, squash), Transfer (push,
+// pull), Export, Container (run) or Error.
 type Event struct {
-	Step     string          `json:"step,omitempty"`
-	Message  string          `json:"message,omitempty"`
-	Warning  bool            `json:"warning,omitempty"`
-	Result   *BuildResult    `json:"result,omitempty"`
-	Transfer *TransferResult `json:"transfer,omitempty"`
-	Export   *ExportResult   `json:"export,omitempty"`
-	Error    string          `json:"error,omitempty"`
+	Step      string          `json:"step,omitempty"`
+	Message   string          `json:"message,omitempty"`
+	Warning   bool            `json:"warning,omitempty"`
+	Result    *BuildResult    `json:"result,omitempty"`
+	Transfer  *TransferResult `json:"transfer,omitempty"`
+	Export    *ExportResult   `json:"export,omitempty"`
+	Container *Container      `json:"container,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }
 
 // TransferResult describes a finished push or pull.

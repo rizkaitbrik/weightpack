@@ -183,6 +183,45 @@ func (c *Client) Prune(ctx context.Context, req PruneRequest) (*PruneResponse, e
 	return &out, c.postJSON(ctx, "/v1/prune", req, &out)
 }
 
+// Run serves an image, reporting progress to onEvent, and returns the
+// running container.
+func (c *Client) Run(ctx context.Context, req RunRequest, onEvent func(Event)) (*Container, error) {
+	last, err := c.stream(ctx, "/v1/run", req, onEvent)
+	if err != nil {
+		return nil, err
+	}
+	if last.Container == nil {
+		return nil, errors.New("wpkd ended the run stream without a container")
+	}
+	return last.Container, nil
+}
+
+// Containers lists the running containers.
+func (c *Client) Containers(ctx context.Context) ([]Container, error) {
+	var out []Container
+	return out, c.getJSON(ctx, "/v1/containers", &out)
+}
+
+// Stop stops containers by name.
+func (c *Client) Stop(ctx context.Context, req StopRequest) (*StopResponse, error) {
+	var out StopResponse
+	return &out, c.postJSON(ctx, "/v1/stop", req, &out)
+}
+
+// Logs returns a container's engine log. With follow, the reader keeps
+// delivering new output until ctx is done or the engine exits.
+func (c *Client) Logs(ctx context.Context, name string, follow bool) (io.ReadCloser, error) {
+	q := url.Values{"name": {name}}
+	if follow {
+		q.Set("follow", "1")
+	}
+	resp, err := c.do(ctx, http.MethodGet, "/v1/containers/logs?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 func (c *Client) postJSON(ctx context.Context, path string, req, out any) error {
 	resp, err := c.do(ctx, http.MethodPost, path, req)
 	if err != nil {
@@ -233,7 +272,7 @@ func (c *Client) stream(ctx context.Context, path string, req any, onEvent func(
 		switch {
 		case e.Error != "":
 			return Event{}, errors.New(e.Error)
-		case e.Result != nil || e.Transfer != nil || e.Export != nil:
+		case e.Result != nil || e.Transfer != nil || e.Export != nil || e.Container != nil:
 			return e, nil
 		case onEvent != nil:
 			onEvent(e)

@@ -2437,6 +2437,18 @@ dependencies = [
     { name = "protobuf" },
 ]
 
+[package.optional-dependencies]
+serve = [
+    { name = "peft", version = "0.21.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "peft", version = "0.22.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "torch", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11' and sys_platform != 'linux'" },
+    { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "python_full_version < '3.11' and sys_platform == 'linux'" },
+    { name = "torch", version = "2.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11' and sys_platform != 'linux'" },
+    { name = "torch", version = "2.15.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "python_full_version >= '3.11' and sys_platform == 'linux'" },
+    { name = "transformers", version = "5.20.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "transformers", version = "5.24.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "autopep8" },
@@ -2462,8 +2474,13 @@ parity = [
 requires-dist = [
     { name = "grpcio", specifier = ">=1.85.4" },
     { name = "numpy", specifier = ">=1.26" },
+    { name = "peft", marker = "extra == 'serve'", specifier = ">=0.17" },
     { name = "protobuf", specifier = ">=7.35.1" },
+    { name = "torch", marker = "sys_platform == 'linux' and extra == 'serve'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", marker = "sys_platform != 'linux' and extra == 'serve'", specifier = ">=2.6" },
+    { name = "transformers", marker = "extra == 'serve'", specifier = ">=4.56" },
 ]
+provides-extras = ["serve"]
 
 [package.metadata.requires-dev]
 dev = [

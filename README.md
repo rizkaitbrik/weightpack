@@ -40,7 +40,7 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | Path | Project | Language | What it is |
 | --- | --- | --- | --- |
 | `apps/wpk` | `wpk` | Go | Command-line client |
-| `apps/wpkd` | `wpkd` | Go | Daemon: local store, build cache, push/pull; node agent on GPU hosts |
+| `apps/wpkd` | `wpkd` | Go | Daemon: local store, build cache, push/pull, containers and the OpenAI gateway |
 | `libs/go/spec` | `spec` | Go | Image format: media types, config schema, layer digests, chain IDs, architecture fingerprint |
 | `libs/go/store` | `store` | Go | Content-addressed blob store and tags |
 | `libs/go/weightfile` | `weightfile` | Go | Weightfile parser ([reference](docs/weightfile.md)) |
@@ -53,8 +53,9 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `libs/go/entropy` | `entropy` | Go | Entropy coders named by media-type suffixes (`+zstd`) |
 | `libs/go/export` | `export` | Go | Export: Hugging Face base, PEFT adapters and a Weightfile that rebuilds the image |
 | `libs/go/squash` | `squash` | Go | Squash: picks the layers, hands blobs to the worker, stores the dense image |
+| `libs/go/serving` | `serving` | Go | Runtime: serving bases, engine processes, adapters, and the gateway that routes by model |
 | `libs/go/worker`, `libs/go/workerpb` | `worker-client` | Go | gRPC client for the build worker; generated contract code |
-| `python/worker` | `worker` | Python | Build worker: training, delta import, codecs, evals |
+| `python/worker` | `worker` | Python | Build worker (squash, delta import, codecs) and `weightpack-engine`, the reference serving engine |
 | `python/vllm-plugin` | `vllm-plugin` | Python | vLLM plugin: composition loading, expert pool, routers |
 | `proto/` | `proto` | Protobuf | gRPC contract between `wpkd` and the workers (`npx nx run proto:generate`) |
 | `docs/` | | | Design doc, Weightfile reference |
@@ -95,6 +96,30 @@ npx nx run-many -t build --projects=wpk,wpkd
 `push` and `pull` use the credentials `docker login` stores, and talk plain HTTP to registries on localhost (or anywhere with `--plain-http`). `pull` checks the manifest and config, digests and chain IDs included, before fetching any tensor; `--exact` refuses lossy layers.
 
 `wpk` finds the daemon at `$WPK_SOCKET`, else `$WPK_ROOT/wpkd.sock`, else `~/.weightpack/wpkd.sock`.
+
+### Serve images
+
+`wpk run` serves an image on `wpkd`'s OpenAI-compatible gateway (`127.0.0.1:8090` by default). Images on the same base share one engine process and one copy of the base weights; each image's top LoRA layer, or each expert of a MIX, is an adapter loaded into that engine.
+
+```bash
+./dist/apps/wpkd --worker "uv run --project python/worker weightpack-worker" \
+  --engine-reference "uv run --project python/worker --extra serve weightpack-engine" &
+./dist/apps/wpk run assistant:v1            # answers to model assistant:v1/<expert> for each expert
+./dist/apps/wpk run --name fr french:v1     # answers to model fr, on the same engine if the base is the same
+./dist/apps/wpk ps
+curl http://127.0.0.1:8090/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "fr", "messages": [{"role": "user", "content": "Bonjour"}]}'
+./dist/apps/wpk logs -f fr
+./dist/apps/wpk stop fr assistant:v1        # the engine stops with its last container
+```
+
+| Hardware | Default engine | Notes |
+| --- | --- | --- |
+| NVIDIA GPU (`cuda`) | vLLM, when `vllm` is installed; else the reference engine | vLLM loads adapters at runtime and batches them |
+| Apple Silicon GPU (`mps`) | Reference engine (transformers + PEFT on Metal) | |
+| CPU (`cpu`) | Reference engine | |
+
+`wpkd` detects the device (`nvidia-smi`, then Apple Silicon, then CPU); `--device` and `--engine` override it per container, and `wpkd --device`, `--engine-reference` and `--engine-vllm` set the defaults and commands. vLLM claims 90% of GPU memory by default, so two different bases on one GPU need a smaller share each, such as `--engine-vllm "vllm serve --gpu-memory-utilization 0.45"`. If the gateway listens beyond loopback (`--gateway 0.0.0.0:8090`), set `--gateway-key` and send it as `Authorization: Bearer <key>`.
 
 ## Roadmap
 

@@ -135,6 +135,10 @@ func stackOf(c *spec.Config) ([]spec.Layer, *spec.Layer, error) {
 	return stack, mix, nil
 }
 
+// Stack returns an image's base and stack, bottom first, and its MIX if it
+// has one, refusing every other shape. The runtime reads images with it.
+func Stack(c *spec.Config) ([]spec.Layer, *spec.Layer, error) { return stackOf(c) }
+
 // chainPath names the layers a chain runs through: "base → french".
 func chainPath(byID map[string]spec.Layer, id string) string {
 	var ids []string

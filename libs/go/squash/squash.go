@@ -41,6 +41,10 @@ type Options struct {
 	// Expert picks the one expert to bake in when the image has a MIX. A
 	// mix that routes per token cannot be squashed as a whole.
 	Expert string
+	// Through bakes the chain only up to and including this layer (not a
+	// mix), leaving out everything above it. Serving uses it to make a base
+	// for the adapters on top. It cannot be combined with Expert.
+	Through string
 	// Tags to point at the squashed image.
 	Tags []string
 }
@@ -70,7 +74,7 @@ func Squash(ctx context.Context, s *store.Store, w workerpb.WorkerClient, ref st
 	if err := spec.CheckImage(&m, &cfg); err != nil {
 		return nil, fmt.Errorf("%s is inconsistent, not squashing it: %w", ref, err)
 	}
-	chain, err := pickChain(&cfg, opts.Expert)
+	chain, err := pickChain(&cfg, opts.Expert, opts.Through)
 	if err != nil {
 		return nil, fmt.Errorf("squash %s: %w", ref, err)
 	}
@@ -206,7 +210,7 @@ func Scaling(l spec.Layer) (float64, error) {
 
 // pickChain returns the layers to bake, bottom first: the stack, or with a
 // MIX the stack and the chosen expert.
-func pickChain(c *spec.Config, expert string) ([]spec.Layer, error) {
+func pickChain(c *spec.Config, expert, through string) ([]spec.Layer, error) {
 	byID := map[string]spec.Layer{}
 	parents := map[string]bool{}
 	var mix *spec.Layer
@@ -219,6 +223,14 @@ func pickChain(c *spec.Config, expert string) ([]spec.Layer, error) {
 	}
 	var top string
 	switch {
+	case through != "" && expert != "":
+		return nil, fmt.Errorf("--expert and Through cannot be combined")
+	case through != "":
+		l, ok := byID[through]
+		if !ok || l.Kind == spec.KindMix {
+			return nil, fmt.Errorf("the image has no layer %q to squash through", through)
+		}
+		top = through
 	case mix != nil && expert == "":
 		return nil, fmt.Errorf("MIX %s routes between %s; pick one with --expert (a mix that routes per token cannot be squashed as a whole)",
 			mix.ID, strings.Join(mix.Experts, ", "))

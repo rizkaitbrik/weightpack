@@ -27,7 +27,7 @@ func TestUnknownCommand(t *testing.T) {
 
 func TestPlannedCommandsFailClearly(t *testing.T) {
 	var out, errOut bytes.Buffer
-	if code := run([]string{"run"}, &out, &errOut); code != 3 {
+	if code := run([]string{"diff"}, &out, &errOut); code != 3 {
 		t.Fatalf("exit %d", code)
 	}
 	if !strings.Contains(errOut.String(), "not implemented") {

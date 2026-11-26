@@ -246,6 +246,7 @@ LICENSE inherit
 | `wpk build -t name:tag .` | `docker build` | Resolves the Weightfile, imports and encodes layers, writes the image |
 | `wpk push` / `wpk pull` | same | Moves only the blobs the other side lacks |
 | `wpk run name:tag` | `docker run` | Starts a container: an OpenAI-compatible endpoint for that composition |
+| `wpk ps` / `wpk stop` / `wpk logs` | same | Lists, stops and shows the engine log of containers |
 | `wpk squash name:tag --to dense` | `docker export` | Bakes a stack, or a mix with fixed weights, into one dense checkpoint |
 | `wpk diff a b` | `docker diff` | Per-tensor report: which tensors differ and by how much |
 | `wpk inspect` / `wpk history` | same | Layers, parents, sizes, codecs, fidelity |
@@ -302,6 +303,12 @@ For a 1-bit expert the term becomes sᵢ · sign(Δᵢ) x. Expert terms run in g
 - **Materialize.** A pure stack, or a mix with fixed weights, can be baked with `wpk squash --to dense` and served by any engine with zero overhead.
 - **Engine choice.** Ship first as a vLLM plugin, which already batches many LoRAs; add one custom module for token-level mixing. Writing a new engine is not worth it.
 - **Cache keys.** Prefix-cache keys must include the image digest: the same prompt gives different KV entries under different images.
+
+**Serving today.** `wpk run` serves an image through stock engines, with per-request routing:
+
+- **Serving base.** Engines apply one adapter per request, so everything below an image's adapters is baked into a dense serving base: its XOR layers and every stacked LoRA layer but the top one (`squash` through that layer). A stack ending in a LoRA layer serves that layer as the adapter; a MIX serves each expert as an adapter, as model `<name>/<expert>`. The base is named by the chain ID of its top layer, so every image with the same lower layers has the same one. It is exported once under `<root>/run/bases/<chain>` (adapters under `<root>/run/adapters/<chain>-<id>`); a squash it needs leaves an untagged image that `wpk prune` removes, along with serving files no container uses.
+- **One engine per base and device.** The first container on a base starts an engine process on a loopback port; later containers on that base add their adapters to it at runtime (`/v1/load_lora_adapter`), so the base's weights load once. The engine stops with its last container, and with `wpkd`. Engines are vLLM on NVIDIA GPUs and `weightpack-engine` (transformers and PEFT; `cuda`, `mps` or `cpu`) elsewhere; both speak the same OpenAI API.
+- **Gateway.** `wpkd` listens for the OpenAI API on `127.0.0.1:8090` and routes each request by its `model` field to the engine and the engine's name for that model, renaming the model back in replies and streams. It sends the image's `TEMPLATE` as the request's `chat_template` unless the request brings one, since images that share a base may differ in template. The gateway does no tensor work.
 
 **FFN experts (v1).** An `ffn-expert` replaces the whole FFN path, so it cannot ride on the shared base product the way a LoRA does: the block outputs the router-weighted sum of each chosen expert's FFN, each with weights W₀ + Δᵢ. The gate and up projections still share W₀x across experts, because they see the same input. Only the down projection needs a full product per active expert. Weights stay stored and paged as deltas, so the extra cost is compute, not memory. When a full fine-tune is imported as an FFN expert, its attention changes are dropped by default; `attn=average` instead averages them into one stacked layer below the mix, as BTX does.
 

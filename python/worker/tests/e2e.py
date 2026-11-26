@@ -48,6 +48,11 @@ class Weightpack:
                 str(self.root),
                 "--worker",
                 f"{sys.executable} -m weightpack_worker",
+                # A free port, so tests never meet a wpkd already running.
+                "--gateway",
+                "127.0.0.1:0",
+                "--engine-reference",
+                f"{sys.executable} -m weightpack_worker.engine",
             ],
             env=self.env,
             stdout=self.log,
