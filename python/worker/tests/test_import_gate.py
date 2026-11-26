@@ -96,6 +96,7 @@ def test_lossy_imports_stay_within_max_drop(models, tmp_path):  # noqa: F811
         "bit1": f"codec=bit1 eval={suite} max_drop={MAX_DROP}",
         "sparse": f"codec=sparse eval={suite} max_drop={MAX_DROP}",
         "bit1-self": f"codec=bit1 max_drop={MAX_DROP}",
+        "sparse-self": f"codec=sparse max_drop={MAX_DROP}",
         "xor": "codec=xor",
     }
     w = Weightpack(*bins)
