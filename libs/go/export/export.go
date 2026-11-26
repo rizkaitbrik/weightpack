@@ -747,5 +747,16 @@ func (e *exporter) delta(id string, ds []ocispec.Descriptor) error {
 	if len(meta.Files) == 0 {
 		return fmt.Errorf("layer %q holds no deltas", id)
 	}
+	// vLLM reads an adapter config before its loader, which the
+	// weightpack-vllm plugin replaces for this directory, runs: a rank-1
+	// adapter with no LoRA weights.
+	adapter := map[string]any{
+		"peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 1, "lora_alpha": 1,
+		"target_modules": []string{}, "bias": "none", "use_rslora": false,
+		"fan_in_fan_out": false, "base_model_name_or_path": "",
+	}
+	if err := e.writeJSON(filepath.Join(DeltaDir(id), "adapter_config.json"), adapter); err != nil {
+		return err
+	}
 	return e.writeJSON(filepath.Join(DeltaDir(id), DeltaFile), meta)
 }

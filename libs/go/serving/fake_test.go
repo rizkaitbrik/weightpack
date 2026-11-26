@@ -49,9 +49,9 @@ func fakeEngine(args []string) int {
 	exitWithStdin := fs.Bool("exit-with-stdin", false, "")
 	noPlugin := fs.Bool("no-plugin", false, "as vLLM without weightpack-vllm: refuse mix directories")
 	// vLLM's own flags; its model directory comes first, unflagged.
-	fs.Bool("enable-lora", false, "")
+	enableLoRA := fs.Bool("enable-lora", false, "")
 	maxLoRARank := fs.Int("max-lora-rank", 0, "")
-	fs.Int("max-loras", 0, "")
+	maxLoRAs := fs.Int("max-loras", 0, "")
 	fs.Bool("trust-request-chat-template", false, "")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -82,7 +82,7 @@ func fakeEngine(args []string) int {
 	if *starts != "" {
 		f, err := os.OpenFile(*starts, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err == nil {
-			fmt.Fprintln(f, *model, *device)
+			fmt.Fprintln(f, *model, *device, "max-loras="+strconv.Itoa(*maxLoRAs), "deltas="+os.Getenv("WEIGHTPACK_DELTA_SLOTS"))
 			_ = f.Close()
 		}
 	}
@@ -140,9 +140,19 @@ func fakeEngine(args []string) int {
 			LoraName *string `json:"lora_name"`
 			LoraPath *string `json:"lora_path"`
 		}{&b.LoraName, &b.LoraPath})
-		// A bit1 layer, as the reference engine reads it: every file it
-		// names must exist.
+		// A bit1 layer, as the reference engine reads it, and vLLM with
+		// weightpack-vllm and delta slots: every file it names must exist.
 		if raw, err := os.ReadFile(filepath.Join(b.LoraPath, "weightpack_delta.json")); err == nil {
+			if *enableLoRA && os.Getenv("WEIGHTPACK_DELTA_SLOTS") != "1" {
+				fail400(w, 400, "this vLLM has no delta slots for bit1 fine-tunes")
+				return
+			}
+			if *enableLoRA {
+				if _, err := os.Stat(filepath.Join(b.LoraPath, "adapter_config.json")); err != nil {
+					fail400(w, 400, "no adapter config at "+b.LoraPath)
+					return
+				}
+			}
 			var meta struct {
 				Version int      `json:"version"`
 				Codec   string   `json:"codec"`

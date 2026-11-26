@@ -32,6 +32,7 @@ import (
 	goruntime "runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,12 @@ type Runtime struct {
 
 	detectOnce sync.Once
 	detected   string
+
+	// plugin is weightpack-vllm's version beside vLLM, or "", asked once;
+	// tests replace pluginVersion.
+	pluginOnce    sync.Once
+	plugin        string
+	pluginVersion func(context.Context) string
 }
 
 type container struct {
@@ -136,11 +143,58 @@ func New(cfg Config) *Runtime {
 		}
 	}
 	cfg.Engines = engines
-	return &Runtime{
+	rt := &Runtime{
 		cfg: cfg, dir: filepath.Join(cfg.Store.Root(), "run"), storeLock: noLock{},
 		engines: map[string]*engine{}, containers: map[string]*container{},
 		routes: map[string]route{}, reserved: map[string]bool{}, pins: map[string]int{}, prep: map[string]*sync.Mutex{},
 	}
+	rt.pluginVersion = func(ctx context.Context) string { return vllmPlugin(ctx, cfg.Engines[EngineVLLM][0]) }
+	return rt
+}
+
+// vllmServesDeltas says whether the weightpack-vllm beside vLLM serves
+// bit1 fine-tunes.
+func (rt *Runtime) vllmServesDeltas(ctx context.Context) bool {
+	rt.pluginOnce.Do(func() { rt.plugin = rt.pluginVersion(ctx) })
+	return rt.plugin != "" && versionAtLeast(rt.plugin, pluginDeltas)
+}
+
+// planDeltas says whether the image's bit1 layer, if one tops it, is served
+// over the layers below it on this engine, and if not, why not.
+func (rt *Runtime) planDeltas(ctx context.Context, cfg *spec.Config, kind, device string) (bool, string) {
+	if kind == EngineReference {
+		return true, ""
+	}
+	shared, err := planFor(cfg, true)
+	if err != nil || len(shared.adapters) != 1 || shared.adapters[0].Kind != spec.KindDeltaBit1 {
+		return false, ""
+	}
+	if !rt.vllmServesDeltas(ctx) {
+		return false, fmt.Sprintf("vLLM serves bit1 fine-tunes over their base with weightpack-vllm %s or later installed beside it", pluginDeltas)
+	}
+	rt.mu.Lock()
+	e := rt.engines[shared.base.Chain+" "+kind+" "+device]
+	rt.mu.Unlock()
+	if e != nil && !e.hasExited() && !e.deltas {
+		return false, "the vllm engine on its base was started without delta slots, by an image with no bit1 layer; to share it, stop that base's containers (wpk ps) and run this image first"
+	}
+	return true, ""
+}
+
+// versionAtLeast compares dotted versions number by number.
+func versionAtLeast(v, min string) bool {
+	a, b := strings.Split(v, "."), strings.Split(min, ".")
+	for i := range b {
+		x, y := 0, 0
+		if i < len(a) {
+			x, _ = strconv.Atoi(strings.TrimFunc(a[i], func(r rune) bool { return r < '0' || r > '9' }))
+		}
+		y, _ = strconv.Atoi(b[i])
+		if x != y {
+			return x > y
+		}
+	}
+	return true
 }
 
 // SetStoreLock sets the lock the runtime holds while it reads the store or
@@ -240,16 +294,16 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	if err != nil {
 		return nil, err
 	}
-	p, err := planFor(cfg, kind == EngineReference)
+	deltas, why := rt.planDeltas(ctx, cfg, kind, device)
+	p, err := planFor(cfg, deltas)
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", req.Ref, err)
 	}
-	if kind != EngineReference {
-		if shared, err := planFor(cfg, true); err == nil && shared.base.Chain != p.base.Chain {
-			progress(api.Event{Step: step, Message: fmt.Sprintf(
-				"the %s engine serves no bit1 deltas yet, so layer %s is baked into this image's serving base; the reference engine (--engine reference) serves it over the layers below it, sharing them with the other images on them",
-				kind, shared.adapters[0].ID)})
-		}
+	if why != "" {
+		shared, _ := planFor(cfg, true)
+		progress(api.Event{Step: step, Message: fmt.Sprintf(
+			"layer %s is baked into this image's serving base, not shared with the other images on its base: %s",
+			shared.adapters[0].ID, why)})
 	}
 	maxRank := 0
 	for _, a := range p.adapters {
@@ -572,6 +626,10 @@ func (rt *Runtime) acquire(p *plan, kind, device string, maxRank int, modelDir s
 	if kind == EngineVLLM {
 		// Headroom for adapters that later images on this base bring.
 		e.maxRank, _ = vllmRank(max(maxRank, 64))
+		// Delta slots for bit1 fine-tunes, if the first image is one.
+		for _, a := range p.adapters {
+			e.deltas = e.deltas || a.Kind == spec.KindDeltaBit1
+		}
 	}
 	rt.engines[key] = e
 	go e.start(rt.cfg.Engines[kind], modelDir, rt.cfg.StartTimeout)

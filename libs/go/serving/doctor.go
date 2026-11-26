@@ -126,10 +126,13 @@ func (rt *Runtime) checkVLLM(ctx context.Context, device string) api.Check {
 		return c
 	}
 	c.Status, c.Detail = api.CheckOK, "vLLM "+strings.TrimSpace(string(lastLine(out)))+", the default engine on this machine"
-	if v := vllmPlugin(ctx, cmd[0]); v != "" {
-		c.Detail += "; weightpack-vllm " + v + " routes each token of a MIX"
-	} else {
-		c.Detail += "; without weightpack-vllm beside it, a MIX serves its experts one per request"
+	switch v := vllmPlugin(ctx, cmd[0]); {
+	case v != "" && versionAtLeast(v, pluginDeltas):
+		c.Detail += "; weightpack-vllm " + v + " routes each token of a MIX and serves bit1 fine-tunes over their base"
+	case v != "":
+		c.Detail += "; weightpack-vllm " + v + " routes each token of a MIX; " + pluginDeltas + " or later also serves bit1 fine-tunes over their base"
+	default:
+		c.Detail += "; without weightpack-vllm beside it, a MIX serves its experts one per request and a bit1 fine-tune runs as a dense base of its own"
 	}
 	return c
 }
