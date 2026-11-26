@@ -70,6 +70,14 @@ CALIBRATION_PROMPTS = [
 ]
 
 
+_TORCH = {
+    "BF16": torch.bfloat16,
+    "F16": torch.float16,
+    "F32": torch.float32,
+    "F64": torch.float64,
+}
+
+
 @dataclass
 class Calibration:
     scales: dict[str, float] = field(default_factory=dict)  # by tensor name
@@ -81,36 +89,39 @@ class Calibration:
 
 
 class _AddScaledSign(torch.autograd.Function):
-    """parent + scale * sign, rounded once to the parent's dtype as decoding
-    does. Saves only the int8 signs for the backward pass, which gives the
-    scale its gradient and the parent none."""
+    """parent + scale * sign, rounded once to the checkpoint's dtype as
+    decoding does, then held in the model's own dtype (float32 on a CPU,
+    whatever the checkpoint's). Saves only the int8 signs for the backward
+    pass, which gives the scale its gradient, straight through the rounding,
+    and the parent none."""
 
     @staticmethod
-    def forward(ctx, w, scale, sign):
+    def forward(ctx, w, scale, sign, storage):
         ctx.save_for_backward(sign)
-        return (w.float() + scale * sign).to(w.dtype)
+        return (w.float() + scale * sign).to(storage).to(w.dtype)
 
     @staticmethod
     def backward(ctx, grad):
         (sign,) = ctx.saved_tensors
-        return None, (grad.float() * sign).sum(), None
+        return None, (grad.float() * sign).sum(), None, None
 
 
 class _Bit1(torch.nn.Module):
     """A parametrization giving a matrix its parent's weights plus a bit1
     delta whose scale trains."""
 
-    def __init__(self, sign: torch.Tensor, scale: float):  # a float32 value
+    def __init__(self, sign: torch.Tensor, scale: float, storage: torch.dtype):
         super().__init__()
         self.register_buffer("sign", sign, persistent=False)
-        self.scale0 = scale
+        self.scale0 = scale  # a float32 value
+        self.storage = storage  # the checkpoint's dtype, which decoding rounds to
         self.log_factor = torch.nn.Parameter(torch.zeros((), device=sign.device))
 
     def scale(self) -> torch.Tensor:
         return self.scale0 * torch.exp(self.log_factor)
 
     def forward(self, w):
-        return _AddScaledSign.apply(w, self.scale(), self.sign)
+        return _AddScaledSign.apply(w, self.scale(), self.sign, self.storage)
 
 
 def calibration_examples(model, tok, prompts=CALIBRATION_PROMPTS) -> list[tuple]:
@@ -158,7 +169,8 @@ def _bit1_student(student, parent: Parent, target: dict, device) -> dict:
     """Turns the student, a copy of the fine-tune, into the bit1 model: each
     changed float matrix gets its parent's weights plus a trainable bit1
     delta. A matrix tied to others (embeddings and the output head) gets one
-    delta, shared. Returns the deltas by tensor name."""
+    delta, shared, even when the checkpoint stores it under each name: the
+    model holds one copy. Returns the deltas by tensor name."""
     student.requires_grad_(False)
     owners: dict[int, list] = {}
     for module in student.modules():
@@ -166,11 +178,15 @@ def _bit1_student(student, parent: Parent, target: dict, device) -> dict:
             if p is not None:
                 owners.setdefault(id(p), []).append((module, pname))
     params = dict(student.named_parameters(remove_duplicate=False))
-    deltas = {}
+    deltas: dict[str, _Bit1] = {}
+    shared: dict[int, _Bit1] = {}  # by parameter, for names tied to one
     for name in sorted(target):
         path, info = target[name]
         p = params.get(name)
         if len(info.shape) < 2 or info.dtype not in FLOAT_DTYPES or p is None:
+            continue
+        if id(p) in shared:
+            deltas[name] = shared[id(p)]
             continue
         old, new = parent.bits(name), bits(path, info)
         if np.array_equal(old, new):
@@ -184,10 +200,10 @@ def _bit1_student(student, parent: Parent, target: dict, device) -> dict:
         sign = torch.from_numpy(np.where(delta >= 0, 1, -1).astype(np.int8))
         with torch.no_grad():
             p.copy_(torch.from_numpy(w).reshape(p.shape).to(p.dtype))
-        bit1 = _Bit1(sign.reshape(p.shape).to(device), scale)
+        bit1 = _Bit1(sign.reshape(p.shape).to(device), scale, _TORCH[info.dtype])
         for module, pname in owners[id(p)]:
             torch.nn.utils.parametrize.register_parametrization(module, pname, bit1)
-        deltas[name] = bit1
+        deltas[name] = shared[id(p)] = bit1
     return deltas
 
 
@@ -223,9 +239,8 @@ def calibrate_bit1(
         before = mean_kl(teacher, student, encoded, pad, batch_size)
         after, scales = before, initial
         if deltas and steps > 0:
-            opt = torch.optim.Adam(
-                [d.log_factor for d in deltas.values()], lr=learning_rate
-            )
+            unique = {id(d): d for d in deltas.values()}.values()
+            opt = torch.optim.Adam([d.log_factor for d in unique], lr=learning_rate)
             order = random.Random(seed)
             for _ in range(steps):
                 sample = order.sample(encoded, min(batch_size, len(encoded)))
