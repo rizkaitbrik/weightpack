@@ -125,7 +125,10 @@ func (e *engine) command(base []string, modelDir string, port int) *exec.Cmd {
 		// Lets wpkd load and unload adapters while vLLM runs.
 		cmd.Env = append(cmd.Env, "VLLM_ALLOW_RUNTIME_LORA_UPDATING=True")
 		if e.deltas {
-			cmd.Env = append(cmd.Env, "WEIGHTPACK_DELTA_SLOTS=1")
+			// vLLM's compile cache does not know the plugin's patches, so an
+			// engine with delta slots compiles afresh (weightpack-vllm sets
+			// this too).
+			cmd.Env = append(cmd.Env, "WEIGHTPACK_DELTA_SLOTS=1", "VLLM_DISABLE_COMPILE_CACHE=1")
 		}
 	}
 	setProcAttr(cmd)

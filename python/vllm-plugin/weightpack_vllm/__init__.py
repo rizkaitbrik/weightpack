@@ -26,6 +26,12 @@ def register() -> None:
     global _registered
     if _registered or os.environ.get("WEIGHTPACK_DISABLE") == "1":
         return
+    if os.environ.get("WEIGHTPACK_DELTA_SLOTS") == "1":
+        # vLLM's compile cache does not know these patches: a graph cached
+        # without them would serve every fine-tune as the base, and one
+        # cached with them refers to another process's buffers. So an engine
+        # with delta slots compiles afresh and caches nothing.
+        os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
     try:
         from . import patches
 

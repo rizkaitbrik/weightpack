@@ -143,6 +143,8 @@ def post(url: str, body: dict) -> dict:
 
 def serve(vllm: str, base: Path, log: Path, plugin: bool):
     env = {**os.environ, "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "True"}
+    # Neither run reuses the other's compiled graphs (see weightpack_vllm).
+    env["VLLM_DISABLE_COMPILE_CACHE"] = "1"
     if plugin:
         env["WEIGHTPACK_DELTA_SLOTS"] = "1"
     else:
@@ -234,6 +236,22 @@ def main() -> None:
                         f"http://127.0.0.1:{PORT}/v1/load_lora_adapter",
                         {"lora_name": d.name, "lora_path": str(d)},
                     )
+                # Each fine-tune answers differently from the base: the deltas
+                # are applied, not a graph compiled without them.
+                replies = {}
+                for m in ["base"] + [d.name for d in fts]:
+                    body = {
+                        "model": m,
+                        "prompt": list(range(1000, 1032)),
+                        "max_tokens": 16,
+                        "temperature": 0,
+                    }
+                    out = post(f"http://127.0.0.1:{PORT}/v1/completions", body)
+                    replies[m] = out["choices"][0]["text"]
+                same = [
+                    m for m in replies if m != "base" and replies[m] == replies["base"]
+                ]
+                print(f"fine-tunes answering as the base: {same or 'none'}", flush=True)
                 runs += [
                     ("one fine-tune", ["ft0"]),
                     ("four fine-tunes", [d.name for d in fts]),
