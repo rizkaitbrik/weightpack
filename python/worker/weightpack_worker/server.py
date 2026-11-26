@@ -63,7 +63,7 @@ class Worker(worker_pb2_grpc.WorkerServicer):
         base = [b.path for b in request.base]
         parents = [[b.path for b in layer.blobs] for layer in request.parents]
         targets = list(request.target_files)
-        relative_error = 0.0
+        relative_error = before = after = 0.0
         try:
             if request.codec == worker_pb2.CODEC_XOR:
                 encoded, unchanged = encode_xor(base, parents, targets, out_dir)
@@ -76,9 +76,20 @@ class Worker(worker_pb2_grpc.WorkerServicer):
                     out_dir,
                     request.density or 0.1,
                     request.reconstruct_dir or None,
+                    request.calibration_steps,
+                    request.chat_template or None,
                 )
                 encoded, unchanged = res.tensors, res.unchanged
                 relative_error = res.relative_error
+                if res.calibration is not None:
+                    before = res.calibration.loss_before
+                    after = res.calibration.loss_after
+        except ImportError as exc:  # calibration loads torch on first use
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"bit1 calibration needs torch and transformers "
+                f"(pip install 'weightpack-worker[serve]'), or calibrate=0: {exc}",
+            )
         except (ValueError, OSError, KeyError) as exc:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
         return worker_pb2.EncodeLayerResponse(
@@ -87,6 +98,8 @@ class Worker(worker_pb2_grpc.WorkerServicer):
             ],
             unchanged=unchanged,
             relative_error=relative_error,
+            calibration_loss_before=before,
+            calibration_loss_after=after,
         )
 
     def Evaluate(self, request, context):  # noqa: N802

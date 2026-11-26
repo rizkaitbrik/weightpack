@@ -144,3 +144,28 @@ def test_lossy_encode_and_squash_over_grpc(stub, tmp_path):
             timeout=5,
         )
     assert err.value.code() == grpc.StatusCode.UNIMPLEMENTED
+
+
+def test_calibration_needs_a_model(stub, tmp_path):
+    """bit1 calibration loads the fine-tune as a model: from weights alone,
+    or on a worker without torch, the encode fails as a precondition."""
+    s, _ = stub
+    w = np.ones((8, 4), np.float32)
+    write_tensor(tmp_path / "base.safetensors", "m.weight", "F32", w)
+    src = tmp_path / "src"
+    src.mkdir()
+    write_tensor(src / "model.safetensors", "m.weight", "F32", w + 0.1)
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(grpc.RpcError) as err:
+        s.EncodeLayer(
+            worker_pb2.EncodeLayerRequest(
+                codec=worker_pb2.CODEC_BIT1,
+                base=[worker_pb2.Blob(path=str(tmp_path / "base.safetensors"))],
+                target_files=[str(src / "model.safetensors")],
+                out_dir=str(out),
+                calibration_steps=10,
+            ),
+            timeout=60,
+        )
+    assert err.value.code() == grpc.StatusCode.FAILED_PRECONDITION, err.value

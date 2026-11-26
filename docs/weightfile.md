@@ -58,14 +58,14 @@ Without `codec=`, or with `codec=lora`, the source is an adapter and is stored a
 | `codec=` | Kind           | Lossless | Needs                            |
 | -------- | -------------- | -------- | -------------------------------- |
 | `xor`    | `delta.xor`    | Yes      | —                                |
-| `bit1`   | `delta.bit1`   | No       | `max_drop=<n>`; `eval=` optional |
+| `bit1`   | `delta.bit1`   | No       | `max_drop=<n>`; `eval=` and `calibrate=<steps>` optional |
 | `sparse` | `delta.sparse` | No       | `max_drop=<n>`; `eval=` and `density=<n>` optional |
 
-`eval=` names the suite the build gates on; without it the build gates on the fine-tune's own replies to general prompts. `max_drop` is in points of next-token accuracy. `density` (in (0, 1], default 0.1) is the fraction of each matrix's delta that `sparse` keeps. `eval`, `max_drop` and `density` are rejected where they do not apply.
+`eval=` names the suite the build gates on; without it the build gates on the fine-tune's own replies to general prompts. `max_drop` is in points of next-token accuracy. `density` (in (0, 1], default 0.1) is the fraction of each matrix's delta that `sparse` keeps. `calibrate` (default 200, `0` for none) is how many steps `bit1` spends calibrating its scales. `eval`, `max_drop`, `density` and `calibrate` are rejected where they do not apply.
 
 `codec=xor` is supported: the source is a directory of safetensors weights with exactly the base's tensor names, dtypes and shapes, and the layer must sit on the base or on other `xor` layers (LoRA layers can go on top of it). The image keeps its parent's tokenizer and `config.json`, so the build refuses a fine-tune whose tokenizer or config differs from them in anything but metadata (`_name_or_path`, `transformers_version`, `torch_dtype` and the like): a changed `rope_theta`, say, would otherwise be silently dropped. Build such a fine-tune as a base of its own (`FROM`). The build needs `wpkd`'s build worker. `wpk import --parent <image | dir> [--id name] -t name <dir>` is shorthand for `FROM <parent>` plus one such layer.
 
-`codec=bit1` and `codec=sparse` take the same sources, under the same rules, and store the fine-tune lossily: `bit1` keeps one sign bit per weight plus one scale per matrix (1/16 of BF16), and `sparse` keeps the largest `density` fraction of each matrix's change (7% of a BF16 fine-tune at the default 0.1, measured). They need torch and transformers in the build worker (the `serve` extra). The build then:
+`codec=bit1` and `codec=sparse` take the same sources, under the same rules, and store the fine-tune lossily: `bit1` keeps one sign bit per weight plus one scale per matrix (1/16 of BF16), the scales calibrated so the model's next-token distributions match the fine-tune's, and `sparse` keeps the largest `density` fraction of each matrix's change (7% of a BF16 fine-tune at the default 0.1, measured). They need torch and transformers in the build worker (the `serve` extra). The build then:
 
 1. encodes the delta and writes the model the layer gives back;
 2. scores the fine-tune and that model on the eval suite by next-token accuracy (the percent of the suite's learnt tokens each model predicts);

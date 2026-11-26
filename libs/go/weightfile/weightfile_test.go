@@ -385,3 +385,26 @@ func TestDensity(t *testing.T) {
 		}
 	}
 }
+
+func TestCalibrate(t *testing.T) {
+	f := mustParse(t, "FROM ./b\nLAYER x ./x codec=bit1 max_drop=1\nLAYER y ./y codec=bit1 calibrate=0 max_drop=1\nLAYER z ./z codec=sparse max_drop=1\n")
+	if c := f.Layers[1].Calibrate; f.Layers[0].Calibrate != nil || c == nil || *c != 0 {
+		t.Errorf("calibrate %v %v", f.Layers[0].Calibrate, c)
+	}
+	cfg, err := f.Config()
+	if err != nil || cfg.Layers[1].Fidelity.CalibrationSteps != DefaultCalibrate ||
+		cfg.Layers[2].Fidelity.CalibrationSteps != 0 || cfg.Layers[3].Fidelity.CalibrationSteps != 0 {
+		t.Errorf("config: %v %+v", err, cfg.Layers)
+	}
+	for _, bad := range []string{
+		"LAYER x ./x codec=sparse calibrate=10 max_drop=1",
+		"LAYER x ./x codec=xor calibrate=10",
+		"LAYER x ./x codec=bit1 calibrate=-1 max_drop=1",
+		"LAYER x ./x codec=bit1 calibrate=1.5 max_drop=1",
+		"LAYER x ./x codec=bit1 calibrate=1000000 max_drop=1",
+	} {
+		if _, err := Parse(strings.NewReader("FROM ./b\n" + bad + "\n")); err == nil {
+			t.Errorf("%q parsed", bad)
+		}
+	}
+}

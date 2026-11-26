@@ -192,6 +192,9 @@ func layerDetail(l spec.Layer, arch spec.Arch) string {
 		if f.Density > 0 {
 			codec += fmt.Sprintf(" %g%%", 100*f.Density)
 		}
+		if f.CalibrationSteps > 0 {
+			codec += " calibrated"
+		}
 		return fmt.Sprintf("%s, drop %.2f points on %s (max %g)", codec, *f.MeasuredDrop, orDash(f.Eval), f.MaxDrop)
 	}
 	return ""

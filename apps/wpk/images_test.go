@@ -122,6 +122,7 @@ func TestLayerDetailOfDeltas(t *testing.T) {
 	}{
 		{spec.Layer{Kind: spec.KindDeltaXOR}, "exact"},
 		{spec.Layer{Kind: spec.KindDeltaBit1, Fidelity: &spec.Fidelity{Codec: "bit1", Eval: "self", MaxDrop: 1, MeasuredDrop: &drop}}, "bit1, drop 0.42 points on self (max 1)"},
+		{spec.Layer{Kind: spec.KindDeltaBit1, Fidelity: &spec.Fidelity{Codec: "bit1", CalibrationSteps: 200, Eval: "self", MaxDrop: 1, MeasuredDrop: &drop}}, "bit1 calibrated, drop 0.42 points on self (max 1)"},
 		{spec.Layer{Kind: spec.KindDeltaSparse, Fidelity: &spec.Fidelity{Codec: "sparse", Density: 0.1, Eval: "finance", MaxDrop: 2, MeasuredDrop: &drop}}, "sparse 10%, drop 0.42 points on finance (max 2)"},
 		{spec.Layer{Kind: spec.KindDeltaBit1}, "lossy, no measured drop"},
 	} {

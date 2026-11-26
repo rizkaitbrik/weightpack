@@ -69,10 +69,18 @@ type Layer struct {
 	Eval    string   // eval suite for the fidelity gate; "" = the fine-tune's own replies
 	MaxDrop *float64 // maximum eval drop a lossy import may cost, in points
 	Density *float64 // codec=sparse: the fraction of each matrix's delta kept
+	// Calibrate is codec=bit1's steps of scale calibration; 0 turns it off.
+	Calibrate *int
 }
 
 // DefaultDensity is codec=sparse's density without density=.
 const DefaultDensity = 0.1
+
+// DefaultCalibrate is codec=bit1's calibration steps without calibrate=.
+const DefaultCalibrate = 200
+
+// maxCalibrate bounds calibrate=: a few hundred steps is what it takes.
+const maxCalibrate = 100000
 
 // Mix is a MIX block.
 type Mix struct {
@@ -273,10 +281,11 @@ func (p *parser) claimID(line int, id string) bool {
 	return true
 }
 
-// weightLayer parses "<id> <source> [codec=] [eval=] [max_drop=] [density=]".
+// weightLayer parses "<id> <source> [codec=] [eval=] [max_drop=] [density=]
+// [calibrate=]".
 func (p *parser) weightLayer(l rawLine, args []string, instr string) (Layer, bool) {
 	if len(args) < 2 {
-		p.errorf(l.no, "usage: %s <id> <source> [codec=lora|xor|bit1|sparse] [eval=<suite>] [max_drop=<n>] [density=<n>]", instr)
+		p.errorf(l.no, "usage: %s <id> <source> [codec=lora|xor|bit1|sparse] [eval=<suite>] [max_drop=<n>] [density=<n>] [calibrate=<steps>]", instr)
 		return Layer{}, false
 	}
 	ok := p.claimID(l.no, args[0])
@@ -292,7 +301,7 @@ func (p *parser) weightLayer(l rawLine, args []string, instr string) (Layer, boo
 	}
 	layer.Source = src
 
-	params, err := parseParams(args[2:], "codec", "eval", "max_drop", "density")
+	params, err := parseParams(args[2:], "codec", "eval", "max_drop", "density", "calibrate")
 	if err != nil {
 		p.errorf(l.no, "%s %s: %v", instr, args[0], err)
 		return layer, false
@@ -325,6 +334,19 @@ func (p *parser) weightLayer(l rawLine, args []string, instr string) (Layer, boo
 			ok = false
 		default:
 			layer.Density = &d
+		}
+	}
+	if v, set := params["calibrate"]; set {
+		n, err := strconv.Atoi(v)
+		switch {
+		case layer.Codec != CodecBit1:
+			p.errorf(l.no, "%s %s: calibrate applies only to codec=bit1", instr, args[0])
+			ok = false
+		case err != nil || n < 0 || n > maxCalibrate:
+			p.errorf(l.no, "%s %s: calibrate must be a whole number of steps from 0 to %d, got %q", instr, args[0], maxCalibrate, v)
+			ok = false
+		default:
+			layer.Calibrate = &n
 		}
 	}
 	lossy := layer.Codec == CodecBit1 || layer.Codec == CodecSparse

@@ -169,8 +169,16 @@ type EncodeLayerRequest struct {
 	// back into (the parent plus each decoded delta, beside the fine-tune's
 	// config and tokenizer), so it can be evaluated against the fine-tune.
 	ReconstructDir string `protobuf:"bytes,7,opt,name=reconstruct_dir,json=reconstructDir,proto3" json:"reconstruct_dir,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// CODEC_BIT1: steps of scale calibration, which distils the fine-tune into
+	// the per-matrix scales on its own replies to general prompts (see
+	// weightpack_worker/calibrate.py); 0 keeps each mean absolute delta. The
+	// target files' directory must then be a model directory.
+	CalibrationSteps int32 `protobuf:"varint,8,opt,name=calibration_steps,json=calibrationSteps,proto3" json:"calibration_steps,omitempty"`
+	// A Jinja template replacing the tokenizer's chat template, for the
+	// calibration prompts.
+	ChatTemplate  string `protobuf:"bytes,9,opt,name=chat_template,json=chatTemplate,proto3" json:"chat_template,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *EncodeLayerRequest) Reset() {
@@ -252,6 +260,20 @@ func (x *EncodeLayerRequest) GetReconstructDir() string {
 	return ""
 }
 
+func (x *EncodeLayerRequest) GetCalibrationSteps() int32 {
+	if x != nil {
+		return x.CalibrationSteps
+	}
+	return 0
+}
+
+func (x *EncodeLayerRequest) GetChatTemplate() string {
+	if x != nil {
+		return x.ChatTemplate
+	}
+	return ""
+}
+
 type EncodedTensor struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -312,8 +334,14 @@ type EncodeLayerResponse struct {
 	// A lossy codec: ||delta - decoded|| / ||delta|| over every changed
 	// tensor, how much of the fine-tune's change the layer misses.
 	RelativeError float64 `protobuf:"fixed64,3,opt,name=relative_error,json=relativeError,proto3" json:"relative_error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// CODEC_BIT1 with calibration: the mean KL divergence per reply token
+	// from the fine-tune to the layer's model on the calibration replies,
+	// with the mean absolute deltas and with the calibrated scales. They are
+	// equal when calibration did not help and the layer kept the former.
+	CalibrationLossBefore float64 `protobuf:"fixed64,4,opt,name=calibration_loss_before,json=calibrationLossBefore,proto3" json:"calibration_loss_before,omitempty"`
+	CalibrationLossAfter  float64 `protobuf:"fixed64,5,opt,name=calibration_loss_after,json=calibrationLossAfter,proto3" json:"calibration_loss_after,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *EncodeLayerResponse) Reset() {
@@ -363,6 +391,20 @@ func (x *EncodeLayerResponse) GetUnchanged() int64 {
 func (x *EncodeLayerResponse) GetRelativeError() float64 {
 	if x != nil {
 		return x.RelativeError
+	}
+	return 0
+}
+
+func (x *EncodeLayerResponse) GetCalibrationLossBefore() float64 {
+	if x != nil {
+		return x.CalibrationLossBefore
+	}
+	return 0
+}
+
+func (x *EncodeLayerResponse) GetCalibrationLossAfter() float64 {
+	if x != nil {
+		return x.CalibrationLossAfter
 	}
 	return 0
 }
@@ -1316,7 +1358,7 @@ const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"!weightpack/worker/v1/worker.proto\x12\x14weightpack.worker.v1\"L\n" +
 	"\bXORLayer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
-	"\x05blobs\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\xb0\x02\n" +
+	"\x05blobs\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\x82\x03\n" +
 	"\x12EncodeLayerRequest\x121\n" +
 	"\x05codec\x18\x01 \x01(\x0e2\x1b.weightpack.worker.v1.CodecR\x05codec\x12.\n" +
 	"\x04base\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x04base\x128\n" +
@@ -1324,14 +1366,18 @@ const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"\ftarget_files\x18\x04 \x03(\tR\vtargetFiles\x12\x17\n" +
 	"\aout_dir\x18\x05 \x01(\tR\x06outDir\x12\x18\n" +
 	"\adensity\x18\x06 \x01(\x01R\adensity\x12'\n" +
-	"\x0freconstruct_dir\x18\a \x01(\tR\x0ereconstructDir\"7\n" +
+	"\x0freconstruct_dir\x18\a \x01(\tR\x0ereconstructDir\x12+\n" +
+	"\x11calibration_steps\x18\b \x01(\x05R\x10calibrationSteps\x12#\n" +
+	"\rchat_template\x18\t \x01(\tR\fchatTemplate\"7\n" +
 	"\rEncodedTensor\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
-	"\x04file\x18\x02 \x01(\tR\x04file\"\x99\x01\n" +
+	"\x04file\x18\x02 \x01(\tR\x04file\"\x87\x02\n" +
 	"\x13EncodeLayerResponse\x12=\n" +
 	"\atensors\x18\x01 \x03(\v2#.weightpack.worker.v1.EncodedTensorR\atensors\x12\x1c\n" +
 	"\tunchanged\x18\x02 \x01(\x03R\tunchanged\x12%\n" +
-	"\x0erelative_error\x18\x03 \x01(\x01R\rrelativeError\"|\n" +
+	"\x0erelative_error\x18\x03 \x01(\x01R\rrelativeError\x126\n" +
+	"\x17calibration_loss_before\x18\x04 \x01(\x01R\x15calibrationLossBefore\x124\n" +
+	"\x16calibration_loss_after\x18\x05 \x01(\x01R\x14calibrationLossAfter\"|\n" +
 	"\x0fEvaluateRequest\x12\x16\n" +
 	"\x06models\x18\x01 \x03(\tR\x06models\x12\x14\n" +
 	"\x05suite\x18\x02 \x01(\tR\x05suite\x12\x16\n" +

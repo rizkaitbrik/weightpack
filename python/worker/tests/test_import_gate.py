@@ -92,10 +92,14 @@ def test_lossy_imports_stay_within_max_drop(models, tmp_path):  # noqa: F811
     )
 
     suite = tmp_path / "gsm8k.jsonl"
+    # bit1 calibrates its scales by default; the -raw layers keep the mean
+    # absolute deltas, for comparison.
     builds = {
         "bit1": f"codec=bit1 eval={suite} max_drop={MAX_DROP}",
+        "bit1-raw": f"codec=bit1 calibrate=0 eval={suite} max_drop={MAX_DROP}",
         "sparse": f"codec=sparse eval={suite} max_drop={MAX_DROP}",
         "bit1-self": f"codec=bit1 max_drop={MAX_DROP}",
+        "bit1-raw-self": f"codec=bit1 calibrate=0 max_drop={MAX_DROP}",
         "sparse-self": f"codec=sparse max_drop={MAX_DROP}",
         "xor": "codec=xor",
     }
@@ -132,18 +136,18 @@ def test_lossy_imports_stay_within_max_drop(models, tmp_path):  # noqa: F811
     mb = base_size / 1e6
     print(f"\nfull fine-tune of {STEPS} steps; the base's weights are {mb:.0f} MB")
     head = ("layer", "size", "of base", "source", "layer", "drop")
-    print("{:>10} {:>10} {:>8} {:>7} {:>7} {:>6}  suite".format(*head))
+    print("{:>14} {:>10} {:>8} {:>7} {:>7} {:>6}  suite".format(*head))
     for name, res in results.items():
         if res is None:
-            print(f"{name:>10}  build failed")
+            print(f"{name:>14}  build failed")
             continue
         fid, size = res
         if fid is None:
-            print(f"{name:>10} {size / 1e6:8.1f}MB {size / base_size:8.1%}  (exact)")
+            print(f"{name:>14} {size / 1e6:8.1f}MB {size / base_size:8.1%}  (exact)")
             continue
         src, got, drop = fid["source_score"], fid["score"], fid["measured_drop"]
         print(
-            f"{name:>10} {size / 1e6:8.1f}MB {size / base_size:8.1%}"
+            f"{name:>14} {size / 1e6:8.1f}MB {size / base_size:8.1%}"
             f" {src:7.2f} {got:7.2f} {drop:6.2f}  {fid['eval']}"
         )
     assert results["bit1"] is not None, "the bit1 import failed its gate"

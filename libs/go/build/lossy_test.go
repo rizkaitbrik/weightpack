@@ -63,6 +63,9 @@ func (w *lossyWorker) EncodeLayer(_ context.Context, req *workerpb.EncodeLayerRe
 	}
 	sort.Strings(names)
 	resp := &workerpb.EncodeLayerResponse{RelativeError: 0.3}
+	if req.CalibrationSteps > 0 {
+		resp.CalibrationLossBefore, resp.CalibrationLossAfter = 0.02, 0.01
+	}
 	for i, n := range names {
 		if bytes.Equal(target[n], parent[n]) {
 			resp.Unchanged++
@@ -161,7 +164,7 @@ func TestLossyLayer(t *testing.T) {
 	}
 	fin := c.Layers[1]
 	fid := fin.Fidelity
-	if fin.Kind != spec.KindDeltaBit1 || fid == nil || fid.Codec != "bit1" || fid.Source != "./finance" ||
+	if fin.Kind != spec.KindDeltaBit1 || fid == nil || fid.Codec != "bit1" || fid.Source != "./finance" || fid.CalibrationSteps != 200 ||
 		!strings.HasPrefix(fid.SourceDigest, "sha256:") || fid.Eval != "self" || fid.EvalDigest != "" ||
 		*fid.SourceScore != 90 || *fid.Score != 89.5 || *fid.MeasuredDrop != 0.5 || fid.MaxDrop != 1 {
 		t.Fatalf("layer = %+v, fidelity %+v", fin, fid)
@@ -178,18 +181,26 @@ func TestLossyLayer(t *testing.T) {
 	if blobs != 4 { // the fine-tune changes q and v in both blocks
 		t.Errorf("%d delta blobs", blobs)
 	}
-	if w.req.Codec != workerpb.Codec_CODEC_BIT1 || w.req.ReconstructDir == "" || w.evalReq.Suite != "" ||
+	if w.req.Codec != workerpb.Codec_CODEC_BIT1 || w.req.ReconstructDir == "" || w.req.CalibrationSteps != 200 || w.evalReq.Suite != "" ||
 		!slices.Equal(w.evalReq.Models, []string{filepath.Dir(w.req.TargetFiles[0]), w.req.ReconstructDir}) {
 		t.Errorf("encode %+v, eval %+v", w.req, w.evalReq)
 	}
-	if !slices.ContainsFunc(f.events, func(e api.Event) bool { return strings.Contains(e.Message, "a drop of 0.50 points (max_drop 1)") }) {
-		t.Errorf("events = %+v", f.events)
+	for _, want := range []string{"a drop of 0.50 points (max_drop 1)", "calibrated the scales over 200 steps: KL divergence per reply token from the fine-tune 0.02 with mean absolute deltas, 0.01 calibrated"} {
+		if !slices.ContainsFunc(f.events, func(e api.Event) bool { return strings.Contains(e.Message, want) }) {
+			t.Errorf("no %q in events %+v", want, f.events)
+		}
 	}
 
 	// A rebuild takes the deltas and the eval from the cache.
 	again, err := f.buildLossy(t, "Weightfile", body, w)
 	if err != nil || w.encodes != 1 || w.evals != 1 || again.Manifest.Digest != res.Manifest.Digest {
 		t.Errorf("rebuild: %v, %d encodes, %d evals", err, w.encodes, w.evals)
+	}
+	// calibrate=0 is another layer: the worker encodes again, uncalibrated.
+	raw, err := f.buildLossy(t, "Weightfile", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n", w)
+	if err != nil || w.encodes != 2 || w.req.CalibrationSteps != 0 || raw.Config.Layers[1].Fidelity.CalibrationSteps != 0 ||
+		slices.ContainsFunc(f.events, func(e api.Event) bool { return strings.Contains(e.Message, "calibrated") }) {
+		t.Errorf("calibrate=0: %v, %d encodes, %+v", err, w.encodes, w.req)
 	}
 	// A tighter gate fails on the cached drop.
 	_, err = f.buildLossy(t, "Weightfile", "FROM ./base\nLAYER finance ./finance codec=bit1 max_drop=0.2\n", w)

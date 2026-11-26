@@ -29,7 +29,7 @@ class XORLayer(_message.Message):
     def __init__(self, id: _Optional[str] = ..., blobs: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ...) -> None: ...
 
 class EncodeLayerRequest(_message.Message):
-    __slots__ = ("codec", "base", "parents", "target_files", "out_dir", "density", "reconstruct_dir")
+    __slots__ = ("codec", "base", "parents", "target_files", "out_dir", "density", "reconstruct_dir", "calibration_steps", "chat_template")
     CODEC_FIELD_NUMBER: _ClassVar[int]
     BASE_FIELD_NUMBER: _ClassVar[int]
     PARENTS_FIELD_NUMBER: _ClassVar[int]
@@ -37,6 +37,8 @@ class EncodeLayerRequest(_message.Message):
     OUT_DIR_FIELD_NUMBER: _ClassVar[int]
     DENSITY_FIELD_NUMBER: _ClassVar[int]
     RECONSTRUCT_DIR_FIELD_NUMBER: _ClassVar[int]
+    CALIBRATION_STEPS_FIELD_NUMBER: _ClassVar[int]
+    CHAT_TEMPLATE_FIELD_NUMBER: _ClassVar[int]
     codec: Codec
     base: _containers.RepeatedCompositeFieldContainer[Blob]
     parents: _containers.RepeatedCompositeFieldContainer[XORLayer]
@@ -44,7 +46,9 @@ class EncodeLayerRequest(_message.Message):
     out_dir: str
     density: float
     reconstruct_dir: str
-    def __init__(self, codec: _Optional[_Union[Codec, str]] = ..., base: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ..., parents: _Optional[_Iterable[_Union[XORLayer, _Mapping]]] = ..., target_files: _Optional[_Iterable[str]] = ..., out_dir: _Optional[str] = ..., density: _Optional[float] = ..., reconstruct_dir: _Optional[str] = ...) -> None: ...
+    calibration_steps: int
+    chat_template: str
+    def __init__(self, codec: _Optional[_Union[Codec, str]] = ..., base: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ..., parents: _Optional[_Iterable[_Union[XORLayer, _Mapping]]] = ..., target_files: _Optional[_Iterable[str]] = ..., out_dir: _Optional[str] = ..., density: _Optional[float] = ..., reconstruct_dir: _Optional[str] = ..., calibration_steps: _Optional[int] = ..., chat_template: _Optional[str] = ...) -> None: ...
 
 class EncodedTensor(_message.Message):
     __slots__ = ("name", "file")
@@ -55,14 +59,18 @@ class EncodedTensor(_message.Message):
     def __init__(self, name: _Optional[str] = ..., file: _Optional[str] = ...) -> None: ...
 
 class EncodeLayerResponse(_message.Message):
-    __slots__ = ("tensors", "unchanged", "relative_error")
+    __slots__ = ("tensors", "unchanged", "relative_error", "calibration_loss_before", "calibration_loss_after")
     TENSORS_FIELD_NUMBER: _ClassVar[int]
     UNCHANGED_FIELD_NUMBER: _ClassVar[int]
     RELATIVE_ERROR_FIELD_NUMBER: _ClassVar[int]
+    CALIBRATION_LOSS_BEFORE_FIELD_NUMBER: _ClassVar[int]
+    CALIBRATION_LOSS_AFTER_FIELD_NUMBER: _ClassVar[int]
     tensors: _containers.RepeatedCompositeFieldContainer[EncodedTensor]
     unchanged: int
     relative_error: float
-    def __init__(self, tensors: _Optional[_Iterable[_Union[EncodedTensor, _Mapping]]] = ..., unchanged: _Optional[int] = ..., relative_error: _Optional[float] = ...) -> None: ...
+    calibration_loss_before: float
+    calibration_loss_after: float
+    def __init__(self, tensors: _Optional[_Iterable[_Union[EncodedTensor, _Mapping]]] = ..., unchanged: _Optional[int] = ..., relative_error: _Optional[float] = ..., calibration_loss_before: _Optional[float] = ..., calibration_loss_after: _Optional[float] = ...) -> None: ...
 
 class EvaluateRequest(_message.Message):
     __slots__ = ("models", "suite", "device", "chat_template")
