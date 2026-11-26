@@ -19,12 +19,18 @@
 //	POST /v1/stop                  StopRequest -> StopResponse
 //	GET  /v1/containers/logs?name=N[&follow=1]  -> the engine's log, as text
 //	GET  /v1/doctor                -> DoctorReport
+//	POST /v1/resolve               ResolveRequest -> ResolveResponse
+//	POST /v1/signatures            AttachRequest -> AttachResponse
+//	POST /v1/verify                VerifyRequest -> VerifyResponse
+//	GET  /v1/trust                 -> TrustPolicy
+//	PUT  /v1/trust                 TrustPolicy -> TrustPolicy
 //
 // Containers answer on wpkd's gateway, a separate TCP listener that speaks
 // the OpenAI API and routes each request by its model field.
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -212,6 +218,120 @@ type TransferResult struct {
 	MovedBytes int64 `json:"moved_bytes"`
 	// Tag is the local tag a pull set, if any.
 	Tag string `json:"tag,omitempty"`
+	// Verified names who signed a pulled image, when the trust policy
+	// asked for a signature.
+	Verified string `json:"verified,omitempty"`
+}
+
+// ResolveRequest asks which manifest a remote reference names.
+type ResolveRequest struct {
+	Ref       string `json:"ref"`
+	PlainHTTP bool   `json:"plain_http,omitempty"`
+}
+
+// ResolveResponse is the manifest a remote reference names.
+type ResolveResponse struct {
+	Ref       string `json:"ref"`
+	Digest    string `json:"digest"`
+	MediaType string `json:"media_type"`
+	Size      int64  `json:"size"`
+}
+
+// AttachRequest asks the daemon to store a Sigstore bundle that signs the
+// manifest Digest in Ref's repository, as cosign does: an OCI referrer of
+// the manifest. wpk makes the bundle, so keys and identity tokens never
+// reach the daemon.
+type AttachRequest struct {
+	Ref       string          `json:"ref"`
+	Digest    string          `json:"digest"`
+	Bundle    json.RawMessage `json:"bundle"`
+	PlainHTTP bool            `json:"plain_http,omitempty"`
+}
+
+// AttachResponse names the stored signature.
+type AttachResponse struct {
+	Ref    string `json:"ref"`
+	Digest string `json:"digest"`
+	// Signature is the digest of the referrer manifest that holds the bundle.
+	Signature string `json:"signature"`
+}
+
+// VerifyRequest asks the daemon to check a remote image's signatures:
+// against Keys and Identities when given, or else against the trust policy.
+type VerifyRequest struct {
+	Ref        string     `json:"ref"`
+	PlainHTTP  bool       `json:"plain_http,omitempty"`
+	Keys       []string   `json:"keys,omitempty"`
+	Identities []Identity `json:"identities,omitempty"`
+}
+
+// VerifyResponse says who signed the image.
+type VerifyResponse struct {
+	Ref    string `json:"ref"`
+	Digest string `json:"digest"`
+	// Signer is who made the signature that satisfied the check, or "" when
+	// the policy's rule accepts unsigned images.
+	Signer string `json:"signer,omitempty"`
+	// Rule is the scope of the policy rule that applied, if the policy did.
+	Rule string `json:"rule,omitempty"`
+	// Action is what that rule does with the image.
+	Action string `json:"action,omitempty"`
+	// Signatures counts the Sigstore signatures attached to the image.
+	Signatures int `json:"signatures"`
+}
+
+// Trust rule actions.
+const (
+	TrustSigned = "signed" // pull only images signed by one of the rule's keys or identities
+	TrustAccept = "accept" // pull images whether signed or not
+	TrustReject = "reject" // pull nothing
+)
+
+// TrustPolicy says which images wpkd pulls. For each pull the rule whose
+// scope names the image most closely applies; when no rule matches, and
+// with no policy at all, wpkd pulls every image.
+type TrustPolicy struct {
+	Rules []TrustRule `json:"rules"`
+}
+
+// TrustRule is the policy for the images under one scope.
+type TrustRule struct {
+	// Scope is a registry host ("ghcr.io"), a repository or a prefix of
+	// one at a path boundary ("ghcr.io/acme", "ghcr.io/acme/assistant"), or
+	// "*" for every image.
+	Scope string `json:"scope"`
+	// Action is TrustSigned, TrustAccept or TrustReject.
+	Action string `json:"action"`
+	// Keys are PEM public keys (as cosign generate-key-pair or wpk keygen
+	// write them). A signature by any one of them satisfies the rule.
+	Keys []string `json:"keys,omitempty"`
+	// Identities are keyless signers. A Sigstore signature whose Fulcio
+	// certificate matches any one of them satisfies the rule.
+	Identities []Identity `json:"identities,omitempty"`
+}
+
+// Identity is a keyless signer: who signed (the certificate's subject, an
+// email or a CI workflow URI) and who vouched for it (the OIDC issuer).
+// Each takes an exact value or a regular expression, which must match the
+// whole value.
+type Identity struct {
+	Issuer        string `json:"issuer,omitempty"`
+	IssuerRegexp  string `json:"issuer_regexp,omitempty"`
+	Subject       string `json:"subject,omitempty"`
+	SubjectRegexp string `json:"subject_regexp,omitempty"`
+}
+
+// String prints the identity as wpk trust shows it: a regular expression
+// is marked with a leading ~.
+func (id Identity) String() string {
+	subject, issuer := id.Subject, id.Issuer
+	if subject == "" {
+		subject = "~" + id.SubjectRegexp
+	}
+	if issuer == "" {
+		issuer = "~" + id.IssuerRegexp
+	}
+	return subject + " (issuer " + issuer + ")"
 }
 
 // BuildResult describes a finished build or squash: the image it stored.

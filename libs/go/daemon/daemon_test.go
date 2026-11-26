@@ -14,12 +14,14 @@ import (
 	"testing"
 
 	ggcr "github.com/google/go-containerregistry/pkg/registry"
+	"github.com/opencontainers/go-digest"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build/buildtest"
 	"github.com/rizkaitbrik/weightpack/libs/go/serving"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
+	"github.com/rizkaitbrik/weightpack/libs/go/trust"
 )
 
 // serveUnix starts the handler on a Unix socket and returns a client for it.
@@ -305,7 +307,7 @@ func TestDoctor(t *testing.T) {
 	for name, want := range map[string]string{
 		"wpkd": api.CheckOK, "build worker": api.CheckFail, "device": api.CheckOK,
 		"reference engine": api.CheckFail, "vllm": api.CheckSkip, "gateway": api.CheckOK,
-		"store": "", "hugging face": api.CheckSkip,
+		"store": "", "trust policy": api.CheckOK, "hugging face": api.CheckSkip,
 	} {
 		ch, ok := got[name]
 		if !ok {
@@ -321,5 +323,87 @@ func TestDoctor(t *testing.T) {
 	}
 	if !strings.Contains(got["device"].Detail, "cpu (set with wpkd --device)") {
 		t.Errorf("device: %s", got["device"].Detail)
+	}
+
+	// A policy file wpkd cannot read fails every pull, so doctor says so.
+	_ = os.WriteFile(filepath.Join(s.Root(), "policy.json"), []byte(`{"rules": [{"scope": "ghcr.io", "action": "maybe"}]}`), 0o644)
+	report, err = c.Doctor(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range report.Checks {
+		if ch.Name == "trust policy" && (ch.Status != api.CheckFail || !strings.Contains(ch.Detail, "action must be")) {
+			t.Errorf("broken policy: %+v", ch)
+		}
+	}
+}
+
+func TestTrustPolicy(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	reg := httptest.NewServer(ggcr.New(ggcr.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(reg.Close)
+	host := strings.TrimPrefix(reg.URL, "http://")
+
+	dir := t.TempDir()
+	buildtest.Project(t, dir)
+	a, _ := store.Open(filepath.Join(dir, "a"))
+	b, _ := store.Open(filepath.Join(dir, "b"))
+	ca, cb := serveUnix(t, a), serveUnix(t, b)
+	ctx := context.Background()
+
+	baseWF := filepath.Join(dir, "Base.Weightfile")
+	_ = os.WriteFile(baseWF, []byte("FROM ./base\n"), 0o644)
+	ref := host + "/team/base:v1"
+	if _, err := ca.Build(ctx, api.BuildRequest{Weightfile: baseWF, Tags: []string{ref}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	pushed, err := ca.Push(ctx, api.PushRequest{Ref: ref}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	priv, pub, err := trust.GenerateKeyPair(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cb.SetTrust(ctx, api.TrustPolicy{Rules: []api.TrustRule{{Scope: host, Action: api.TrustSigned}}}); err == nil || !strings.Contains(err.Error(), "at least one trusted key") {
+		t.Errorf("a signed rule without signers: %v", err)
+	}
+	stored, err := cb.SetTrust(ctx, api.TrustPolicy{Rules: []api.TrustRule{{Scope: host + "/team/", Action: api.TrustSigned, Keys: []string{string(pub)}}}})
+	if err != nil || stored.Rules[0].Scope != host+"/team" {
+		t.Fatalf("set trust = %+v, %v", stored, err)
+	}
+	if got, err := cb.Trust(ctx); err != nil || len(got.Rules) != 1 {
+		t.Errorf("trust = %+v, %v", got, err)
+	}
+
+	// A build FROM the unsigned image is refused before any tensor moves.
+	wf := filepath.Join(dir, "Child.Weightfile")
+	_ = os.WriteFile(wf, []byte("FROM "+ref+"\nLAYER french ./adapters/french\n"), 0o644)
+	if _, err := cb.Build(ctx, api.BuildRequest{Weightfile: wf, Tags: []string{"child"}}, nil); err == nil || !strings.Contains(err.Error(), "no Sigstore signature") {
+		t.Fatalf("build from an unsigned image: %v", err)
+	}
+	if images, _ := cb.Images(ctx); len(images) != 0 {
+		t.Errorf("the refused pull stored %+v", images)
+	}
+
+	signer, err := trust.NewKeySigner(priv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := signer.Sign(ctx, digest.FromString("another manifest"))
+	if _, err := cb.Attach(ctx, api.AttachRequest{Ref: ref, Digest: pushed.Digest, Bundle: other}); err == nil || !strings.Contains(err.Error(), "does not sign") {
+		t.Errorf("attach of a bundle for another manifest: %v", err)
+	}
+	bundle, _ := signer.Sign(ctx, digest.Digest(pushed.Digest))
+	if _, err := cb.Attach(ctx, api.AttachRequest{Ref: ref, Digest: pushed.Digest, Bundle: bundle}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cb.Build(ctx, api.BuildRequest{Weightfile: wf, Tags: []string{"child"}}, nil); err != nil {
+		t.Fatalf("build from a signed image: %v", err)
+	}
+	res, err := cb.Verify(ctx, api.VerifyRequest{Ref: ref})
+	if err != nil || res.Rule != host+"/team" || res.Signatures != 1 || !strings.HasPrefix(res.Signer, "key SHA256:") {
+		t.Errorf("verify = %+v, %v", res, err)
 	}
 }

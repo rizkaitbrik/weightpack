@@ -48,6 +48,7 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `libs/go/safetensors` | `safetensors` | Go | safetensors header reader and canonical writer; never decodes values |
 | `libs/go/reference` | `reference` | Go | OCI image reference parsing |
 | `libs/go/registry` | `registry` | Go | Push and pull to OCI registries; pulls are checked before any tensor is fetched |
+| `libs/go/trust` | `trust` | Go | Sigstore signing and verification in cosign's format, and the trust policy pulls obey |
 | `libs/go/api` | `api` | Go | `wpk` to `wpkd` wire types and client |
 | `libs/go/daemon` | `daemon` | Go | `wpkd`'s HTTP API over the store |
 | `libs/go/entropy` | `entropy` | Go | Entropy coders named by media-type suffixes (`+zstd`) |
@@ -77,7 +78,7 @@ Container images (`ghcr.io/rizkaitbrik/weightpack:cpu` and `:cuda`, from `docker
 
 To work on it:
 
-Requirements: Node.js 22+, Go 1.24+, Python 3.10+ and [uv](https://docs.astral.sh/uv/).
+Requirements: Node.js 22+, Go 1.27+, Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/rizkaitbrik/weightpack
@@ -109,6 +110,26 @@ npx nx run-many -t build --projects=wpk,wpkd
 ```
 
 `push` and `pull` use the credentials `docker login` stores, and talk plain HTTP to registries on localhost (or anywhere with `--plain-http`). `pull` checks the manifest and config, digests and chain IDs included, before fetching any tensor; `--exact` refuses lossy layers.
+
+### Sign and verify images
+
+Signatures are Sigstore bundles stored next to the image, in the format cosign v3 uses, so `cosign verify` and `wpk verify` each check the other's. Sign with a key, or keyless with an OIDC identity (a browser login, or a CI job's token):
+
+```bash
+./dist/apps/wpk keygen -o release                                         # release.key (encrypted) and release.pub
+./dist/apps/wpk push --sign --key release.key registry.example.com/team/assistant:v1
+./dist/apps/wpk sign registry.example.com/team/assistant:v1               # keyless, logged in Sigstore's public Rekor
+./dist/apps/wpk verify --key release.pub registry.example.com/team/assistant:v1
+```
+
+A trust policy makes `wpkd` refuse images that lack a trusted signature, on `pull` and on builds `FROM` a registry, before any tensor moves:
+
+```bash
+./dist/apps/wpk trust set registry.example.com/team --key release.pub
+./dist/apps/wpk trust set ghcr.io/acme --identity-regexp 'https://github.com/acme/.*' --issuer https://token.actions.githubusercontent.com
+./dist/apps/wpk trust set '*' --reject                                     # everything else
+./dist/apps/wpk trust ls
+```
 
 `wpk` finds the daemon at `$WPK_SOCKET`, else `$WPK_ROOT/wpkd.sock`, else `~/.weightpack/wpkd.sock`.
 

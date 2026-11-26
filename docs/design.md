@@ -154,7 +154,7 @@ Blobs reach a node only through the registry, and only the ones it lacks. Reques
 - **Base affinity is the scheduling rule.** The scheduler groups images by base digest and sends each request to a replica that already holds that base. Cluster-level memory savings come from this rule, not from the format. A new copy of a base loads only when no replica holding it has room.
 - **The engine stays stock.** The plugin uses vLLM's plugin and LoRA interfaces plus one custom module for mixes, so a vLLM upgrade does not mean maintaining a fork.
 - **Nodes are disposable.** Everything a node needs is addressable by digest, so a node can be drained, rebuilt and refilled from the registry.
-- **Trust boundary at pull.** `wpkd` verifies signatures before decoding. The plugin loads only safetensors from the decoded cache. Training jobs run sandboxed, without registry credentials.
+- **Trust boundary at pull.** `wpkd` checks an image's signatures against its trust policy once the reference resolves, before it fetches the config or any tensor (see Signatures). The plugin loads only safetensors from the decoded cache. Training jobs run sandboxed, without registry credentials.
 
 ## Image format
 
@@ -213,6 +213,20 @@ An entropy coder is a suffix, as OCI does with `+zstd`: `lora.v1+zipnn`. Docker 
 - `meta.v1`: one file per blob, named by the standard `org.opencontainers.image.title` annotation. The base's `config.json`, tokenizer files, license and model card belong to the base layer. A `TEMPLATE` file and a `LICENSE` file are image-level: they carry no `wpk.layer` annotation. A `LICENSE` given as an SPDX id becomes the manifest's `org.opencontainers.image.licenses` annotation instead.
 
 Nothing in a manifest depends on paths, file order or time, so building the same inputs twice gives the same manifest digest.
+
+### Signatures
+
+Weightpack signs images the way cosign v3 signs container images, so `cosign verify` checks what `wpk` signs and `wpk` checks what cosign signs. A signature signs the manifest digest; the manifest names every config and layer blob by digest, so it covers every layer.
+
+- **Payload.** An in-toto statement, `https://in-toto.io/Statement/v1`, with the manifest digest as its only subject, predicate type `https://sigstore.dev/cosign/sign/v1` and an empty predicate, in a DSSE envelope (`application/vnd.in-toto+json`).
+- **Bundle.** The envelope with its verification material and proofs, as a Sigstore bundle, `application/vnd.dev.sigstore.bundle.v0.3+json`.
+- **Storage.** An OCI 1.1 manifest in the image's repository, of artifact type `application/vnd.dev.sigstore.bundle.v0.3+json`, with the empty config, the bundle as its one layer and the image manifest as its `subject`. Annotations `dev.sigstore.bundle.content: dsse-envelope` and `dev.sigstore.bundle.predicateType` say what it holds. Registries without the referrers API get the `sha256-<hex>` referrers tag. Signatures belong to a repository: the same manifest in another repository is unsigned there until signed there too.
+- **Signers.** A long-lived key (ECDSA P-256 by default, in cosign's encrypted key format; `wpk keygen` makes one). Its bundle carries a key hint, not a certificate, and is not logged, so nothing leaves the registry. Or keyless: a fresh key certified by Fulcio for an OIDC identity (a person's email, a CI workflow), the signature logged in Rekor and timestamped by the instance's timestamp authorities, as its signing config lists them.
+- **Where keys live.** `wpk` makes the bundle; `wpkd` only stores it, with its registry credentials. Private keys and identity tokens never reach the daemon.
+
+**Verification.** A bundle counts only when it is a DSSE envelope over a statement with the cosign signing predicate type and the manifest digest as a subject; attestations (provenance, SBOMs) of the same image are not signatures. A key signature must verify with one of the trusted keys. A keyless one must chain to the instance's Fulcio CA at a time a log or timestamp authority vouches for, carry a certificate transparency proof, appear in Rekor, and match a trusted identity: subject and issuer, each exact or a regular expression that must match the whole value. The public-good instance's trusted root comes from its TUF repository, cached under the store root and reread daily. At most 32 signatures of an image are checked.
+
+**Trust policy.** `<root>/policy.json` lists rules. Each names a scope (a registry host, a repository or a prefix of one at a path boundary, or `*`) and an action: `signed` with trusted keys and identities, `accept`, or `reject`. The rule with the longest matching scope applies to a pull; with none, the pull goes ahead. `wpkd` reads the file on every pull, and `wpk trust` edits it. Builds that pull a `FROM` image go through the same policy.
 
 ## Weightfile and CLI
 
@@ -335,7 +349,7 @@ Build it in four phases, each closed by a measurable gate. Phases 1 and 2 pay fo
 | 1 · Format, store | Tensor store on OCI; base and LoRA layers; `FROM`, `LAYER`, `EXPERT`; build, push, squash; vLLM with per-request routing | 50 LoRA variants of one 8B base in 20 GB; squash matches a PEFT merge |
 | 2 · Delta import | `wpk import`; `xor` codec (lossless); `bit1` codec (lossy); `ffn-expert` import; fidelity records and eval gate | Lossless import is bit-exact; `bit1` import stays within `max_drop` on its eval |
 | 3 · Token mixing | Arrow router; vLLM module for MoE over LoRA and FFN experts; `ROUTER train`; sequence and token routing | A 3-expert mix beats each single expert on a mixed-domain eval |
-| 4 · Ecosystem | ModelPack media types proposal; HF and GGUF export; Sigstore signing; `wpk rebase` | A ModelPack client pulls and runs a squashed image |
+| 4 · Ecosystem | ModelPack media types proposal; HF and GGUF export; Sigstore signing (done: see Signatures); `wpk rebase` | A ModelPack client pulls and runs a squashed image |
 
 Phase 3 is the research-heavy one, so it comes after the format and codecs are stable. Phase 4 can start any time someone needs interop.
 

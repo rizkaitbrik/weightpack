@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/rizkaitbrik/weightpack/main/scripts
 
 The script puts `wpk` and `wpkd` in `~/.local/bin` (`WPK_INSTALL_DIR` changes that), and installs `weightpack-worker[serve]`, the build worker and the reference engine, with `uv tool install`. It checks every download against the release's `checksums.txt`. `WPK_VERSION=0.2.0` pins a release, and `WPK_SERVICE=1` also runs step 2's `wpk service install`.
 
-Or build from source, with Go 1.24+ and uv:
+Or build from source, with Go 1.27+ and uv:
 
 ```bash
 git clone https://github.com/rizkaitbrik/weightpack
@@ -128,6 +128,22 @@ wpk push registry.example.com/team/qwen-tasks:v1
 # on another machine
 wpk pull registry.example.com/team/qwen-tasks:v1 && wpk run registry.example.com/team/qwen-tasks:v1
 ```
+
+Sign what you push, so machines that pull it can check where it came from. `wpk keygen` makes a key pair in cosign's format (the password comes from `$COSIGN_PASSWORD`, or is asked for):
+
+```bash
+wpk keygen -o release
+wpk push --sign --key release.key registry.example.com/team/qwen-tasks:v1
+```
+
+On the machines that pull, require that signature for your registry. `wpk pull` (and `wpk build` of a `FROM` in that registry) then refuses any image without it, before downloading a tensor:
+
+```bash
+wpk trust set registry.example.com/team --key release.pub
+wpk pull registry.example.com/team/qwen-tasks:v1    # Verified sha256:…: signed by key SHA256:…
+```
+
+In CI, sign keyless instead: `wpk push --sign` without `--key` gets the job's OIDC token (in GitHub Actions, grant `id-token: write`), and the policy trusts the workflow rather than a key: `wpk trust set registry.example.com/team --identity https://github.com/acme/models/.github/workflows/release.yml@refs/heads/main --issuer https://token.actions.githubusercontent.com`. Keyless signatures are logged in Sigstore's public Rekor, with the identity and the image digest. Signatures are cosign's, so `cosign verify` checks them too.
 
 To hand one expert to a tool that knows nothing of Weightpack, bake it in and export plain files: `wpk squash -t sql-dense --expert sql qwen-tasks`, then `wpk export -o ./sql-dense sql-dense`. `./sql-dense/base` loads in transformers, vLLM or any other engine.
 

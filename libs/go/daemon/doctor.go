@@ -11,6 +11,7 @@ import (
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/hf"
+	"github.com/rizkaitbrik/weightpack/libs/go/trust"
 	"github.com/rizkaitbrik/weightpack/libs/go/workerpb"
 )
 
@@ -30,7 +31,7 @@ func (s *server) doctor(w http.ResponseWriter, r *http.Request) {
 	} else {
 		checks = append(checks, api.Check{Name: "gateway", Status: api.CheckWarn, Detail: "serving is off", Fix: "start wpkd without --gateway '' to serve images"})
 	}
-	checks = append(checks, s.checkStore(), s.checkHF())
+	checks = append(checks, s.checkStore(), s.checkTrust(), s.checkHF())
 	writeJSON(w, http.StatusOK, api.DoctorReport{Checks: checks})
 }
 
@@ -72,6 +73,28 @@ func (s *server) checkStore() api.Check {
 		c.Status = api.CheckWarn
 		c.Fix = "free some space: wpk rm unused images, then wpk prune (--downloads also drops the hf:// cache)"
 	}
+	return c
+}
+
+// checkTrust summarizes the trust policy pulls obey.
+func (s *server) checkTrust() api.Check {
+	c := api.Check{Name: "trust policy"}
+	p, err := trust.LoadPolicy(s.policyPath())
+	if err != nil {
+		c.Status, c.Detail, c.Fix = api.CheckFail, err.Error(), "fix or delete the file; until then every pull fails"
+		return c
+	}
+	if len(p.Rules) == 0 {
+		c.Status, c.Detail = api.CheckOK, "no rules: pulls take every image, signed or not"
+		return c
+	}
+	signed := 0
+	for _, r := range p.Rules {
+		if r.Action == api.TrustSigned {
+			signed++
+		}
+	}
+	c.Status, c.Detail = api.CheckOK, fmt.Sprintf("%d rules, %d requiring signatures (wpk trust ls)", len(p.Rules), signed)
 	return c
 }
 
