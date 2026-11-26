@@ -16,7 +16,7 @@ else:
     pytest.skip("needs CUDA or TRITON_INTERPRET=1", allow_module_level=True)
 
 from weightpack_vllm import routing_kernel  # noqa: E402
-from weightpack_vllm.routing import Routing, gate_op, gates  # noqa: E402
+from weightpack_vllm.routing import Routing, attach, gate_op, gates  # noqa: E402
 
 SLOTS = 4
 
@@ -63,14 +63,18 @@ def test_kernel_scales_as_gates(dtype, ties, n_slices, n_exp, in_f, rank):
     assert torch.equal(got[:, plain], buf[:, plain])
 
 
-def test_op_does_nothing_for_a_batch_without_adapters():
+def test_op_gates_only_a_batch_with_adapters_and_routing():
     g = torch.Generator(device=DEVICE).manual_seed(1)
     r = state(g, 2, 4, 32, 8)
     x = torch.randn(5, 32, generator=g, device=DEVICE)
     slots = torch.zeros(5, dtype=torch.long, device=DEVICE)
     buf = torch.randn(2, 5, 8, generator=g, device=DEVICE)
+    lora_a = torch.zeros(SLOTS, 1, 8, 32, device=DEVICE)
     got = buf.clone()
-    gate_op()(got, x, slots, *r.tensors(), torch.tensor([True]))
+    gate_op()(got, x, slots, lora_a, torch.tensor([False]))
+    assert torch.equal(got, buf)  # no routing attached to lora_a
+    attach(lora_a, r)
+    gate_op()(got, x, slots, lora_a, torch.tensor([True]))
     assert torch.equal(got, buf)
-    gate_op()(got, x, slots, *r.tensors(), torch.tensor([False]))
+    gate_op()(got, x, slots, lora_a, torch.tensor([False]))
     torch.testing.assert_close(got, buf * gates(x, slots, *r.tensors()))

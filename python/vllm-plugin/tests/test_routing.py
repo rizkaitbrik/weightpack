@@ -11,6 +11,7 @@ torch = pytest.importorskip("torch")
 from weightpack_vllm import reference  # noqa: E402
 from weightpack_vllm.routing import (  # noqa: E402
     Routing,
+    attach,
     gated_lora_linear,
     in_domain,
     load_mix,
@@ -106,6 +107,7 @@ def test_gated_lora_matches_the_reference(top_k, router):
             for _ in outs
         ]
     routing = Routing(len(outs), SLOTS, MAX_RANK, IN, 4, "cpu")
+    attach(a_stacked[0], routing)
     routing.set_slot(
         1,
         ranks,
@@ -120,9 +122,7 @@ def test_gated_lora_matches_the_reference(top_k, router):
     slots = [1, 1, 0, -1, 1, 0, 1, 1]
     x = rng.standard_normal((len(slots), IN)).astype(np.float32)
     y = torch.zeros(len(slots), sum(outs))
-    gated_lora_linear(
-        FakePunica(slots), routing, y, t(x), a_stacked, b_stacked, 1.0, outs
-    )
+    gated_lora_linear(FakePunica(slots), y, t(x), a_stacked, b_stacked, 1.0, outs)
 
     # The reference: per slice, Arrow over the experts that touch it.
     want = np.zeros((len(slots), sum(outs)), dtype=np.float64)
@@ -151,9 +151,7 @@ def test_gated_lora_matches_the_reference(top_k, router):
     # Routing changes the result: the mix is not the plain sum of its experts.
     flat = torch.zeros_like(y)
     routing.clear(1)
-    gated_lora_linear(
-        FakePunica(slots), routing, flat, t(x), a_stacked, b_stacked, 1.0, outs
-    )
+    gated_lora_linear(FakePunica(slots), flat, t(x), a_stacked, b_stacked, 1.0, outs)
     assert not torch.allclose(flat[0], y[0], atol=1e-3)
 
 
@@ -230,3 +228,20 @@ def test_ties_pick_exactly_top_k(n):
         np.testing.assert_allclose(
             reference.arrow_gates(x.numpy(), np.ones((n, IN)), top_k), want.numpy()
         )
+
+
+def test_a_layer_without_routing_is_not_gated():
+    # The gate op finds a layer's routing by its lora_a buffer; one with
+    # none attached gets vLLM's plain shrink and expand.
+    rng = np.random.default_rng(3)
+    a_stacked = (t(rng.standard_normal((SLOTS, 1, 4, IN)).astype(np.float32)),)
+    b_stacked = (t(rng.standard_normal((SLOTS, 1, 6, 4)).astype(np.float32)),)
+    slots = [0, 2, -1]
+    x = t(rng.standard_normal((len(slots), IN)).astype(np.float32))
+    y = torch.zeros(len(slots), 6)
+    gated_lora_linear(FakePunica(slots), y, x, a_stacked, b_stacked, 1.0, (6,))
+    want = torch.zeros(len(slots), 6)
+    for row, slot in enumerate(slots):
+        if slot >= 0:
+            want[row] = x[row] @ a_stacked[0][slot, 0].T @ b_stacked[0][slot, 0].T
+    torch.testing.assert_close(y, want)

@@ -288,18 +288,32 @@ def gates(x, token_slots, is_mix, top_k, protos, bias, touch, rank_expert):
     return torch.stack(out)
 
 
+# Each LoRA layer's routing, by the address of its first lora_a buffer,
+# which vLLM allocates once. The gate op looks it up when it runs, so code
+# torch.compile traces holds no reference to it: vLLM's compile cache
+# would save such a reference by the object's id in this process, which
+# the next process does not have.
+_attached: dict[int, Routing] = {}
+
+
+def attach(lora_a, routing: Routing) -> None:
+    """Routes the LoRA layer whose first lora_a buffer is lora_a."""
+    _attached[lora_a.data_ptr()] = routing
+
+
 _gate_op = None
 
 
 def gate_op():
-    """weightpack::gate_(buffer, x, token_slots, *routing tensors, no_lora):
-    buffer *= gates, in place, as one op opaque to torch.compile. On CUDA it
-    runs routing_kernel's Triton kernel, which stops at once for a token of
-    no mix; elsewhere gates() in torch. no_lora is vLLM's host flag for a
-    batch with no adapter token (its own LoRA kernels skip on it, and it
-    picks which CUDA graph replays), and the op then does nothing.
-    WEIGHTPACK_KERNELS=triton runs the kernel on the CPU too, under
-    TRITON_INTERPRET=1, to test it inside vLLM without a GPU."""
+    """weightpack::gate_(buffer, x, token_slots, lora_a, no_lora): buffer *=
+    the gates of the layer whose first lora_a buffer is lora_a, in place,
+    as one op opaque to torch.compile. On CUDA it runs routing_kernel's
+    Triton kernel, which stops at once for a token of no mix; elsewhere
+    gates() in torch. no_lora is vLLM's host flag for a batch with no
+    adapter token (its own LoRA kernels skip on it, and it picks which CUDA
+    graph replays), and the op then does nothing; so it does for a layer
+    with no routing. WEIGHTPACK_KERNELS=triton runs the kernel on the CPU
+    too, under TRITON_INTERPRET=1, to test it inside vLLM without a GPU."""
     global _gate_op
     if _gate_op is not None:
         return _gate_op
@@ -313,16 +327,16 @@ def gate_op():
     @torch.library.custom_op(
         "weightpack::gate_",
         mutates_args=("buffer",),
-        schema="(Tensor(a!) buffer, Tensor x, Tensor token_slots, Tensor is_mix, "
-        "Tensor top_k, Tensor protos, Tensor bias, Tensor touch, "
-        "Tensor rank_expert, Tensor? no_lora) -> ()",
+        schema="(Tensor(a!) buffer, Tensor x, Tensor token_slots, Tensor lora_a, "
+        "Tensor? no_lora) -> ()",
     )
-    def gate_(
-        buffer, x, token_slots, is_mix, top_k, protos, bias, touch, rank_expert, no_lora
-    ):
+    def gate_(buffer, x, token_slots, lora_a, no_lora):
         if no_lora is not None and bool(no_lora[0]):
             return
-        state = (is_mix, top_k, protos, bias, touch, rank_expert)
+        routing = _attached.get(lora_a.data_ptr())
+        if routing is None:
+            return
+        state = routing.tensors()
         kernel = (x.is_cuda or forced) and routing_kernel.available()
         if not chosen:
             chosen.append(kernel)
@@ -342,7 +356,6 @@ def gate_op():
 
 def gated_lora_linear(
     wrapper,
-    routing: Routing,
     y,
     x,
     lora_a_stacked,
@@ -352,8 +365,9 @@ def gated_lora_linear(
     **kwargs,
 ) -> None:
     """vLLM's add_lora_linear with the shrink buffer gated per token: shrink,
-    scale each rank position by its gate, expand. Returns y, as vLLM's does
-    for platforms that do not update it in place."""
+    scale each rank position by its gate, expand. The layer's routing is
+    the one attached to lora_a_stacked[0]. Returns y, as vLLM's does for
+    platforms that do not update it in place."""
     import torch
 
     add_inputs = kwargs.pop("add_inputs", True)
@@ -368,7 +382,7 @@ def gated_lora_linear(
     no_lora = getattr(
         getattr(wrapper, "token_mapping_meta", None), "no_lora_flag_cpu", None
     )
-    gate_op()(buffer, x, wrapper._token_lora_indices[:t], *routing.tensors(), no_lora)
+    gate_op()(buffer, x, wrapper._token_lora_indices[:t], lora_a_stacked[0], no_lora)
     wrapper.add_expand(
         y, buffer, lora_b_stacked, output_slices, add_inputs=add_inputs, **kwargs
     )

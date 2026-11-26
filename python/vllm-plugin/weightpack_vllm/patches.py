@@ -29,10 +29,10 @@ logger = logging.getLogger("vllm.weightpack")
 # The most experts a mix may have; prototype buffers grow with it.
 MAX_EXPERTS = int(os.environ.get("WEIGHTPACK_MAX_EXPERTS", "8"))
 
-_routings: dict[int, routing.Routing] = {}  # id(layer.lora_a_stacked[0]) -> routing
-
 
 def apply() -> None:
+    _key_compile_cache()
+
     import torch
     from vllm.lora import lora_model, model_manager
     from vllm.lora.layers.base_linear import BaseLinearLayerWithLoRA
@@ -117,16 +117,16 @@ def apply() -> None:
                 module, "lora_a_stacked"
             ):
                 continue
-            # The platform's punica wrapper class (GPU, CPU, ...) is only
-            # known now: the manager gives each layer one (several, one per
-            # tower, in multimodal models).
-            _wrap_lora_linear(type(module.punica_wrapper))
             if getattr(module, "tp_size", 1) > 1:
                 logger.warning(
                     "weightpack: token routing needs tensor parallel size 1; "
                     "mixes are off"
                 )
                 return
+            # The platform's punica wrapper class (GPU, CPU, ...) is only
+            # known now: the manager gives each layer one (several, one per
+            # tower, in multimodal models).
+            _wrap_lora_linear(type(module.punica_wrapper))
             a = module.lora_a_stacked[0]
             r = routing.Routing(
                 n_slices=len(module.lora_a_stacked),
@@ -137,7 +137,7 @@ def apply() -> None:
                 device=a.device,
             )
             module._weightpack_routing = r
-            _routings[id(a)] = r
+            routing.attach(a, r)
             made += 1
         logger.info("weightpack: token routing ready in %d LoRA layers", made)
 
@@ -188,7 +188,6 @@ def _wrap_lora_linear(cls) -> None:
     """Gates add_lora_linear of the punica wrapper class in use, once."""
     if getattr(cls, "_weightpack_gated", False):
         return
-    original = cls.add_lora_linear
 
     def add_lora_linear(
         self,
@@ -202,22 +201,10 @@ def _wrap_lora_linear(cls) -> None:
         buffer=None,
         **kwargs,
     ):
-        r = _routings.get(id(lora_a_stacked[0]))
-        if r is None:
-            return original(
-                self,
-                y,
-                x,
-                lora_a_stacked,
-                lora_b_stacked,
-                scale,
-                output_slices,
-                buffer=buffer,
-                **kwargs,
-            )
+        # Every linear LoRA layer has a routing (manager_init), which the
+        # gate op finds by lora_a_stacked[0] when it runs.
         return routing.gated_lora_linear(
             self,
-            r,
             y,
             x,
             lora_a_stacked,
@@ -230,3 +217,28 @@ def _wrap_lora_linear(cls) -> None:
     cls.add_lora_linear = add_lora_linear
     cls._weightpack_gated = True
     logger.info("weightpack: gating LoRA in %s", cls.__name__)
+
+
+def _key_compile_cache() -> None:
+    """vLLM's AOT compile cache keys an entry by vLLM's config and
+    environment, not by the code that was traced: an entry written without
+    this plugin would load with it, the patches missing from the compiled
+    model. So the plugin's version and settings join the key. (vLLM checks
+    the traced files for changes when it loads an entry, which covers this
+    plugin's own code once it is traced.)"""
+    try:
+        from vllm.compilation import caching
+    except ImportError:
+        return
+    factors = getattr(caching, "aot_compile_hash_factors", None)
+    if factors is None or getattr(factors, "_weightpack", False):
+        return
+    from . import __version__
+
+    plugin = f"weightpack-vllm {__version__} max_experts={MAX_EXPERTS}"
+
+    def with_plugin(vllm_config):
+        return [*factors(vllm_config), plugin]
+
+    with_plugin._weightpack = True
+    caching.aot_compile_hash_factors = with_plugin
