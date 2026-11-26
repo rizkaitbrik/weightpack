@@ -305,20 +305,21 @@ Every tensor goes through the same ingest pipeline:
 
 **Fidelity contract.** A lossy layer carries a fidelity record: its source and the source's digest (sha256 over its weight files), codec, density and calibration steps, the eval suite's name and digest, the fine-tune's score and the layer's, `max_drop` and the measured drop. `wpk build` fails when the drop exceeds `max_drop`, and `wpk history` shows the codec, drop and suite. The record is left out of the layer digest: it says how the layer was made, not what it is. The source digest stays in it, so a lossless rebuild is possible while the original is still reachable. A rebuild reuses the deltas and the eval from the build cache, keyed by the parent chain, the source files, codec and media type, density, calibration steps, suite, chat template and worker version, and applies a changed `max_drop` to the cached drop. Not built yet: `wpk pull --exact`, to refuse lossy layers.
 
-**What lossy imports give** (`npx nx run worker:import-gate`). Qwen2.5-0.5B-Instruct, fully fine-tuned on GSM8K (every weight, 300 steps, saved in BF16) and imported over the base by `wpk build` on one A40. Each layer is scored by next-token accuracy on 100 held-out GSM8K problems (12,239 tokens) and on the self suite, the fine-tune's own replies to the 24 general prompts (1,708 tokens). The relative error is ‖delta − decoded delta‖ / ‖delta‖ over all changed tensors.
+**What lossy imports give** (`npx nx run worker:import-gate`). Qwen2.5-0.5B-Instruct, fully fine-tuned on GSM8K (every weight, 300 steps, saved in BF16) and imported over the base by `wpk build` on one A40. Each layer is scored by next-token accuracy on 100 held-out GSM8K problems (12,239 tokens) and on the self suite, the fine-tune's own replies to the 24 general prompts (1,799 tokens). The relative error is ‖delta − decoded delta‖ / ‖delta‖ over all changed tensors. Every row is one run, over one fine-tune, but the base's GSM8K score, which is the previous run's on the same suite.
 
 | Layer | Stored, of 988 MB changed | Relative error | GSM8K: layer (drop) | Self: layer (drop) |
 | --- | --- | --- | --- | --- |
-| The fine-tune | 988 MB | 0 | 85.85 | 98.89 |
-| `xor` | 429.4 MB (43.5%) | 0, exact | The fine-tune's, bit for bit | The fine-tune's, bit for bit |
-| `bit1` | 62.0 MB (6.3%) | 0.712 | 86.35 (−0.50) | 94.73 (4.16) |
-| `sparse`, density 0.1 | 72.1 MB (7.3%) | 0.670 | 85.82 (0.02) | 92.04 (6.85) |
-| `sparse`, density 0.25 | 156.4 MB (15.8%) | 0.423 | not run | 95.20 (3.69) |
-| The base alone | none | 1 | 81.50 (4.35) | 84.25 (14.64) |
+| The fine-tune | 988 MB | 0 | 85.73 | 98.67 |
+| `xor` | 429.3 MB (43.4%) | 0, exact | The fine-tune's, bit for bit | The fine-tune's, bit for bit |
+| `bit1`, calibrated (200 steps) | 62.0 MB (6.3%) | 0.837 | 85.86 (−0.12) | 94.77 (3.89) |
+| `bit1`, `calibrate=0` | 62.0 MB (6.3%) | 0.712 | 86.40 (−0.66) | 93.39 (5.28) |
+| `sparse`, density 0.1 | 72.1 MB (7.3%) | 0.670 | 85.78 (−0.05) | 90.28 (8.39) |
+| The base alone | none | 1 | 81.50 (4.23) | 83.55 (15.12) |
 
-- **The phase 2 gate is met.** The bit1 import stays within `max_drop=1` on its eval, GSM8K, in 6.3% of the fine-tune's size. bit1 and sparse both keep all of the fine-tune's GSM8K gain over the base.
-- **The self suite is the stricter gate.** It asks for the fine-tune's own text on prompts it was not trained on, where the base already disagrees with it on 15% of tokens. bit1 closes 72% of that gap and sparse at density 0.1 closes 53%, so at `max_drop=1` the self gate refuses every lossy layer here. That is what it is for: a layer that passes it reproduces the fine-tune's general behaviour, not only its skill. A calibrated bit1 scale, BitDelta's distillation step, is the next lever there.
-- **The self suite has a floor.** The fine-tune scores 98.89 on its own greedy replies, not 100: scoring in padded batches and decoding token by token round differently in BF16. The drop compares two scores taken the same way.
+- **The phase 2 gate is met.** The bit1 import stays within `max_drop=1` on its eval, GSM8K, in 6.3% of the fine-tune's size, calibrated or not. bit1 and sparse both keep all of the fine-tune's GSM8K gain over the base.
+- **Calibration halves bit1's distance from the fine-tune.** On the calibration replies the KL divergence per token falls from 0.0183 to 0.0099 in 200 steps (about 80 seconds on the A40). On the self suite, which shares none of its prompts, the drop falls from 5.28 to 3.89 points. The relative error rises from 0.71 to 0.84: the scales now fit the model's outputs, not each matrix's own weights. 800 steps reach 0.0098 and a drop of 3.72, so 200 is about where calibration levels off.
+- **The self suite is the stricter gate.** It asks for the fine-tune's own text on prompts it was not trained on, where the base alone scores 15 points lower. Calibrated bit1 closes 74% of that gap, uncalibrated bit1 65% and sparse at density 0.1 45%, so at `max_drop=1` the self gate refuses every lossy layer here. That is what it is for: a layer that passes it reproduces the fine-tune's general behaviour, not only its skill. On an earlier run of the same recipe, sparse at density 0.25 (15.8% of the size) dropped 3.69 points, about what calibrated bit1 drops in 6.3%. What a scale per matrix cannot fix is the error in the signs' direction; finer scales, one per row rather than per matrix, are the next lever to try.
+- **The self suite has a floor.** The fine-tune scores 98.67 on its own greedy replies, not 100: scoring in padded batches and decoding token by token round differently in BF16. The drop compares two scores taken the same way.
 
 **Garbage collection.** Blobs are reference-counted by manifests. `wpk rm` untags images and `wpk prune` removes every blob no tag reaches, as `docker image prune` does, along with stale build-cache entries and old temporary files (`--downloads` also clears the `hf://` cache, `--dry-run` only counts). The daemon holds builds, pulls, pushes, squashes, exports and tag changes off while it prunes, so nothing in use is deleted.
 
