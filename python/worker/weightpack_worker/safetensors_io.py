@@ -139,15 +139,27 @@ def from_float32(dtype: str, x: np.ndarray) -> np.ndarray:
 
 def write_tensor(path: str | Path, name: str, dtype: str, raw: np.ndarray) -> None:
     """Write one tensor as a canonical single-tensor safetensors file."""
-    storage = _STORAGE[dtype]
-    data = np.ascontiguousarray(raw, dtype=storage).tobytes()
-    # Field order as the Go writer emits it: dtype, shape, data_offsets.
-    entry = {"dtype": dtype, "shape": list(raw.shape), "data_offsets": [0, len(data)]}
-    header = json.dumps(
-        {name: entry}, separators=(",", ":"), ensure_ascii=False
-    ).encode()
+    write_tensors(path, [(name, dtype, raw)])
+
+
+def write_tensors(path: str | Path, tensors: list[tuple[str, str, np.ndarray]]) -> None:
+    """Write (name, dtype, raw values) tensors to one safetensors file in the
+    canonical layout: ordered by name, packed with no gaps."""
+    entries, chunks, offset = {}, [], 0
+    for name, dtype, raw in sorted(tensors, key=lambda t: t[0]):
+        data = np.ascontiguousarray(raw, dtype=_STORAGE[dtype]).tobytes()
+        # Field order as the Go writer emits it: dtype, shape, data_offsets.
+        entries[name] = {
+            "dtype": dtype,
+            "shape": list(raw.shape),
+            "data_offsets": [offset, offset + len(data)],
+        }
+        chunks.append(data)
+        offset += len(data)
+    header = json.dumps(entries, separators=(",", ":"), ensure_ascii=False).encode()
     header += b" " * ((8 - len(header) % 8) % 8)
     with open(path, "wb") as f:
         f.write(struct.pack("<Q", len(header)))
         f.write(header)
-        f.write(data)
+        for c in chunks:
+            f.write(c)

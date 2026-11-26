@@ -69,21 +69,11 @@ class Parent:
         return out
 
 
-def encode_xor(
-    base_blobs: list[str],
-    parents: list[list[str]],
-    target_files: list[str],
-    out_dir: str | Path,
-) -> tuple[list[tuple[str, str]], int]:
-    """Encode a fine-tune as XOR deltas over its parent.
-
-    Writes one safetensors file per changed tensor into ``out_dir`` and
-    returns ``(tensor name, file name)`` pairs, sorted by name, and the
-    number of tensors equal to the parent's. The fine-tune must have exactly
-    the base's tensor names, dtypes and shapes.
-    """
-    out_dir = Path(out_dir)
-    parent = Parent(base_blobs, parents)
+def fine_tune(
+    parent: Parent, target_files: list[str]
+) -> dict[str, tuple[str, TensorInfo]]:
+    """A fine-tune's tensors, checked to be exactly the base's names, dtypes
+    and shapes."""
     target = index_tensors(target_files)
     missing = sorted(set(parent.base) - set(target))
     extra = sorted(set(target) - set(parent.base))
@@ -100,6 +90,25 @@ def encode_xor(
                 f"{name} is {info.dtype}{list(info.shape)} in the fine-tune, "
                 f"{want.dtype}{list(want.shape)} in the base"
             )
+    return target
+
+
+def encode_xor(
+    base_blobs: list[str],
+    parents: list[list[str]],
+    target_files: list[str],
+    out_dir: str | Path,
+) -> tuple[list[tuple[str, str]], int]:
+    """Encode a fine-tune as XOR deltas over its parent.
+
+    Writes one safetensors file per changed tensor into ``out_dir`` and
+    returns ``(tensor name, file name)`` pairs, sorted by name, and the
+    number of tensors equal to the parent's. The fine-tune must have exactly
+    the base's tensor names, dtypes and shapes.
+    """
+    out_dir = Path(out_dir)
+    parent = Parent(base_blobs, parents)
+    target = fine_tune(parent, target_files)
 
     encoded: list[tuple[str, str]] = []
     unchanged = 0

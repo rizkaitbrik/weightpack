@@ -44,67 +44,11 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 	if b.worker == nil {
 		return fail("codec=xor runs in the build worker; start wpkd with --worker")
 	}
-	var xorParents []*spec.Layer
-	baseLayer := parent
-	for ; baseLayer.Kind != spec.KindBase; baseLayer = byID[baseLayer.Parent] {
-		if baseLayer.Kind != spec.KindDeltaXOR {
-			return fail("an XOR layer sits only on the base or on other XOR layers, but %s is a %s layer: "+
-				"its weights come from float math, so the delta would not be exact; put XOR layers below LoRA layers", baseLayer.ID, baseLayer.Kind)
-		}
-		xorParents = append([]*spec.Layer{baseLayer}, xorParents...)
-	}
-
-	// Check the fine-tune's tensor table against the base before any work.
-	dir, err := b.sourceDir(step, src.Line, src.Source, fetchModel)
+	ft, err := b.checkFineTune(step, src, parent, base, byID, fail)
 	if err != nil {
 		return err
 	}
-	names, err := weightFiles(dir)
-	if err != nil {
-		return fail("%v", err)
-	}
-	req := &workerpb.EncodeLayerRequest{Codec: workerpb.Codec_CODEC_XOR}
-	seen := map[string]bool{}
-	for _, n := range names {
-		p := filepath.Join(dir, n)
-		f, err := safetensors.Open(p)
-		if err != nil {
-			return fail("%v", err)
-		}
-		for _, t := range f.Tensors {
-			want, ok := base.tensors[t.Name]
-			if !ok || want.DType != t.DType || !slices.Equal(want.Shape, t.Shape) {
-				_ = f.Close()
-				return fail("%s is %s%v in %s, which the base does not have; is this a fine-tune of another model?", t.Name, t.DType, t.Shape, n)
-			}
-			seen[t.Name] = true
-		}
-		_ = f.Close()
-		req.TargetFiles = append(req.TargetFiles, p)
-	}
-	if len(seen) != len(base.tensors) {
-		return fail("the fine-tune has %d of the base's %d tensors; it must have them all", len(seen), len(base.tensors))
-	}
-	same, supplied, err := b.sameTokenizer(dir, base.tokenizer)
-	switch {
-	case err != nil:
-		return fail("%v", err)
-	case !supplied:
-		b.progress(api.Event{Step: step, Warning: true, Message: "the fine-tune has no tokenizer of its own; the image keeps its parent's"})
-	case !same:
-		return fail("the fine-tune's tokenizer differs from its parent's, so its token ids mean other things; " +
-			"a lossless import keeps the parent's tokenizer, so this fine-tune cannot be imported over it")
-	}
-	differs, supplied, err := b.configDiff(dir, b.blobs[baseLayer.ID])
-	switch {
-	case err != nil:
-		return fail("%v", err)
-	case !supplied:
-		b.progress(api.Event{Step: step, Warning: true, Message: "the fine-tune has no config.json of its own; the image keeps its parent's"})
-	case len(differs) > 0:
-		return fail("the fine-tune's config.json differs from its parent's in %s; a lossless import keeps the parent's config, "+
-			"so the model would run with the parent's settings: build the fine-tune as a base of its own (FROM) instead", strings.Join(differs, ", "))
-	}
+	req := &workerpb.EncodeLayerRequest{Codec: workerpb.Codec_CODEC_XOR, TargetFiles: ft.files}
 
 	// The cache remembers the deltas these exact files gave over this exact
 	// parent chain; a hit needs no worker at all.
@@ -131,22 +75,8 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 		}
 	}
 	req.OutDir = outDir
-	for _, d := range b.blobs[baseLayer.ID] {
-		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeTensor {
-			continue
-		}
-		p, err := b.store.Path(d.Digest.String())
-		if err != nil {
-			return err
-		}
-		req.Base = append(req.Base, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
-	}
-	for _, x := range xorParents {
-		layerReq, err := DecodeXORLayer(b.store, x.ID, b.blobs[x.ID], inDir)
-		if err != nil {
-			return err
-		}
-		req.Parents = append(req.Parents, layerReq)
+	if req.Base, req.Parents, err = b.parentBlobs(ft, inDir); err != nil {
+		return err
 	}
 
 	b.progress(api.Event{Step: step, Message: fmt.Sprintf("encoding %s as XOR deltas over %s", src.Source, parent.ID)})
@@ -201,6 +131,108 @@ func (b *builder) ingestXOR(step string, src weightfile.Layer, layer, parent *sp
 	}
 	b.cache.store(xorKey, entry)
 	return b.finishXOR(step, layer, parent, len(resp.Tensors), resp.Unchanged, raw, false)
+}
+
+// fineTune is a full fine-tune to import as a delta over its parent: its
+// weight files, checked against the base, and the chain below it, which is
+// the base and XOR layers only.
+type fineTune struct {
+	dir        string
+	files      []string
+	baseLayer  *spec.Layer
+	xorParents []*spec.Layer // bottom first
+}
+
+// checkFineTune checks a fine-tune before any work: delta layers sit only on
+// the base or on XOR layers, whose bits are exact (over a LoRA layer the
+// parent would come from float math, whose rounding can differ between
+// machines); the fine-tune has exactly the base's tensors; and the parent's
+// tokenizer and config, which the image keeps, fit it.
+func (b *builder) checkFineTune(step string, src weightfile.Layer, parent *spec.Layer, base *baseModel, byID map[string]*spec.Layer, fail func(string, ...any) error) (*fineTune, error) {
+	ft := &fineTune{baseLayer: parent}
+	for ; ft.baseLayer.Kind != spec.KindBase; ft.baseLayer = byID[ft.baseLayer.Parent] {
+		if ft.baseLayer.Kind != spec.KindDeltaXOR {
+			return nil, fail("a codec=%s layer sits only on the base or on XOR layers, but %s is a %s layer: "+
+				"its weights come from float math, so the delta would not be exact; put delta layers below LoRA layers", src.Codec, ft.baseLayer.ID, ft.baseLayer.Kind)
+		}
+		ft.xorParents = append([]*spec.Layer{ft.baseLayer}, ft.xorParents...)
+	}
+	dir, err := b.sourceDir(step, src.Line, src.Source, fetchModel)
+	if err != nil {
+		return nil, err
+	}
+	ft.dir = dir
+	names, err := weightFiles(dir)
+	if err != nil {
+		return nil, fail("%v", err)
+	}
+	seen := map[string]bool{}
+	for _, n := range names {
+		p := filepath.Join(dir, n)
+		f, err := safetensors.Open(p)
+		if err != nil {
+			return nil, fail("%v", err)
+		}
+		for _, t := range f.Tensors {
+			want, ok := base.tensors[t.Name]
+			if !ok || want.DType != t.DType || !slices.Equal(want.Shape, t.Shape) {
+				_ = f.Close()
+				return nil, fail("%s is %s%v in %s, which the base does not have; is this a fine-tune of another model?", t.Name, t.DType, t.Shape, n)
+			}
+			seen[t.Name] = true
+		}
+		_ = f.Close()
+		ft.files = append(ft.files, p)
+	}
+	if len(seen) != len(base.tensors) {
+		return nil, fail("the fine-tune has %d of the base's %d tensors; it must have them all", len(seen), len(base.tensors))
+	}
+	same, supplied, err := b.sameTokenizer(dir, base.tokenizer)
+	switch {
+	case err != nil:
+		return nil, fail("%v", err)
+	case !supplied:
+		b.progress(api.Event{Step: step, Warning: true, Message: "the fine-tune has no tokenizer of its own; the image keeps its parent's"})
+	case !same:
+		return nil, fail("the fine-tune's tokenizer differs from its parent's, so its token ids mean other things; " +
+			"an import keeps the parent's tokenizer, so this fine-tune cannot be imported over it")
+	}
+	differs, supplied, err := b.configDiff(dir, b.blobs[ft.baseLayer.ID])
+	switch {
+	case err != nil:
+		return nil, fail("%v", err)
+	case !supplied:
+		b.progress(api.Event{Step: step, Warning: true, Message: "the fine-tune has no config.json of its own; the image keeps its parent's"})
+	case len(differs) > 0:
+		return nil, fail("the fine-tune's config.json differs from its parent's in %s; an import keeps the parent's config, "+
+			"so the model would run with the parent's settings: build the fine-tune as a base of its own (FROM) instead", strings.Join(differs, ", "))
+	}
+	return ft, nil
+}
+
+// parentBlobs are what the worker needs to rebuild a fine-tune's parent:
+// the base's tensor blobs, and the XOR layers above it decoded into inDir.
+func (b *builder) parentBlobs(ft *fineTune, inDir string) ([]*workerpb.Blob, []*workerpb.XORLayer, error) {
+	var base []*workerpb.Blob
+	for _, d := range b.blobs[ft.baseLayer.ID] {
+		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeTensor {
+			continue
+		}
+		p, err := b.store.Path(d.Digest.String())
+		if err != nil {
+			return nil, nil, err
+		}
+		base = append(base, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
+	}
+	var parents []*workerpb.XORLayer
+	for _, x := range ft.xorParents {
+		layerReq, err := DecodeXORLayer(b.store, x.ID, b.blobs[x.ID], inDir)
+		if err != nil {
+			return nil, nil, err
+		}
+		parents = append(parents, layerReq)
+	}
+	return base, parents, nil
 }
 
 // finishXOR seals an XOR layer once its blobs are in place.
@@ -342,13 +374,35 @@ func tokenizerSemantics(raw []byte) (map[string]any, error) {
 }
 
 // DecodeXORLayer writes a stored XOR layer's blobs into dir as plain
-// safetensors, for a worker to read, and describes them. The files get
-// random names made inside dir: the layer id comes from an image's config,
-// which a pulled image controls, so it never takes part in a path.
+// safetensors, for a worker to read, and describes them.
 func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir string) (*workerpb.XORLayer, error) {
-	out := &workerpb.XORLayer{Id: id}
+	var xor []ocispec.Descriptor
 	for _, d := range blobs {
-		if spec.BaseMediaType(d.MediaType) != spec.MediaTypeDeltaXOR {
+		if spec.BaseMediaType(d.MediaType) == spec.MediaTypeDeltaXOR {
+			xor = append(xor, d)
+		}
+	}
+	out, err := DecodeBlobs(s, xor, dir)
+	if err != nil {
+		return nil, err
+	}
+	return &workerpb.XORLayer{Id: id, Blobs: out}, nil
+}
+
+// DecodeBlobs gives a worker stored blobs as plain safetensors: a blob
+// stored plain as its own path in the store, and a compressed one as a file
+// decoded into dir. The files get random names made inside dir: a layer id
+// comes from an image's config, which a pulled image controls, so it never
+// takes part in a path.
+func DecodeBlobs(s *store.Store, blobs []ocispec.Descriptor, dir string) ([]*workerpb.Blob, error) {
+	var out []*workerpb.Blob
+	for _, d := range blobs {
+		if entropy.Suffix(d.MediaType) == "" {
+			p, err := s.Path(d.Digest.String())
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
 			continue
 		}
 		rc, err := s.Open(d.Digest.String())
@@ -359,7 +413,7 @@ func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir s
 		if err != nil {
 			return nil, err
 		}
-		f, err := os.CreateTemp(dir, "xor-*.safetensors")
+		f, err := os.CreateTemp(dir, "blob-*.safetensors")
 		if err != nil {
 			_ = plain.Close()
 			return nil, err
@@ -371,9 +425,9 @@ func DecodeXORLayer(s *store.Store, id string, blobs []ocispec.Descriptor, dir s
 			err = cerr
 		}
 		if err != nil {
-			return nil, fmt.Errorf("decode XOR blob %s: %w", d.Digest, err)
+			return nil, fmt.Errorf("decode blob %s: %w", d.Digest, err)
 		}
-		out.Blobs = append(out.Blobs, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
+		out = append(out, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
 	}
 	return out, nil
 }

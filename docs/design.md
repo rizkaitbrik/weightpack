@@ -200,8 +200,8 @@ Layer ids are lowercase letters, digits, `.`, `_` and `-`, starting with a lette
 | `tensor.v1` | One base tensor, raw safetensors | Yes |
 | `lora.v1` | A and B matrices for one target module | Yes |
 | `delta.xor.v1` | Bitwise XOR against the parent tensor | Yes |
-| `delta.bit1.v1` | Sign bits plus one scale per matrix | No |
-| `delta.sparse.v1` | Kept indices and rescaled values | No |
+| `delta.bit1.v1` | One tensor's delta: sign bits plus one scale for a matrix | No |
+| `delta.sparse.v1` | One tensor's delta: a bitmap of a matrix's kept entries and their values; stored `+zstd` | No |
 | `router.v1` | A trained MIX router: per routed module, a weight row and a bias per expert | Yes |
 | `meta.v1` | Tokenizer, chat template, license, model card | Yes |
 
@@ -293,7 +293,32 @@ Every tensor goes through the same ingest pipeline:
 
 **Lossless import.** `codec=xor` (or `wpk import --parent <ref> <dir>`) stores a full fine-tune as a `delta.xor` layer: for each tensor the fine-tune changed, its bits XORed with the parent's, in a `delta.xor.v1+zstd` blob (one canonical single-tensor safetensors file, zstd-compressed). Tensors the fine-tune left alone are not stored. The worker computes the deltas and the daemon checks, canonicalises and compresses them. The import keeps the parent's tokenizer and `config.json`, so it refuses a fine-tune whose tokenizer or config differs from them beyond metadata: weights decoded bit for bit would otherwise run under the parent's settings (a changed `rope_theta`, say). An XOR layer sits only on the base or on other XOR layers: its parent's bits are then exact, while over a LoRA layer they would come from float math whose rounding can differ between machines, and decoding would no longer be bit-exact. LoRA layers may sit on XOR layers. Squash applies XOR layers to the base's bits first, exactly, then any LoRA math. A lossless layer has no fidelity record; only lossy codecs (`bit1`, `sparse`) carry one.
 
-**Fidelity contract.** A lossy layer carries its codec, parameters, eval suite and measured drop. Each domain has a shared default eval suite; a layer's author can add their own, and the build gates on both. `wpk pull --exact` refuses lossy layers. `wpk build` fails when the drop exceeds `max_drop`. The source digest stays in the record, so a lossless rebuild is possible while the original is still reachable.
+**Lossy import.** `codec=bit1` and `codec=sparse` store a full fine-tune as a lossy delta over its parent, after the same checks as an XOR import (the parent is the base or XOR layers; the fine-tune has the base's tensors, tokenizer and config).
+
+- **Codecs.** For each tensor the fine-tune changed, the worker takes the float32 delta, target − parent.
+  - `bit1`, as [BitDelta](https://arxiv.org/abs/2402.10193) does: a matrix becomes one sign bit per weight plus one scale, the mean absolute delta, which is the scale that minimises the squared error of scale × sign. That is 1 bit per weight, 1/16 of BF16.
+  - `sparse`: a matrix keeps its `density` fraction (default 0.1) of entries with the largest magnitudes: a bitmap of which entries it keeps, one bit per weight, and their values rounded to the tensor's own dtype. The daemon stores these blobs zstd-compressed (`delta.sparse.v1+zstd`): at density 0.1 the bitmap has about half a bit of entropy per weight, and the kept values, all of large magnitude, share few exponents. A density-0.1 layer of a BF16 fine-tune took 7.3% of its size (measured below), where flat indices with float32 values took 40%, about what exact XOR storage takes.
+  - A tensor that is not a matrix (a norm, a bias) is small, so its delta is kept whole in float32.
+- **Blobs.** One per changed tensor, a canonical safetensors file annotated `wpk.tensor` with the tensor's name. For bit1 it holds `<name>.signs` (U8, the packed sign bits, most significant first, row-major, 1 for a delta ≥ 0) and `<name>.scale` (F32[1]). For sparse it holds `<name>.mask` (U8, one bit per weight, packed as the signs are, 1 for a kept entry) and `<name>.values` (the tensor's dtype, the kept entries in row-major order); the worker checks, as it decodes, that the mask keeps as many entries as there are values. A tensor kept whole is `<name>.delta` (F32). The build checks each file's names, dtypes and shapes against the base tensor.
+- **The eval.** The worker also writes the model the layer gives back: the parent with each delta decoded, added in float32 and rounded once to the tensor's dtype. Then `Evaluate` scores the fine-tune and that model on the suite, both as the image will serve them: with the parent's config, tokenizer and chat template (or `TEMPLATE`), which the image keeps in place of the fine-tune's own, even when the fine-tune has none or ships another template. A score is next-token accuracy on the suite's learnt tokens, teacher-forced, in percent: how often the model's most likely next token is the example's. The drop is the fine-tune's score minus the layer's, in points. With `eval=` the suite is JSON Lines of examples (the shapes `ROUTER train` reads), or YAML naming them (`name`, `data`). Without it, the suite is `self`: the fine-tune's own greedy replies to a fixed set of general prompts, on which the fine-tune scores about 100, so the drop is about the share of reply tokens where the layer's first choice differs from the fine-tune's.
+- **Squash and serving.** Squash adds lossy deltas in float32, with any LoRA layers above them, and rounds once. Alone, a lossy layer squashes to exactly the model the eval scored. Serving bakes a lossy layer into the serving base through squash, like an XOR layer.
+
+**Fidelity contract.** A lossy layer carries a fidelity record: its source and the source's digest (sha256 over its weight files), codec and density, the eval suite's name and digest, the fine-tune's score and the layer's, `max_drop` and the measured drop. `wpk build` fails when the drop exceeds `max_drop`, and `wpk history` shows the codec, drop and suite. The record is left out of the layer digest: it says how the layer was made, not what it is. The source digest stays in it, so a lossless rebuild is possible while the original is still reachable. A rebuild reuses the deltas and the eval from the build cache, keyed by the parent chain, the source files, codec and media type, density, suite, chat template and worker version, and applies a changed `max_drop` to the cached drop. Not built yet: `wpk pull --exact`, to refuse lossy layers.
+
+**What lossy imports give** (`npx nx run worker:import-gate`). Qwen2.5-0.5B-Instruct, fully fine-tuned on GSM8K (every weight, 300 steps, saved in BF16) and imported over the base by `wpk build` on one A40. Each layer is scored by next-token accuracy on 100 held-out GSM8K problems (12,239 tokens) and on the self suite, the fine-tune's own replies to the 24 general prompts (1,708 tokens). The relative error is ‖delta − decoded delta‖ / ‖delta‖ over all changed tensors.
+
+| Layer | Stored, of 988 MB changed | Relative error | GSM8K: layer (drop) | Self: layer (drop) |
+| --- | --- | --- | --- | --- |
+| The fine-tune | 988 MB | 0 | 85.85 | 98.89 |
+| `xor` | 429.4 MB (43.5%) | 0, exact | The fine-tune's, bit for bit | The fine-tune's, bit for bit |
+| `bit1` | 62.0 MB (6.3%) | 0.712 | 86.35 (−0.50) | 94.73 (4.16) |
+| `sparse`, density 0.1 | 72.1 MB (7.3%) | 0.670 | 85.82 (0.02) | 92.04 (6.85) |
+| `sparse`, density 0.25 | 156.4 MB (15.8%) | 0.423 | not run | 95.20 (3.69) |
+| The base alone | none | 1 | 81.50 (4.35) | 84.25 (14.64) |
+
+- **The phase 2 gate is met.** The bit1 import stays within `max_drop=1` on its eval, GSM8K, in 6.3% of the fine-tune's size. bit1 and sparse both keep all of the fine-tune's GSM8K gain over the base.
+- **The self suite is the stricter gate.** It asks for the fine-tune's own text on prompts it was not trained on, where the base already disagrees with it on 15% of tokens. bit1 closes 72% of that gap and sparse at density 0.1 closes 53%, so at `max_drop=1` the self gate refuses every lossy layer here. That is what it is for: a layer that passes it reproduces the fine-tune's general behaviour, not only its skill. A calibrated bit1 scale, BitDelta's distillation step, is the next lever there.
+- **The self suite has a floor.** The fine-tune scores 98.89 on its own greedy replies, not 100: scoring in padded batches and decoding token by token round differently in BF16. The drop compares two scores taken the same way.
 
 **Garbage collection.** Blobs are reference-counted by manifests. `wpk rm` untags images and `wpk prune` removes every blob no tag reaches, as `docker image prune` does, along with stale build-cache entries and old temporary files (`--downloads` also clears the `hf://` cache, `--dry-run` only counts). The daemon holds builds, pulls, pushes, squashes, exports and tag changes off while it prunes, so nothing in use is deleted.
 
@@ -383,7 +408,7 @@ Build it in four phases, each closed by a measurable gate. Phases 1 and 2 pay fo
 | Phase | Scope | Gate |
 | --- | --- | --- |
 | 1 · Format, store | Tensor store on OCI; base and LoRA layers; `FROM`, `LAYER`, `EXPERT`; build, push, squash; vLLM with per-request routing | 50 LoRA variants of one 8B base in 20 GB; squash matches a PEFT merge |
-| 2 · Delta import | `wpk import`; `xor` codec (lossless); `bit1` codec (lossy); `ffn-expert` import; fidelity records and eval gate | Lossless import is bit-exact; `bit1` import stays within `max_drop` on its eval |
+| 2 · Delta import | `wpk import`; `xor` codec (lossless); `bit1` and `sparse` codecs (lossy); fidelity records and eval gate (all done, and the gate met: see What lossy imports give); `ffn-expert` import | Lossless import is bit-exact; `bit1` import stays within `max_drop` on its eval |
 | 3 · Token mixing | Arrow router; vLLM module for MoE over LoRA and FFN experts; `ROUTER train` (done for LoRA experts, and the gate met for them: see Trained routers); sequence and token routing | A 3-expert mix beats each single expert on a mixed-domain eval |
 | 4 · Ecosystem | ModelPack media types proposal; HF and GGUF export; Sigstore signing (done: see Signatures); `wpk rebase` | A ModelPack client pulls and runs a squashed image |
 
@@ -396,7 +421,7 @@ Phase 3 is the research-heavy one, so it comes after the format and codecs are s
 - **Engine: vLLM first.** It already batches many LoRAs per request; Weightpack adds one module for token-level mixing.
 - **`ffn-expert` is in v1.** Import lands in phase 2 and serving in phase 3. Its runtime cost is described under Runtime.
 - **Rebase: transfer, gate, then distil.** `wpk rebase` tries three steps in order and stops at the first that passes the eval gate. First, add the old delta to the new base unchanged: [fine-tuning transfer](https://arxiv.org/abs/2503.20110) works best when the two bases are linearly connected, so it suits releases within one model family. Second, distil: the old image teaches a fresh layer on the new base over filtered synthetic prompts, as [Trans-LoRA](https://arxiv.org/abs/2405.17258) does, so no original data is needed. Third, when the original data exists, fine-tune briefly starting from the transferred delta. Steps 1 and 2 run unattended; step 3 is opt-in.
-- **Fidelity evals: a shared default suite per domain, author suites optional.** A layer's author can add a suite; the build gates on both.
+- **Fidelity evals: the source's own replies by default, author suites optional.** Without `eval=`, the build gates on how often the lossy layer's first choice matches the fine-tune's on the fine-tune's replies to general prompts, which needs no data and no domain. A layer's author can name a suite of their own, and the build gates on that instead. The self suite is the stricter of the two, since it asks for the fine-tune's text rather than its skill: measured, bit1 keeps a GSM8K fine-tune's skill whole but changes 4% of its general replies' tokens. Shared suites per domain may follow.
 
 ## Sources
 

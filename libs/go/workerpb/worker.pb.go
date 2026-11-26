@@ -145,7 +145,9 @@ func (x *XORLayer) GetBlobs() []*Blob {
 
 type EncodeLayerRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Codec Codec                  `protobuf:"varint,1,opt,name=codec,proto3,enum=weightpack.worker.v1.Codec" json:"codec,omitempty"` // only CODEC_XOR so far
+	// CODEC_XOR (exact bits), CODEC_BIT1 or CODEC_SPARSE (lossy; see
+	// weightpack_worker/lossy.py for their files).
+	Codec Codec `protobuf:"varint,1,opt,name=codec,proto3,enum=weightpack.worker.v1.Codec" json:"codec,omitempty"`
 	// The parent's tensors: the base layer's tensor.v1 blobs, then the XOR
 	// layers between the base and the new layer, bottom first. XOR layers can
 	// only sit on the base or on other XOR layers, so the parent's bits are
@@ -156,11 +158,19 @@ type EncodeLayerRequest struct {
 	// shapes must match the base's.
 	TargetFiles []string `protobuf:"bytes,4,rep,name=target_files,json=targetFiles,proto3" json:"target_files,omitempty"`
 	// Directory the worker writes deltas to: one safetensors file per tensor
-	// that differs from the parent, holding target XOR parent with the
-	// tensor's name, dtype and shape. The daemon checks and stores them.
-	OutDir        string `protobuf:"bytes,5,opt,name=out_dir,json=outDir,proto3" json:"out_dir,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// that differs from the parent. For XOR it holds target XOR parent with
+	// the tensor's name, dtype and shape; for a lossy codec, the tensor's
+	// encoded delta. The daemon checks and stores them.
+	OutDir string `protobuf:"bytes,5,opt,name=out_dir,json=outDir,proto3" json:"out_dir,omitempty"`
+	// CODEC_SPARSE: the fraction of each matrix's delta entries kept, in
+	// (0, 1].
+	Density float64 `protobuf:"fixed64,6,opt,name=density,proto3" json:"density,omitempty"`
+	// A lossy codec, if set: a directory to write the model the layer gives
+	// back into (the parent plus each decoded delta, beside the fine-tune's
+	// config and tokenizer), so it can be evaluated against the fine-tune.
+	ReconstructDir string `protobuf:"bytes,7,opt,name=reconstruct_dir,json=reconstructDir,proto3" json:"reconstruct_dir,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *EncodeLayerRequest) Reset() {
@@ -228,6 +238,20 @@ func (x *EncodeLayerRequest) GetOutDir() string {
 	return ""
 }
 
+func (x *EncodeLayerRequest) GetDensity() float64 {
+	if x != nil {
+		return x.Density
+	}
+	return 0
+}
+
+func (x *EncodeLayerRequest) GetReconstructDir() string {
+	if x != nil {
+		return x.ReconstructDir
+	}
+	return ""
+}
+
 type EncodedTensor struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -283,8 +307,11 @@ func (x *EncodedTensor) GetFile() string {
 type EncodeLayerResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Only tensors that differ from the parent; the rest cost nothing.
-	Tensors       []*EncodedTensor `protobuf:"bytes,1,rep,name=tensors,proto3" json:"tensors,omitempty"`
-	Unchanged     int64            `protobuf:"varint,2,opt,name=unchanged,proto3" json:"unchanged,omitempty"` // tensors equal to the parent's
+	Tensors   []*EncodedTensor `protobuf:"bytes,1,rep,name=tensors,proto3" json:"tensors,omitempty"`
+	Unchanged int64            `protobuf:"varint,2,opt,name=unchanged,proto3" json:"unchanged,omitempty"` // tensors equal to the parent's
+	// A lossy codec: ||delta - decoded|| / ||delta|| over every changed
+	// tensor, how much of the fine-tune's change the layer misses.
+	RelativeError float64 `protobuf:"fixed64,3,opt,name=relative_error,json=relativeError,proto3" json:"relative_error,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -333,10 +360,24 @@ func (x *EncodeLayerResponse) GetUnchanged() int64 {
 	return 0
 }
 
+func (x *EncodeLayerResponse) GetRelativeError() float64 {
+	if x != nil {
+		return x.RelativeError
+	}
+	return 0
+}
+
 type EvaluateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ImageRef      string                 `protobuf:"bytes,1,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
-	Suite         string                 `protobuf:"bytes,2,opt,name=suite,proto3" json:"suite,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Hugging Face model directories to score, in order. Without a suite the
+	// first writes it: its greedy replies to general prompts.
+	Models []string `protobuf:"bytes,1,rep,name=models,proto3" json:"models,omitempty"`
+	// An eval suite file: JSON Lines of examples ({"messages"}, {"prompt",
+	// "completion"} or {"text"}), or YAML naming them (name, data). "" for the
+	// first model's own replies.
+	Suite         string `protobuf:"bytes,2,opt,name=suite,proto3" json:"suite,omitempty"`
+	Device        string `protobuf:"bytes,3,opt,name=device,proto3" json:"device,omitempty"`                                 // cuda, mps or cpu; "" picks the best there is
+	ChatTemplate  string `protobuf:"bytes,4,opt,name=chat_template,json=chatTemplate,proto3" json:"chat_template,omitempty"` // a Jinja template replacing the tokenizer's
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -371,11 +412,11 @@ func (*EvaluateRequest) Descriptor() ([]byte, []int) {
 	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *EvaluateRequest) GetImageRef() string {
+func (x *EvaluateRequest) GetModels() []string {
 	if x != nil {
-		return x.ImageRef
+		return x.Models
 	}
-	return ""
+	return nil
 }
 
 func (x *EvaluateRequest) GetSuite() string {
@@ -385,10 +426,26 @@ func (x *EvaluateRequest) GetSuite() string {
 	return ""
 }
 
+func (x *EvaluateRequest) GetDevice() string {
+	if x != nil {
+		return x.Device
+	}
+	return ""
+}
+
+func (x *EvaluateRequest) GetChatTemplate() string {
+	if x != nil {
+		return x.ChatTemplate
+	}
+	return ""
+}
+
 type EvaluateResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Suite         string                 `protobuf:"bytes,1,opt,name=suite,proto3" json:"suite,omitempty"`
-	Score         float64                `protobuf:"fixed64,2,opt,name=score,proto3" json:"score,omitempty"`
+	Suite         string                 `protobuf:"bytes,1,opt,name=suite,proto3" json:"suite,omitempty"` // its name, or "self"
+	Examples      int32                  `protobuf:"varint,2,opt,name=examples,proto3" json:"examples,omitempty"`
+	Tokens        int64                  `protobuf:"varint,3,opt,name=tokens,proto3" json:"tokens,omitempty"` // learnt tokens each model is scored on
+	Scores        []*ModelScore          `protobuf:"bytes,4,rep,name=scores,proto3" json:"scores,omitempty"`  // in the order of models
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -430,9 +487,75 @@ func (x *EvaluateResponse) GetSuite() string {
 	return ""
 }
 
-func (x *EvaluateResponse) GetScore() float64 {
+func (x *EvaluateResponse) GetExamples() int32 {
 	if x != nil {
-		return x.Score
+		return x.Examples
+	}
+	return 0
+}
+
+func (x *EvaluateResponse) GetTokens() int64 {
+	if x != nil {
+		return x.Tokens
+	}
+	return 0
+}
+
+func (x *EvaluateResponse) GetScores() []*ModelScore {
+	if x != nil {
+		return x.Scores
+	}
+	return nil
+}
+
+type ModelScore struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Accuracy      float64                `protobuf:"fixed64,1,opt,name=accuracy,proto3" json:"accuracy,omitempty"` // next-token accuracy on the learnt tokens, percent
+	Loss          float64                `protobuf:"fixed64,2,opt,name=loss,proto3" json:"loss,omitempty"`         // mean loss per learnt token
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ModelScore) Reset() {
+	*x = ModelScore{}
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ModelScore) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ModelScore) ProtoMessage() {}
+
+func (x *ModelScore) ProtoReflect() protoreflect.Message {
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ModelScore.ProtoReflect.Descriptor instead.
+func (*ModelScore) Descriptor() ([]byte, []int) {
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *ModelScore) GetAccuracy() float64 {
+	if x != nil {
+		return x.Accuracy
+	}
+	return 0
+}
+
+func (x *ModelScore) GetLoss() float64 {
+	if x != nil {
+		return x.Loss
 	}
 	return 0
 }
@@ -445,7 +568,7 @@ type InfoRequest struct {
 
 func (x *InfoRequest) Reset() {
 	*x = InfoRequest{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[6]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -457,7 +580,7 @@ func (x *InfoRequest) String() string {
 func (*InfoRequest) ProtoMessage() {}
 
 func (x *InfoRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[6]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -470,7 +593,7 @@ func (x *InfoRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoRequest.ProtoReflect.Descriptor instead.
 func (*InfoRequest) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{6}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{7}
 }
 
 type InfoResponse struct {
@@ -483,7 +606,7 @@ type InfoResponse struct {
 
 func (x *InfoResponse) Reset() {
 	*x = InfoResponse{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[7]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -495,7 +618,7 @@ func (x *InfoResponse) String() string {
 func (*InfoResponse) ProtoMessage() {}
 
 func (x *InfoResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[7]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -508,7 +631,7 @@ func (x *InfoResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InfoResponse.ProtoReflect.Descriptor instead.
 func (*InfoResponse) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{7}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *InfoResponse) GetVersion() string {
@@ -537,7 +660,7 @@ type Blob struct {
 
 func (x *Blob) Reset() {
 	*x = Blob{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[8]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -549,7 +672,7 @@ func (x *Blob) String() string {
 func (*Blob) ProtoMessage() {}
 
 func (x *Blob) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[8]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -562,7 +685,7 @@ func (x *Blob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Blob.ProtoReflect.Descriptor instead.
 func (*Blob) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{8}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Blob) GetDigest() string {
@@ -600,7 +723,7 @@ type LoRALayer struct {
 
 func (x *LoRALayer) Reset() {
 	*x = LoRALayer{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[9]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -612,7 +735,7 @@ func (x *LoRALayer) String() string {
 func (*LoRALayer) ProtoMessage() {}
 
 func (x *LoRALayer) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[9]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -625,7 +748,7 @@ func (x *LoRALayer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LoRALayer.ProtoReflect.Descriptor instead.
 func (*LoRALayer) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{9}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *LoRALayer) GetId() string {
@@ -663,14 +786,18 @@ type SquashRequest struct {
 	OutDir string `protobuf:"bytes,3,opt,name=out_dir,json=outDir,proto3" json:"out_dir,omitempty"`
 	// XOR layers between the base and the LoRA layers, bottom first. They are
 	// applied to the base's bits first, exactly, before any LoRA math.
-	XorLayers     []*XORLayer `protobuf:"bytes,4,rep,name=xor_layers,json=xorLayers,proto3" json:"xor_layers,omitempty"`
+	XorLayers []*XORLayer `protobuf:"bytes,4,rep,name=xor_layers,json=xorLayers,proto3" json:"xor_layers,omitempty"`
+	// Lossy layers (delta.bit1.v1 or delta.sparse.v1 blobs, one tensor's
+	// delta each), bottom first. Their deltas add in float32 with the LoRA
+	// layers' before the single rounding.
+	LossyLayers   []*DeltaLayer `protobuf:"bytes,5,rep,name=lossy_layers,json=lossyLayers,proto3" json:"lossy_layers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SquashRequest) Reset() {
 	*x = SquashRequest{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[10]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -682,7 +809,7 @@ func (x *SquashRequest) String() string {
 func (*SquashRequest) ProtoMessage() {}
 
 func (x *SquashRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[10]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -695,7 +822,7 @@ func (x *SquashRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SquashRequest.ProtoReflect.Descriptor instead.
 func (*SquashRequest) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{10}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SquashRequest) GetBase() []*Blob {
@@ -726,6 +853,67 @@ func (x *SquashRequest) GetXorLayers() []*XORLayer {
 	return nil
 }
 
+func (x *SquashRequest) GetLossyLayers() []*DeltaLayer {
+	if x != nil {
+		return x.LossyLayers
+	}
+	return nil
+}
+
+// A lossy layer's delta blobs, as the daemon hands them over: plain
+// safetensors files.
+type DeltaLayer struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Blobs         []*Blob                `protobuf:"bytes,2,rep,name=blobs,proto3" json:"blobs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DeltaLayer) Reset() {
+	*x = DeltaLayer{}
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DeltaLayer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DeltaLayer) ProtoMessage() {}
+
+func (x *DeltaLayer) ProtoReflect() protoreflect.Message {
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DeltaLayer.ProtoReflect.Descriptor instead.
+func (*DeltaLayer) Descriptor() ([]byte, []int) {
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *DeltaLayer) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *DeltaLayer) GetBlobs() []*Blob {
+	if x != nil {
+		return x.Blobs
+	}
+	return nil
+}
+
 type MergedTensor struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"` // base tensor name, e.g. model.layers.0.self_attn.q_proj.weight
@@ -736,7 +924,7 @@ type MergedTensor struct {
 
 func (x *MergedTensor) Reset() {
 	*x = MergedTensor{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[11]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -748,7 +936,7 @@ func (x *MergedTensor) String() string {
 func (*MergedTensor) ProtoMessage() {}
 
 func (x *MergedTensor) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[11]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -761,7 +949,7 @@ func (x *MergedTensor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MergedTensor.ProtoReflect.Descriptor instead.
 func (*MergedTensor) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{11}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *MergedTensor) GetName() string {
@@ -789,7 +977,7 @@ type SquashResponse struct {
 
 func (x *SquashResponse) Reset() {
 	*x = SquashResponse{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[12]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -801,7 +989,7 @@ func (x *SquashResponse) String() string {
 func (*SquashResponse) ProtoMessage() {}
 
 func (x *SquashResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[12]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -814,7 +1002,7 @@ func (x *SquashResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SquashResponse.ProtoReflect.Descriptor instead.
 func (*SquashResponse) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{12}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SquashResponse) GetTensors() []*MergedTensor {
@@ -835,7 +1023,7 @@ type Adapter struct {
 
 func (x *Adapter) Reset() {
 	*x = Adapter{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[13]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -847,7 +1035,7 @@ func (x *Adapter) String() string {
 func (*Adapter) ProtoMessage() {}
 
 func (x *Adapter) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[13]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -860,7 +1048,7 @@ func (x *Adapter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Adapter.ProtoReflect.Descriptor instead.
 func (*Adapter) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{13}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Adapter) GetId() string {
@@ -906,7 +1094,7 @@ type TrainRouterRequest struct {
 
 func (x *TrainRouterRequest) Reset() {
 	*x = TrainRouterRequest{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[14]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -918,7 +1106,7 @@ func (x *TrainRouterRequest) String() string {
 func (*TrainRouterRequest) ProtoMessage() {}
 
 func (x *TrainRouterRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[14]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -931,7 +1119,7 @@ func (x *TrainRouterRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrainRouterRequest.ProtoReflect.Descriptor instead.
 func (*TrainRouterRequest) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{14}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *TrainRouterRequest) GetBaseDir() string {
@@ -1023,7 +1211,7 @@ type TrainRouterProgress struct {
 
 func (x *TrainRouterProgress) Reset() {
 	*x = TrainRouterProgress{}
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[15]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1035,7 +1223,7 @@ func (x *TrainRouterProgress) String() string {
 func (*TrainRouterProgress) ProtoMessage() {}
 
 func (x *TrainRouterProgress) ProtoReflect() protoreflect.Message {
-	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[15]
+	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1048,7 +1236,7 @@ func (x *TrainRouterProgress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TrainRouterProgress.ProtoReflect.Descriptor instead.
 func (*TrainRouterProgress) Descriptor() ([]byte, []int) {
-	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{15}
+	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *TrainRouterProgress) GetStep() int32 {
@@ -1128,25 +1316,36 @@ const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"!weightpack/worker/v1/worker.proto\x12\x14weightpack.worker.v1\"L\n" +
 	"\bXORLayer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
-	"\x05blobs\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\xed\x01\n" +
+	"\x05blobs\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\xb0\x02\n" +
 	"\x12EncodeLayerRequest\x121\n" +
 	"\x05codec\x18\x01 \x01(\x0e2\x1b.weightpack.worker.v1.CodecR\x05codec\x12.\n" +
 	"\x04base\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x04base\x128\n" +
 	"\aparents\x18\x03 \x03(\v2\x1e.weightpack.worker.v1.XORLayerR\aparents\x12!\n" +
 	"\ftarget_files\x18\x04 \x03(\tR\vtargetFiles\x12\x17\n" +
-	"\aout_dir\x18\x05 \x01(\tR\x06outDir\"7\n" +
+	"\aout_dir\x18\x05 \x01(\tR\x06outDir\x12\x18\n" +
+	"\adensity\x18\x06 \x01(\x01R\adensity\x12'\n" +
+	"\x0freconstruct_dir\x18\a \x01(\tR\x0ereconstructDir\"7\n" +
 	"\rEncodedTensor\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
-	"\x04file\x18\x02 \x01(\tR\x04file\"r\n" +
+	"\x04file\x18\x02 \x01(\tR\x04file\"\x99\x01\n" +
 	"\x13EncodeLayerResponse\x12=\n" +
 	"\atensors\x18\x01 \x03(\v2#.weightpack.worker.v1.EncodedTensorR\atensors\x12\x1c\n" +
-	"\tunchanged\x18\x02 \x01(\x03R\tunchanged\"D\n" +
-	"\x0fEvaluateRequest\x12\x1b\n" +
-	"\timage_ref\x18\x01 \x01(\tR\bimageRef\x12\x14\n" +
-	"\x05suite\x18\x02 \x01(\tR\x05suite\">\n" +
+	"\tunchanged\x18\x02 \x01(\x03R\tunchanged\x12%\n" +
+	"\x0erelative_error\x18\x03 \x01(\x01R\rrelativeError\"|\n" +
+	"\x0fEvaluateRequest\x12\x16\n" +
+	"\x06models\x18\x01 \x03(\tR\x06models\x12\x14\n" +
+	"\x05suite\x18\x02 \x01(\tR\x05suite\x12\x16\n" +
+	"\x06device\x18\x03 \x01(\tR\x06device\x12#\n" +
+	"\rchat_template\x18\x04 \x01(\tR\fchatTemplate\"\x96\x01\n" +
 	"\x10EvaluateResponse\x12\x14\n" +
-	"\x05suite\x18\x01 \x01(\tR\x05suite\x12\x14\n" +
-	"\x05score\x18\x02 \x01(\x01R\x05score\"\r\n" +
+	"\x05suite\x18\x01 \x01(\tR\x05suite\x12\x1a\n" +
+	"\bexamples\x18\x02 \x01(\x05R\bexamples\x12\x16\n" +
+	"\x06tokens\x18\x03 \x01(\x03R\x06tokens\x128\n" +
+	"\x06scores\x18\x04 \x03(\v2 .weightpack.worker.v1.ModelScoreR\x06scores\"<\n" +
+	"\n" +
+	"ModelScore\x12\x1a\n" +
+	"\baccuracy\x18\x01 \x01(\x01R\baccuracy\x12\x12\n" +
+	"\x04loss\x18\x02 \x01(\x01R\x04loss\"\r\n" +
 	"\vInfoRequest\"]\n" +
 	"\fInfoResponse\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x123\n" +
@@ -1159,13 +1358,18 @@ const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"\tLoRALayer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\ascaling\x18\x02 \x01(\x01R\ascaling\x120\n" +
-	"\x05blobs\x18\x03 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\xd0\x01\n" +
+	"\x05blobs\x18\x03 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\x95\x02\n" +
 	"\rSquashRequest\x12.\n" +
 	"\x04base\x18\x01 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x04base\x127\n" +
 	"\x06layers\x18\x02 \x03(\v2\x1f.weightpack.worker.v1.LoRALayerR\x06layers\x12\x17\n" +
 	"\aout_dir\x18\x03 \x01(\tR\x06outDir\x12=\n" +
 	"\n" +
-	"xor_layers\x18\x04 \x03(\v2\x1e.weightpack.worker.v1.XORLayerR\txorLayers\"6\n" +
+	"xor_layers\x18\x04 \x03(\v2\x1e.weightpack.worker.v1.XORLayerR\txorLayers\x12C\n" +
+	"\flossy_layers\x18\x05 \x03(\v2 .weightpack.worker.v1.DeltaLayerR\vlossyLayers\"N\n" +
+	"\n" +
+	"DeltaLayer\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
+	"\x05blobs\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"6\n" +
 	"\fMergedTensor\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04file\x18\x02 \x01(\tR\x04file\"N\n" +
@@ -1227,7 +1431,7 @@ func file_weightpack_worker_v1_worker_proto_rawDescGZIP() []byte {
 }
 
 var file_weightpack_worker_v1_worker_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_weightpack_worker_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_weightpack_worker_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
 var file_weightpack_worker_v1_worker_proto_goTypes = []any{
 	(Codec)(0),                  // 0: weightpack.worker.v1.Codec
 	(*XORLayer)(nil),            // 1: weightpack.worker.v1.XORLayer
@@ -1236,45 +1440,50 @@ var file_weightpack_worker_v1_worker_proto_goTypes = []any{
 	(*EncodeLayerResponse)(nil), // 4: weightpack.worker.v1.EncodeLayerResponse
 	(*EvaluateRequest)(nil),     // 5: weightpack.worker.v1.EvaluateRequest
 	(*EvaluateResponse)(nil),    // 6: weightpack.worker.v1.EvaluateResponse
-	(*InfoRequest)(nil),         // 7: weightpack.worker.v1.InfoRequest
-	(*InfoResponse)(nil),        // 8: weightpack.worker.v1.InfoResponse
-	(*Blob)(nil),                // 9: weightpack.worker.v1.Blob
-	(*LoRALayer)(nil),           // 10: weightpack.worker.v1.LoRALayer
-	(*SquashRequest)(nil),       // 11: weightpack.worker.v1.SquashRequest
-	(*MergedTensor)(nil),        // 12: weightpack.worker.v1.MergedTensor
-	(*SquashResponse)(nil),      // 13: weightpack.worker.v1.SquashResponse
-	(*Adapter)(nil),             // 14: weightpack.worker.v1.Adapter
-	(*TrainRouterRequest)(nil),  // 15: weightpack.worker.v1.TrainRouterRequest
-	(*TrainRouterProgress)(nil), // 16: weightpack.worker.v1.TrainRouterProgress
+	(*ModelScore)(nil),          // 7: weightpack.worker.v1.ModelScore
+	(*InfoRequest)(nil),         // 8: weightpack.worker.v1.InfoRequest
+	(*InfoResponse)(nil),        // 9: weightpack.worker.v1.InfoResponse
+	(*Blob)(nil),                // 10: weightpack.worker.v1.Blob
+	(*LoRALayer)(nil),           // 11: weightpack.worker.v1.LoRALayer
+	(*SquashRequest)(nil),       // 12: weightpack.worker.v1.SquashRequest
+	(*DeltaLayer)(nil),          // 13: weightpack.worker.v1.DeltaLayer
+	(*MergedTensor)(nil),        // 14: weightpack.worker.v1.MergedTensor
+	(*SquashResponse)(nil),      // 15: weightpack.worker.v1.SquashResponse
+	(*Adapter)(nil),             // 16: weightpack.worker.v1.Adapter
+	(*TrainRouterRequest)(nil),  // 17: weightpack.worker.v1.TrainRouterRequest
+	(*TrainRouterProgress)(nil), // 18: weightpack.worker.v1.TrainRouterProgress
 }
 var file_weightpack_worker_v1_worker_proto_depIdxs = []int32{
-	9,  // 0: weightpack.worker.v1.XORLayer.blobs:type_name -> weightpack.worker.v1.Blob
+	10, // 0: weightpack.worker.v1.XORLayer.blobs:type_name -> weightpack.worker.v1.Blob
 	0,  // 1: weightpack.worker.v1.EncodeLayerRequest.codec:type_name -> weightpack.worker.v1.Codec
-	9,  // 2: weightpack.worker.v1.EncodeLayerRequest.base:type_name -> weightpack.worker.v1.Blob
+	10, // 2: weightpack.worker.v1.EncodeLayerRequest.base:type_name -> weightpack.worker.v1.Blob
 	1,  // 3: weightpack.worker.v1.EncodeLayerRequest.parents:type_name -> weightpack.worker.v1.XORLayer
 	3,  // 4: weightpack.worker.v1.EncodeLayerResponse.tensors:type_name -> weightpack.worker.v1.EncodedTensor
-	0,  // 5: weightpack.worker.v1.InfoResponse.codecs:type_name -> weightpack.worker.v1.Codec
-	9,  // 6: weightpack.worker.v1.LoRALayer.blobs:type_name -> weightpack.worker.v1.Blob
-	9,  // 7: weightpack.worker.v1.SquashRequest.base:type_name -> weightpack.worker.v1.Blob
-	10, // 8: weightpack.worker.v1.SquashRequest.layers:type_name -> weightpack.worker.v1.LoRALayer
-	1,  // 9: weightpack.worker.v1.SquashRequest.xor_layers:type_name -> weightpack.worker.v1.XORLayer
-	12, // 10: weightpack.worker.v1.SquashResponse.tensors:type_name -> weightpack.worker.v1.MergedTensor
-	14, // 11: weightpack.worker.v1.TrainRouterRequest.experts:type_name -> weightpack.worker.v1.Adapter
-	2,  // 12: weightpack.worker.v1.Worker.EncodeLayer:input_type -> weightpack.worker.v1.EncodeLayerRequest
-	5,  // 13: weightpack.worker.v1.Worker.Evaluate:input_type -> weightpack.worker.v1.EvaluateRequest
-	7,  // 14: weightpack.worker.v1.Worker.Info:input_type -> weightpack.worker.v1.InfoRequest
-	11, // 15: weightpack.worker.v1.Worker.Squash:input_type -> weightpack.worker.v1.SquashRequest
-	15, // 16: weightpack.worker.v1.Worker.TrainRouter:input_type -> weightpack.worker.v1.TrainRouterRequest
-	4,  // 17: weightpack.worker.v1.Worker.EncodeLayer:output_type -> weightpack.worker.v1.EncodeLayerResponse
-	6,  // 18: weightpack.worker.v1.Worker.Evaluate:output_type -> weightpack.worker.v1.EvaluateResponse
-	8,  // 19: weightpack.worker.v1.Worker.Info:output_type -> weightpack.worker.v1.InfoResponse
-	13, // 20: weightpack.worker.v1.Worker.Squash:output_type -> weightpack.worker.v1.SquashResponse
-	16, // 21: weightpack.worker.v1.Worker.TrainRouter:output_type -> weightpack.worker.v1.TrainRouterProgress
-	17, // [17:22] is the sub-list for method output_type
-	12, // [12:17] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	7,  // 5: weightpack.worker.v1.EvaluateResponse.scores:type_name -> weightpack.worker.v1.ModelScore
+	0,  // 6: weightpack.worker.v1.InfoResponse.codecs:type_name -> weightpack.worker.v1.Codec
+	10, // 7: weightpack.worker.v1.LoRALayer.blobs:type_name -> weightpack.worker.v1.Blob
+	10, // 8: weightpack.worker.v1.SquashRequest.base:type_name -> weightpack.worker.v1.Blob
+	11, // 9: weightpack.worker.v1.SquashRequest.layers:type_name -> weightpack.worker.v1.LoRALayer
+	1,  // 10: weightpack.worker.v1.SquashRequest.xor_layers:type_name -> weightpack.worker.v1.XORLayer
+	13, // 11: weightpack.worker.v1.SquashRequest.lossy_layers:type_name -> weightpack.worker.v1.DeltaLayer
+	10, // 12: weightpack.worker.v1.DeltaLayer.blobs:type_name -> weightpack.worker.v1.Blob
+	14, // 13: weightpack.worker.v1.SquashResponse.tensors:type_name -> weightpack.worker.v1.MergedTensor
+	16, // 14: weightpack.worker.v1.TrainRouterRequest.experts:type_name -> weightpack.worker.v1.Adapter
+	2,  // 15: weightpack.worker.v1.Worker.EncodeLayer:input_type -> weightpack.worker.v1.EncodeLayerRequest
+	5,  // 16: weightpack.worker.v1.Worker.Evaluate:input_type -> weightpack.worker.v1.EvaluateRequest
+	8,  // 17: weightpack.worker.v1.Worker.Info:input_type -> weightpack.worker.v1.InfoRequest
+	12, // 18: weightpack.worker.v1.Worker.Squash:input_type -> weightpack.worker.v1.SquashRequest
+	17, // 19: weightpack.worker.v1.Worker.TrainRouter:input_type -> weightpack.worker.v1.TrainRouterRequest
+	4,  // 20: weightpack.worker.v1.Worker.EncodeLayer:output_type -> weightpack.worker.v1.EncodeLayerResponse
+	6,  // 21: weightpack.worker.v1.Worker.Evaluate:output_type -> weightpack.worker.v1.EvaluateResponse
+	9,  // 22: weightpack.worker.v1.Worker.Info:output_type -> weightpack.worker.v1.InfoResponse
+	15, // 23: weightpack.worker.v1.Worker.Squash:output_type -> weightpack.worker.v1.SquashResponse
+	18, // 24: weightpack.worker.v1.Worker.TrainRouter:output_type -> weightpack.worker.v1.TrainRouterProgress
+	20, // [20:25] is the sub-list for method output_type
+	15, // [15:20] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_weightpack_worker_v1_worker_proto_init() }
@@ -1288,7 +1497,7 @@ func file_weightpack_worker_v1_worker_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_weightpack_worker_v1_worker_proto_rawDesc), len(file_weightpack_worker_v1_worker_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   16,
+			NumMessages:   18,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

@@ -73,7 +73,8 @@ class WorkerServicer:
         raise NotImplementedError('Method not implemented!')
 
     def Evaluate(self, request, context):
-        """Run an eval suite against a composition and report the score.
+        """Score models on an eval suite: a fine-tune and the model its lossy
+        layer gives back, say, so the build can gate on the drop.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

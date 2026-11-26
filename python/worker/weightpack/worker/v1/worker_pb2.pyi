@@ -29,18 +29,22 @@ class XORLayer(_message.Message):
     def __init__(self, id: _Optional[str] = ..., blobs: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ...) -> None: ...
 
 class EncodeLayerRequest(_message.Message):
-    __slots__ = ("codec", "base", "parents", "target_files", "out_dir")
+    __slots__ = ("codec", "base", "parents", "target_files", "out_dir", "density", "reconstruct_dir")
     CODEC_FIELD_NUMBER: _ClassVar[int]
     BASE_FIELD_NUMBER: _ClassVar[int]
     PARENTS_FIELD_NUMBER: _ClassVar[int]
     TARGET_FILES_FIELD_NUMBER: _ClassVar[int]
     OUT_DIR_FIELD_NUMBER: _ClassVar[int]
+    DENSITY_FIELD_NUMBER: _ClassVar[int]
+    RECONSTRUCT_DIR_FIELD_NUMBER: _ClassVar[int]
     codec: Codec
     base: _containers.RepeatedCompositeFieldContainer[Blob]
     parents: _containers.RepeatedCompositeFieldContainer[XORLayer]
     target_files: _containers.RepeatedScalarFieldContainer[str]
     out_dir: str
-    def __init__(self, codec: _Optional[_Union[Codec, str]] = ..., base: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ..., parents: _Optional[_Iterable[_Union[XORLayer, _Mapping]]] = ..., target_files: _Optional[_Iterable[str]] = ..., out_dir: _Optional[str] = ...) -> None: ...
+    density: float
+    reconstruct_dir: str
+    def __init__(self, codec: _Optional[_Union[Codec, str]] = ..., base: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ..., parents: _Optional[_Iterable[_Union[XORLayer, _Mapping]]] = ..., target_files: _Optional[_Iterable[str]] = ..., out_dir: _Optional[str] = ..., density: _Optional[float] = ..., reconstruct_dir: _Optional[str] = ...) -> None: ...
 
 class EncodedTensor(_message.Message):
     __slots__ = ("name", "file")
@@ -51,28 +55,46 @@ class EncodedTensor(_message.Message):
     def __init__(self, name: _Optional[str] = ..., file: _Optional[str] = ...) -> None: ...
 
 class EncodeLayerResponse(_message.Message):
-    __slots__ = ("tensors", "unchanged")
+    __slots__ = ("tensors", "unchanged", "relative_error")
     TENSORS_FIELD_NUMBER: _ClassVar[int]
     UNCHANGED_FIELD_NUMBER: _ClassVar[int]
+    RELATIVE_ERROR_FIELD_NUMBER: _ClassVar[int]
     tensors: _containers.RepeatedCompositeFieldContainer[EncodedTensor]
     unchanged: int
-    def __init__(self, tensors: _Optional[_Iterable[_Union[EncodedTensor, _Mapping]]] = ..., unchanged: _Optional[int] = ...) -> None: ...
+    relative_error: float
+    def __init__(self, tensors: _Optional[_Iterable[_Union[EncodedTensor, _Mapping]]] = ..., unchanged: _Optional[int] = ..., relative_error: _Optional[float] = ...) -> None: ...
 
 class EvaluateRequest(_message.Message):
-    __slots__ = ("image_ref", "suite")
-    IMAGE_REF_FIELD_NUMBER: _ClassVar[int]
+    __slots__ = ("models", "suite", "device", "chat_template")
+    MODELS_FIELD_NUMBER: _ClassVar[int]
     SUITE_FIELD_NUMBER: _ClassVar[int]
-    image_ref: str
+    DEVICE_FIELD_NUMBER: _ClassVar[int]
+    CHAT_TEMPLATE_FIELD_NUMBER: _ClassVar[int]
+    models: _containers.RepeatedScalarFieldContainer[str]
     suite: str
-    def __init__(self, image_ref: _Optional[str] = ..., suite: _Optional[str] = ...) -> None: ...
+    device: str
+    chat_template: str
+    def __init__(self, models: _Optional[_Iterable[str]] = ..., suite: _Optional[str] = ..., device: _Optional[str] = ..., chat_template: _Optional[str] = ...) -> None: ...
 
 class EvaluateResponse(_message.Message):
-    __slots__ = ("suite", "score")
+    __slots__ = ("suite", "examples", "tokens", "scores")
     SUITE_FIELD_NUMBER: _ClassVar[int]
-    SCORE_FIELD_NUMBER: _ClassVar[int]
+    EXAMPLES_FIELD_NUMBER: _ClassVar[int]
+    TOKENS_FIELD_NUMBER: _ClassVar[int]
+    SCORES_FIELD_NUMBER: _ClassVar[int]
     suite: str
-    score: float
-    def __init__(self, suite: _Optional[str] = ..., score: _Optional[float] = ...) -> None: ...
+    examples: int
+    tokens: int
+    scores: _containers.RepeatedCompositeFieldContainer[ModelScore]
+    def __init__(self, suite: _Optional[str] = ..., examples: _Optional[int] = ..., tokens: _Optional[int] = ..., scores: _Optional[_Iterable[_Union[ModelScore, _Mapping]]] = ...) -> None: ...
+
+class ModelScore(_message.Message):
+    __slots__ = ("accuracy", "loss")
+    ACCURACY_FIELD_NUMBER: _ClassVar[int]
+    LOSS_FIELD_NUMBER: _ClassVar[int]
+    accuracy: float
+    loss: float
+    def __init__(self, accuracy: _Optional[float] = ..., loss: _Optional[float] = ...) -> None: ...
 
 class InfoRequest(_message.Message):
     __slots__ = ()
@@ -107,16 +129,26 @@ class LoRALayer(_message.Message):
     def __init__(self, id: _Optional[str] = ..., scaling: _Optional[float] = ..., blobs: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ...) -> None: ...
 
 class SquashRequest(_message.Message):
-    __slots__ = ("base", "layers", "out_dir", "xor_layers")
+    __slots__ = ("base", "layers", "out_dir", "xor_layers", "lossy_layers")
     BASE_FIELD_NUMBER: _ClassVar[int]
     LAYERS_FIELD_NUMBER: _ClassVar[int]
     OUT_DIR_FIELD_NUMBER: _ClassVar[int]
     XOR_LAYERS_FIELD_NUMBER: _ClassVar[int]
+    LOSSY_LAYERS_FIELD_NUMBER: _ClassVar[int]
     base: _containers.RepeatedCompositeFieldContainer[Blob]
     layers: _containers.RepeatedCompositeFieldContainer[LoRALayer]
     out_dir: str
     xor_layers: _containers.RepeatedCompositeFieldContainer[XORLayer]
-    def __init__(self, base: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ..., layers: _Optional[_Iterable[_Union[LoRALayer, _Mapping]]] = ..., out_dir: _Optional[str] = ..., xor_layers: _Optional[_Iterable[_Union[XORLayer, _Mapping]]] = ...) -> None: ...
+    lossy_layers: _containers.RepeatedCompositeFieldContainer[DeltaLayer]
+    def __init__(self, base: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ..., layers: _Optional[_Iterable[_Union[LoRALayer, _Mapping]]] = ..., out_dir: _Optional[str] = ..., xor_layers: _Optional[_Iterable[_Union[XORLayer, _Mapping]]] = ..., lossy_layers: _Optional[_Iterable[_Union[DeltaLayer, _Mapping]]] = ...) -> None: ...
+
+class DeltaLayer(_message.Message):
+    __slots__ = ("id", "blobs")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    BLOBS_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    blobs: _containers.RepeatedCompositeFieldContainer[Blob]
+    def __init__(self, id: _Optional[str] = ..., blobs: _Optional[_Iterable[_Union[Blob, _Mapping]]] = ...) -> None: ...
 
 class MergedTensor(_message.Message):
     __slots__ = ("name", "file")

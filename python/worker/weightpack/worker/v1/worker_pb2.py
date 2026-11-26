@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!weightpack/worker/v1/worker.proto\x12\x14weightpack.worker.v1\"A\n\x08XORLayer\x12\n\n\x02id\x18\x01 \x01(\t\x12)\n\x05\x62lobs\x18\x02 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\"\xc2\x01\n\x12\x45ncodeLayerRequest\x12*\n\x05\x63odec\x18\x01 \x01(\x0e\x32\x1b.weightpack.worker.v1.Codec\x12(\n\x04\x62\x61se\x18\x02 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\x12/\n\x07parents\x18\x03 \x03(\x0b\x32\x1e.weightpack.worker.v1.XORLayer\x12\x14\n\x0ctarget_files\x18\x04 \x03(\t\x12\x0f\n\x07out_dir\x18\x05 \x01(\t\"+\n\rEncodedTensor\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x66ile\x18\x02 \x01(\t\"^\n\x13\x45ncodeLayerResponse\x12\x34\n\x07tensors\x18\x01 \x03(\x0b\x32#.weightpack.worker.v1.EncodedTensor\x12\x11\n\tunchanged\x18\x02 \x01(\x03\"3\n\x0f\x45valuateRequest\x12\x11\n\timage_ref\x18\x01 \x01(\t\x12\r\n\x05suite\x18\x02 \x01(\t\"0\n\x10\x45valuateResponse\x12\r\n\x05suite\x18\x01 \x01(\t\x12\r\n\x05score\x18\x02 \x01(\x01\"\r\n\x0bInfoRequest\"L\n\x0cInfoResponse\x12\x0f\n\x07version\x18\x01 \x01(\t\x12+\n\x06\x63odecs\x18\x02 \x03(\x0e\x32\x1b.weightpack.worker.v1.Codec\"8\n\x04\x42lob\x12\x0e\n\x06\x64igest\x18\x01 \x01(\t\x12\x12\n\nmedia_type\x18\x02 \x01(\t\x12\x0c\n\x04path\x18\x03 \x01(\t\"S\n\tLoRALayer\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0f\n\x07scaling\x18\x02 \x01(\x01\x12)\n\x05\x62lobs\x18\x03 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\"\xaf\x01\n\rSquashRequest\x12(\n\x04\x62\x61se\x18\x01 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\x12/\n\x06layers\x18\x02 \x03(\x0b\x32\x1f.weightpack.worker.v1.LoRALayer\x12\x0f\n\x07out_dir\x18\x03 \x01(\t\x12\x32\n\nxor_layers\x18\x04 \x03(\x0b\x32\x1e.weightpack.worker.v1.XORLayer\"*\n\x0cMergedTensor\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x66ile\x18\x02 \x01(\t\"E\n\x0eSquashResponse\x12\x33\n\x07tensors\x18\x01 \x03(\x0b\x32\".weightpack.worker.v1.MergedTensor\"\"\n\x07\x41\x64\x61pter\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0b\n\x03\x64ir\x18\x02 \x01(\t\"\xdc\x01\n\x12TrainRouterRequest\x12\x10\n\x08\x62\x61se_dir\x18\x01 \x01(\t\x12.\n\x07\x65xperts\x18\x02 \x03(\x0b\x32\x1d.weightpack.worker.v1.Adapter\x12\x0f\n\x07targets\x18\x03 \x03(\t\x12\x0e\n\x06\x62locks\x18\x04 \x01(\t\x12\r\n\x05top_k\x18\x05 \x01(\x05\x12\x0c\n\x04\x64\x61ta\x18\x06 \x01(\t\x12\r\n\x05steps\x18\x07 \x01(\x05\x12\x10\n\x08out_file\x18\x08 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\t \x01(\t\x12\x15\n\rchat_template\x18\n \x01(\t\"\xbc\x01\n\x13TrainRouterProgress\x12\x0c\n\x04step\x18\x01 \x01(\x05\x12\r\n\x05steps\x18\x02 \x01(\x05\x12\x0c\n\x04loss\x18\x03 \x01(\x01\x12\x0c\n\x04\x64one\x18\x04 \x01(\x08\x12\x10\n\x08\x65xamples\x18\x05 \x01(\x05\x12\x0f\n\x07heldout\x18\x06 \x01(\x05\x12\x12\n\narrow_loss\x18\x07 \x01(\x01\x12\x14\n\x0ctrained_loss\x18\x08 \x01(\x01\x12\x0e\n\x06\x64\x65vice\x18\t \x01(\t\x12\x0f\n\x07seconds\x18\n \x01(\x01*_\n\x05\x43odec\x12\x15\n\x11\x43ODEC_UNSPECIFIED\x10\x00\x12\r\n\tCODEC_XOR\x10\x01\x12\x0e\n\nCODEC_BIT1\x10\x02\x12\x10\n\x0c\x43ODEC_SPARSE\x10\x03\x12\x0e\n\nCODEC_LORA\x10\x04\x32\xd1\x03\n\x06Worker\x12\x62\n\x0b\x45ncodeLayer\x12(.weightpack.worker.v1.EncodeLayerRequest\x1a).weightpack.worker.v1.EncodeLayerResponse\x12Y\n\x08\x45valuate\x12%.weightpack.worker.v1.EvaluateRequest\x1a&.weightpack.worker.v1.EvaluateResponse\x12M\n\x04Info\x12!.weightpack.worker.v1.InfoRequest\x1a\".weightpack.worker.v1.InfoResponse\x12S\n\x06Squash\x12#.weightpack.worker.v1.SquashRequest\x1a$.weightpack.worker.v1.SquashResponse\x12\x64\n\x0bTrainRouter\x12(.weightpack.worker.v1.TrainRouterRequest\x1a).weightpack.worker.v1.TrainRouterProgress0\x01\x42=Z;github.com/rizkaitbrik/weightpack/libs/go/workerpb;workerpbb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n!weightpack/worker/v1/worker.proto\x12\x14weightpack.worker.v1\"A\n\x08XORLayer\x12\n\n\x02id\x18\x01 \x01(\t\x12)\n\x05\x62lobs\x18\x02 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\"\xec\x01\n\x12\x45ncodeLayerRequest\x12*\n\x05\x63odec\x18\x01 \x01(\x0e\x32\x1b.weightpack.worker.v1.Codec\x12(\n\x04\x62\x61se\x18\x02 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\x12/\n\x07parents\x18\x03 \x03(\x0b\x32\x1e.weightpack.worker.v1.XORLayer\x12\x14\n\x0ctarget_files\x18\x04 \x03(\t\x12\x0f\n\x07out_dir\x18\x05 \x01(\t\x12\x0f\n\x07\x64\x65nsity\x18\x06 \x01(\x01\x12\x17\n\x0freconstruct_dir\x18\x07 \x01(\t\"+\n\rEncodedTensor\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x66ile\x18\x02 \x01(\t\"v\n\x13\x45ncodeLayerResponse\x12\x34\n\x07tensors\x18\x01 \x03(\x0b\x32#.weightpack.worker.v1.EncodedTensor\x12\x11\n\tunchanged\x18\x02 \x01(\x03\x12\x16\n\x0erelative_error\x18\x03 \x01(\x01\"W\n\x0f\x45valuateRequest\x12\x0e\n\x06models\x18\x01 \x03(\t\x12\r\n\x05suite\x18\x02 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\x03 \x01(\t\x12\x15\n\rchat_template\x18\x04 \x01(\t\"u\n\x10\x45valuateResponse\x12\r\n\x05suite\x18\x01 \x01(\t\x12\x10\n\x08\x65xamples\x18\x02 \x01(\x05\x12\x0e\n\x06tokens\x18\x03 \x01(\x03\x12\x30\n\x06scores\x18\x04 \x03(\x0b\x32 .weightpack.worker.v1.ModelScore\",\n\nModelScore\x12\x10\n\x08\x61\x63\x63uracy\x18\x01 \x01(\x01\x12\x0c\n\x04loss\x18\x02 \x01(\x01\"\r\n\x0bInfoRequest\"L\n\x0cInfoResponse\x12\x0f\n\x07version\x18\x01 \x01(\t\x12+\n\x06\x63odecs\x18\x02 \x03(\x0e\x32\x1b.weightpack.worker.v1.Codec\"8\n\x04\x42lob\x12\x0e\n\x06\x64igest\x18\x01 \x01(\t\x12\x12\n\nmedia_type\x18\x02 \x01(\t\x12\x0c\n\x04path\x18\x03 \x01(\t\"S\n\tLoRALayer\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0f\n\x07scaling\x18\x02 \x01(\x01\x12)\n\x05\x62lobs\x18\x03 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\"\xe7\x01\n\rSquashRequest\x12(\n\x04\x62\x61se\x18\x01 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\x12/\n\x06layers\x18\x02 \x03(\x0b\x32\x1f.weightpack.worker.v1.LoRALayer\x12\x0f\n\x07out_dir\x18\x03 \x01(\t\x12\x32\n\nxor_layers\x18\x04 \x03(\x0b\x32\x1e.weightpack.worker.v1.XORLayer\x12\x36\n\x0clossy_layers\x18\x05 \x03(\x0b\x32 .weightpack.worker.v1.DeltaLayer\"C\n\nDeltaLayer\x12\n\n\x02id\x18\x01 \x01(\t\x12)\n\x05\x62lobs\x18\x02 \x03(\x0b\x32\x1a.weightpack.worker.v1.Blob\"*\n\x0cMergedTensor\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0c\n\x04\x66ile\x18\x02 \x01(\t\"E\n\x0eSquashResponse\x12\x33\n\x07tensors\x18\x01 \x03(\x0b\x32\".weightpack.worker.v1.MergedTensor\"\"\n\x07\x41\x64\x61pter\x12\n\n\x02id\x18\x01 \x01(\t\x12\x0b\n\x03\x64ir\x18\x02 \x01(\t\"\xdc\x01\n\x12TrainRouterRequest\x12\x10\n\x08\x62\x61se_dir\x18\x01 \x01(\t\x12.\n\x07\x65xperts\x18\x02 \x03(\x0b\x32\x1d.weightpack.worker.v1.Adapter\x12\x0f\n\x07targets\x18\x03 \x03(\t\x12\x0e\n\x06\x62locks\x18\x04 \x01(\t\x12\r\n\x05top_k\x18\x05 \x01(\x05\x12\x0c\n\x04\x64\x61ta\x18\x06 \x01(\t\x12\r\n\x05steps\x18\x07 \x01(\x05\x12\x10\n\x08out_file\x18\x08 \x01(\t\x12\x0e\n\x06\x64\x65vice\x18\t \x01(\t\x12\x15\n\rchat_template\x18\n \x01(\t\"\xbc\x01\n\x13TrainRouterProgress\x12\x0c\n\x04step\x18\x01 \x01(\x05\x12\r\n\x05steps\x18\x02 \x01(\x05\x12\x0c\n\x04loss\x18\x03 \x01(\x01\x12\x0c\n\x04\x64one\x18\x04 \x01(\x08\x12\x10\n\x08\x65xamples\x18\x05 \x01(\x05\x12\x0f\n\x07heldout\x18\x06 \x01(\x05\x12\x12\n\narrow_loss\x18\x07 \x01(\x01\x12\x14\n\x0ctrained_loss\x18\x08 \x01(\x01\x12\x0e\n\x06\x64\x65vice\x18\t \x01(\t\x12\x0f\n\x07seconds\x18\n \x01(\x01*_\n\x05\x43odec\x12\x15\n\x11\x43ODEC_UNSPECIFIED\x10\x00\x12\r\n\tCODEC_XOR\x10\x01\x12\x0e\n\nCODEC_BIT1\x10\x02\x12\x10\n\x0c\x43ODEC_SPARSE\x10\x03\x12\x0e\n\nCODEC_LORA\x10\x04\x32\xd1\x03\n\x06Worker\x12\x62\n\x0b\x45ncodeLayer\x12(.weightpack.worker.v1.EncodeLayerRequest\x1a).weightpack.worker.v1.EncodeLayerResponse\x12Y\n\x08\x45valuate\x12%.weightpack.worker.v1.EvaluateRequest\x1a&.weightpack.worker.v1.EvaluateResponse\x12M\n\x04Info\x12!.weightpack.worker.v1.InfoRequest\x1a\".weightpack.worker.v1.InfoResponse\x12S\n\x06Squash\x12#.weightpack.worker.v1.SquashRequest\x1a$.weightpack.worker.v1.SquashResponse\x12\x64\n\x0bTrainRouter\x12(.weightpack.worker.v1.TrainRouterRequest\x1a).weightpack.worker.v1.TrainRouterProgress0\x01\x42=Z;github.com/rizkaitbrik/weightpack/libs/go/workerpb;workerpbb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -32,40 +32,44 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'weightpack.worker.v1.worker
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
   _globals['DESCRIPTOR']._serialized_options = b'Z;github.com/rizkaitbrik/weightpack/libs/go/workerpb;workerpb'
-  _globals['_CODEC']._serialized_start=1546
-  _globals['_CODEC']._serialized_end=1641
+  _globals['_CODEC']._serialized_start=1888
+  _globals['_CODEC']._serialized_end=1983
   _globals['_XORLAYER']._serialized_start=59
   _globals['_XORLAYER']._serialized_end=124
   _globals['_ENCODELAYERREQUEST']._serialized_start=127
-  _globals['_ENCODELAYERREQUEST']._serialized_end=321
-  _globals['_ENCODEDTENSOR']._serialized_start=323
-  _globals['_ENCODEDTENSOR']._serialized_end=366
-  _globals['_ENCODELAYERRESPONSE']._serialized_start=368
-  _globals['_ENCODELAYERRESPONSE']._serialized_end=462
-  _globals['_EVALUATEREQUEST']._serialized_start=464
-  _globals['_EVALUATEREQUEST']._serialized_end=515
-  _globals['_EVALUATERESPONSE']._serialized_start=517
-  _globals['_EVALUATERESPONSE']._serialized_end=565
-  _globals['_INFOREQUEST']._serialized_start=567
-  _globals['_INFOREQUEST']._serialized_end=580
-  _globals['_INFORESPONSE']._serialized_start=582
-  _globals['_INFORESPONSE']._serialized_end=658
-  _globals['_BLOB']._serialized_start=660
-  _globals['_BLOB']._serialized_end=716
-  _globals['_LORALAYER']._serialized_start=718
-  _globals['_LORALAYER']._serialized_end=801
-  _globals['_SQUASHREQUEST']._serialized_start=804
-  _globals['_SQUASHREQUEST']._serialized_end=979
-  _globals['_MERGEDTENSOR']._serialized_start=981
-  _globals['_MERGEDTENSOR']._serialized_end=1023
-  _globals['_SQUASHRESPONSE']._serialized_start=1025
-  _globals['_SQUASHRESPONSE']._serialized_end=1094
-  _globals['_ADAPTER']._serialized_start=1096
-  _globals['_ADAPTER']._serialized_end=1130
-  _globals['_TRAINROUTERREQUEST']._serialized_start=1133
-  _globals['_TRAINROUTERREQUEST']._serialized_end=1353
-  _globals['_TRAINROUTERPROGRESS']._serialized_start=1356
-  _globals['_TRAINROUTERPROGRESS']._serialized_end=1544
-  _globals['_WORKER']._serialized_start=1644
-  _globals['_WORKER']._serialized_end=2109
+  _globals['_ENCODELAYERREQUEST']._serialized_end=363
+  _globals['_ENCODEDTENSOR']._serialized_start=365
+  _globals['_ENCODEDTENSOR']._serialized_end=408
+  _globals['_ENCODELAYERRESPONSE']._serialized_start=410
+  _globals['_ENCODELAYERRESPONSE']._serialized_end=528
+  _globals['_EVALUATEREQUEST']._serialized_start=530
+  _globals['_EVALUATEREQUEST']._serialized_end=617
+  _globals['_EVALUATERESPONSE']._serialized_start=619
+  _globals['_EVALUATERESPONSE']._serialized_end=736
+  _globals['_MODELSCORE']._serialized_start=738
+  _globals['_MODELSCORE']._serialized_end=782
+  _globals['_INFOREQUEST']._serialized_start=784
+  _globals['_INFOREQUEST']._serialized_end=797
+  _globals['_INFORESPONSE']._serialized_start=799
+  _globals['_INFORESPONSE']._serialized_end=875
+  _globals['_BLOB']._serialized_start=877
+  _globals['_BLOB']._serialized_end=933
+  _globals['_LORALAYER']._serialized_start=935
+  _globals['_LORALAYER']._serialized_end=1018
+  _globals['_SQUASHREQUEST']._serialized_start=1021
+  _globals['_SQUASHREQUEST']._serialized_end=1252
+  _globals['_DELTALAYER']._serialized_start=1254
+  _globals['_DELTALAYER']._serialized_end=1321
+  _globals['_MERGEDTENSOR']._serialized_start=1323
+  _globals['_MERGEDTENSOR']._serialized_end=1365
+  _globals['_SQUASHRESPONSE']._serialized_start=1367
+  _globals['_SQUASHRESPONSE']._serialized_end=1436
+  _globals['_ADAPTER']._serialized_start=1438
+  _globals['_ADAPTER']._serialized_end=1472
+  _globals['_TRAINROUTERREQUEST']._serialized_start=1475
+  _globals['_TRAINROUTERREQUEST']._serialized_end=1695
+  _globals['_TRAINROUTERPROGRESS']._serialized_start=1698
+  _globals['_TRAINROUTERPROGRESS']._serialized_end=1886
+  _globals['_WORKER']._serialized_start=1986
+  _globals['_WORKER']._serialized_end=2451
 # @@protoc_insertion_point(module_scope)

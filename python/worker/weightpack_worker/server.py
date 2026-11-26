@@ -19,6 +19,7 @@ from pathlib import Path
 import grpc
 
 from weightpack.worker.v1 import worker_pb2, worker_pb2_grpc
+from weightpack_worker import lossy
 from weightpack_worker.delta import encode_xor
 from weightpack_worker.squash import LoRALayer, squash
 
@@ -29,22 +30,29 @@ class Cancelled(Exception):
     """The daemon went away while a router trained."""
 
 
+LOSSY = {worker_pb2.CODEC_BIT1: lossy.BIT1, worker_pb2.CODEC_SPARSE: lossy.SPARSE}
+
+
 class Worker(worker_pb2_grpc.WorkerServicer):
-    """Implements Info, Squash, EncodeLayer (XOR) and TrainRouter; Evaluate
-    is not done yet and answers UNIMPLEMENTED (the generated base class does
-    that)."""
+    """Implements every RPC of the contract: Info, EncodeLayer (XOR, bit1,
+    sparse), Evaluate, Squash and TrainRouter."""
 
     def Info(self, request, context):  # noqa: N802 (gRPC method name)
         return worker_pb2.InfoResponse(
             version=__version__,
-            codecs=[worker_pb2.CODEC_LORA, worker_pb2.CODEC_XOR],
+            codecs=[
+                worker_pb2.CODEC_LORA,
+                worker_pb2.CODEC_XOR,
+                worker_pb2.CODEC_BIT1,
+                worker_pb2.CODEC_SPARSE,
+            ],
         )
 
     def EncodeLayer(self, request, context):  # noqa: N802
-        if request.codec != worker_pb2.CODEC_XOR:
+        if request.codec != worker_pb2.CODEC_XOR and request.codec not in LOSSY:
             context.abort(
                 grpc.StatusCode.UNIMPLEMENTED,
-                f"codec {worker_pb2.Codec.Name(request.codec)} is not supported yet",
+                f"codec {worker_pb2.Codec.Name(request.codec)} is not supported",
             )
         out_dir = Path(request.out_dir)
         if not out_dir.is_dir():
@@ -52,13 +60,25 @@ class Worker(worker_pb2_grpc.WorkerServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 f"out_dir {out_dir} is not a directory",
             )
+        base = [b.path for b in request.base]
+        parents = [[b.path for b in layer.blobs] for layer in request.parents]
+        targets = list(request.target_files)
+        relative_error = 0.0
         try:
-            encoded, unchanged = encode_xor(
-                [b.path for b in request.base],
-                [[b.path for b in layer.blobs] for layer in request.parents],
-                list(request.target_files),
-                out_dir,
-            )
+            if request.codec == worker_pb2.CODEC_XOR:
+                encoded, unchanged = encode_xor(base, parents, targets, out_dir)
+            else:
+                res = lossy.encode_lossy(
+                    LOSSY[request.codec],
+                    base,
+                    parents,
+                    targets,
+                    out_dir,
+                    request.density or 0.1,
+                    request.reconstruct_dir or None,
+                )
+                encoded, unchanged = res.tensors, res.unchanged
+                relative_error = res.relative_error
         except (ValueError, OSError, KeyError) as exc:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))
         return worker_pb2.EncodeLayerResponse(
@@ -66,6 +86,35 @@ class Worker(worker_pb2_grpc.WorkerServicer):
                 worker_pb2.EncodedTensor(name=name, file=file) for name, file in encoded
             ],
             unchanged=unchanged,
+            relative_error=relative_error,
+        )
+
+    def Evaluate(self, request, context):  # noqa: N802
+        from weightpack_worker import evaluate
+
+        try:
+            res = evaluate.evaluate(
+                list(request.models),
+                request.suite,
+                request.device or "auto",
+                request.chat_template or None,
+            )
+        except ImportError as exc:  # torch and transformers load on first use
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"evals need torch and transformers "
+                f"(pip install 'weightpack-worker[serve]'): {exc}",
+            )
+        except (ValueError, OSError, KeyError) as exc:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"{exc}")
+        return worker_pb2.EvaluateResponse(
+            suite=res.suite,
+            examples=res.examples,
+            tokens=res.tokens,
+            scores=[
+                worker_pb2.ModelScore(accuracy=s.accuracy, loss=s.loss)
+                for s in res.scores
+            ],
         )
 
     def Squash(self, request, context):  # noqa: N802
@@ -87,6 +136,7 @@ class Worker(worker_pb2_grpc.WorkerServicer):
                 layers,
                 out_dir,
                 [[b.path for b in layer.blobs] for layer in request.xor_layers],
+                [[b.path for b in layer.blobs] for layer in request.lossy_layers],
             )
         except (ValueError, OSError, KeyError) as exc:
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(exc))

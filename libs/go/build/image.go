@@ -267,6 +267,8 @@ func (b *builder) ingestLayer(step string, src weightfile.Layer, layer, parent *
 		return b.ingestImageLayer(step, src, layer, parent, mix, byID)
 	case src.Codec == weightfile.CodecXOR:
 		return b.ingestXOR(step, src, layer, parent, base, byID)
+	case src.Codec == weightfile.CodecBit1 || src.Codec == weightfile.CodecSparse:
+		return b.ingestLossy(step, src, layer, parent, base, byID)
 	}
 	return b.ingestLoRA(step, src, layer, parent, base, mix)
 }

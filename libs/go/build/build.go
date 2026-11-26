@@ -4,9 +4,10 @@
 // tokenizer, or FROM an image (in the store, or pulled through
 // Options.Pull); LAYER and EXPERT from a PEFT LoRA adapter directory, a
 // Hugging Face repo, a full fine-tune imported with codec=xor, or the top
-// layer of an image built on the same chain. Lossy imports (codec=bit1 or
-// sparse) are rejected with a clear error until they are supported. A MIX's
-// ROUTER train runs in the build worker (router.go).
+// layer of an image built on the same chain; or a full fine-tune imported
+// as a delta: codec=xor exactly (xor.go), codec=bit1 or sparse lossily and
+// gated on an eval (lossy.go). A MIX's ROUTER train runs in the build worker
+// (router.go).
 //
 // The builder never reads tensor values. It splits safetensors files along
 // the byte ranges their headers give, checks adapter shapes against the base,
@@ -80,6 +81,7 @@ type builder struct {
 	cache    *buildCache
 
 	servingFiles ServingFilesFunc
+	wf           *weightfile.File
 
 	// inherited is what a FROM image passes on, nil for a local FROM.
 	inherited *inherited
@@ -117,6 +119,20 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 	if err := checkSupported(opts.Weightfile, wf); err != nil {
 		return nil, err
 	}
+	if opts.Worker == nil {
+		layers := map[string][]weightfile.Layer{"LAYER": wf.Layers}
+		if wf.Mix != nil {
+			layers["EXPERT"] = wf.Mix.Experts
+		}
+		for _, instr := range []string{"LAYER", "EXPERT"} {
+			for _, l := range layers[instr] {
+				if l.Codec != "" && l.Codec != weightfile.CodecLoRA {
+					return nil, &weightfile.Error{File: opts.Weightfile, Line: l.Line,
+						Msg: fmt.Sprintf("%s %s: codec=%s runs in the build worker; start wpkd with --worker", instr, l.ID, l.Codec)}
+				}
+			}
+		}
+	}
 	if m := wf.Mix; m != nil && m.Router.Kind == "train" && (opts.Worker == nil || opts.ServingFiles == nil) {
 		return nil, &weightfile.Error{File: opts.Weightfile, Line: m.Router.Line,
 			Msg: "ROUTER train: training a router needs wpkd's build worker; restart wpkd with --worker"}
@@ -124,8 +140,8 @@ func Build(ctx context.Context, s *store.Store, opts Options, progress func(api.
 
 	b := &builder{
 		ctx: ctx, store: s, progress: progress, pull: opts.Pull, worker: opts.Worker, hf: opts.HF, cache: newBuildCache(CacheDir(s.Root())),
-		servingFiles: opts.ServingFiles,
-		dir:          filepath.Dir(opts.Weightfile), file: opts.Weightfile,
+		servingFiles: opts.ServingFiles, wf: wf,
+		dir: filepath.Dir(opts.Weightfile), file: opts.Weightfile,
 		blobs: map[string][]ocispec.Descriptor{},
 	}
 
@@ -211,8 +227,6 @@ func checkSupported(path string, wf *weightfile.File) error {
 		switch {
 		case l.Source.Kind == weightfile.SourceOCI && delta:
 			fail(l.Line, "%s: codec= applies to importing a full fine-tune; a layer from an image is stored already", l.ID)
-		case delta && l.Codec != weightfile.CodecXOR:
-			fail(l.Line, "%s: codec=%s, a lossy import, is not supported yet; codec=xor imports losslessly", l.ID, l.Codec)
 		}
 	}
 	return errors.Join(errs...)
