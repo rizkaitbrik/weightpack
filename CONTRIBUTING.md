@@ -24,6 +24,7 @@ npx nx test spec                     # a single project
 npx nx format worker                 # format a Python project
 npx nx run proto:generate            # regenerate Go and Python code after editing proto/
 npx nx run worker:parity             # squash vs PEFT's merge (installs torch, transformers, peft)
+npx nx run worker:smoke              # the whole flow on Qwen2.5-0.5B-Instruct and public LoRAs (downloads ~1 GB)
 ```
 
 ## Conventions

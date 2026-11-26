@@ -97,6 +97,19 @@
           "target": "build"
         }
       ]
+    },
+    "smoke": {
+      "executor": "@nxlv/python:run-commands",
+      "options": {
+        "command": "WPK_SMOKE=1 uv run --group parity pytest tests/test_smoke_real_model.py -s --no-cov",
+        "cwd": "{projectRoot}"
+      },
+      "dependsOn": [
+        {
+          "projects": ["wpk", "wpkd"],
+          "target": "build"
+        }
+      ]
     }
   },
   "tags": ["lang:python", "type:lib"],
