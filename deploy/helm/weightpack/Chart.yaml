@@ -1,0 +1,14 @@
+apiVersion: v2
+name: weightpack
+description: >-
+  Serve Weightpack images on Kubernetes: wpkd as a node agent on each GPU
+  node, and wpk-control, an OpenAI-compatible gateway that places each
+  image on a node already holding its base.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/rizkaitbrik/weightpack
+sources:
+  - https://github.com/rizkaitbrik/weightpack
+keywords: [llm, lora, inference, oci, vllm]

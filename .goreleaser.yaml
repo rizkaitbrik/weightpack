@@ -24,9 +24,15 @@ builds:
     id: wpkd
     main: ./apps/wpkd
     binary: wpkd
+  # The cluster control plane; the release's control image runs it.
+  - <<: *binary
+    id: wpk-control
+    main: ./apps/wpk-control
+    binary: wpk-control
+    goos: [linux]
 
 archives:
-  - ids: [wpk, wpkd]
+  - ids: [wpk, wpkd, wpk-control]
     formats: [tar.gz]
     name_template: "weightpack_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files: [LICENSE, README.md, docs/quickstart.md]

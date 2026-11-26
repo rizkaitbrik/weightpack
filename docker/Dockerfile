@@ -1,10 +1,12 @@
 # syntax=docker/dockerfile:1
 #
 # wpkd images: the daemon, its build worker and a serving engine in one
-# container. Build from the repository root:
+# container; and wpk-control, the cluster control plane (see deploy/helm).
+# Build from the repository root:
 #
-#   docker build -f docker/Dockerfile --target cpu  -t weightpack:cpu  .
-#   docker build -f docker/Dockerfile --target cuda -t weightpack:cuda .
+#   docker build -f docker/Dockerfile --target cpu     -t weightpack:cpu     .
+#   docker build -f docker/Dockerfile --target cuda    -t weightpack:cuda    .
+#   docker build -f docker/Dockerfile --target control -t weightpack:control .
 #
 # Run (the store lives in the volume; the gateway answers on 8090):
 #
@@ -28,7 +30,13 @@ RUN go mod download
 COPY apps apps
 COPY libs libs
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/ ./apps/wpk ./apps/wpkd
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/ ./apps/wpk ./apps/wpkd ./apps/wpk-control
+
+# The control plane: one static binary, no shell, not root.
+FROM gcr.io/distroless/static-debian12:nonroot AS control
+COPY --from=binaries /out/wpk-control /usr/local/bin/wpk-control
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/wpk-control"]
 
 # CPU: the reference engine on CPU-only torch.
 FROM python:${PYTHON_VERSION}-slim AS cpu

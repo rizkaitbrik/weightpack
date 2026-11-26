@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"regexp"
 	goruntime "runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -62,7 +63,11 @@ type Config struct {
 	// APIKey, when set, is the bearer token the gateway requires, as the
 	// OpenAI API does. Set it whenever the gateway listens beyond loopback.
 	APIKey string
-	Logger *slog.Logger
+	// MaxEngines caps the engine processes running at once; 0 means no
+	// cap. vLLM claims most of a GPU, so a GPU node usually serves one
+	// base at a time.
+	MaxEngines int
+	Logger     *slog.Logger
 }
 
 // Runtime runs containers and the engines behind them.
@@ -285,7 +290,7 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	c := &container{engine: e, template: template, files: adapterRels}
 	c.info = api.Container{
 		Name: name, Image: req.Ref, Digest: digest, Engine: kind, Device: device, EngineID: e.id,
-		Base: p.base.Chain, Created: time.Now().UTC().Truncate(time.Second), Endpoint: rt.cfg.Endpoint,
+		Base: p.base.Chain, Created: time.Now().UTC().Truncate(time.Second), Endpoint: rt.cfg.Endpoint, Owner: req.Owner,
 	}
 	upstream := map[string]string{}
 	if len(p.adapters) == 0 {
@@ -449,6 +454,9 @@ func (rt *Runtime) acquire(p *plan, kind, device string, maxRank int, modelDir s
 		e.refs++
 		return e, false, nil
 	}
+	if n := rt.running(); rt.cfg.MaxEngines > 0 && n >= rt.cfg.MaxEngines {
+		return nil, false, fmt.Errorf("this machine already runs %d engines, its limit (wpkd --max-engines); stop the containers of another base first (wpk ps)", n)
+	}
 	id, err := newID()
 	if err != nil {
 		return nil, false, err
@@ -545,6 +553,58 @@ func (rt *Runtime) Stop(names []string) ([]string, error) {
 var ErrNoContainer = errors.New("no such container")
 
 // List returns the containers, sorted by name.
+// running counts the engines that have not exited. rt.mu must be held.
+func (rt *Runtime) running() int {
+	n := 0
+	for _, e := range rt.engines {
+		if !e.hasExited() {
+			n++
+		}
+	}
+	return n
+}
+
+// Engines counts the engine processes running or starting.
+func (rt *Runtime) Engines() int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.running()
+}
+
+// MaxEngines is the cap on engines (Config.MaxEngines).
+func (rt *Runtime) MaxEngines() int { return rt.cfg.MaxEngines }
+
+// Devices are the devices containers can run on here: the one detected
+// and the CPU.
+func (rt *Runtime) Devices() []string {
+	rt.detectOnce.Do(func() { rt.detected = DetectDevice() })
+	if rt.detected == "cpu" {
+		return []string{"cpu"}
+	}
+	return []string{rt.detected, "cpu"}
+}
+
+// EngineKinds are the engines that can run here: the reference engine
+// always, vLLM on an NVIDIA GPU with its command installed.
+func (rt *Runtime) EngineKinds() []string {
+	kinds := []string{EngineReference}
+	if slices.Contains(rt.Devices(), "cuda") {
+		if _, err := exec.LookPath(rt.cfg.Engines[EngineVLLM][0]); err == nil {
+			kinds = append(kinds, EngineVLLM)
+		}
+	}
+	return kinds
+}
+
+// Device is the device containers run on when a run names none.
+func (rt *Runtime) Device() string {
+	_, device, err := rt.pick("", "")
+	if err != nil {
+		return ""
+	}
+	return device
+}
+
 func (rt *Runtime) List() []api.Container {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()

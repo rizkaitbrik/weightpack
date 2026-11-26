@@ -1,0 +1,100 @@
+{{- $control := .Values.control }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "weightpack.fullname" . }}-control
+  labels:
+    {{- include "weightpack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+spec:
+  replicas: {{ $control.replicas }}
+  selector:
+    matchLabels:
+      {{- include "weightpack.selectorLabels" (dict "root" . "component" "control") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "weightpack.selectorLabels" (dict "root" . "component" "control") | nindent 8 }}
+      {{- with $control.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # It needs no Kubernetes API: agents are found through DNS.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: control
+          image: {{ include "weightpack.image" (dict "root" . "variant" "control") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --listen=:{{ $control.port }}
+            - --agents=dns://{{ include "weightpack.agentService" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}:{{ .Values.agent.apiPort }}
+            - --catalogue=/etc/weightpack/config/catalogue.json
+            - --interval={{ $control.interval }}
+          env:
+            - name: WPK_AGENT_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ include "weightpack.secretName" . }}, key: agent-key}
+            - name: WPK_API_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ include "weightpack.secretName" . }}, key: api-key, optional: true}
+          ports:
+            - {name: http, containerPort: {{ $control.port }}}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: {port: http}
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          {{- with $control.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/weightpack/config, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "weightpack.fullname" . }}-config
+            items: [{key: catalogue.json, path: catalogue.json}]
+      {{- with $control.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $control.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $control.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "weightpack.fullname" . }}
+  labels:
+    {{- include "weightpack.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+  {{- with $control.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $control.service.type }}
+  selector:
+    {{- include "weightpack.selectorLabels" (dict "root" . "component" "control") | nindent 4 }}
+  ports:
+    - {name: http, port: {{ $control.service.port }}, targetPort: http}

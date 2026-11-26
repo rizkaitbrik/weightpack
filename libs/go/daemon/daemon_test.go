@@ -407,3 +407,75 @@ func TestTrustPolicy(t *testing.T) {
 		t.Errorf("verify = %+v, %v", res, err)
 	}
 }
+
+func TestPlacementResolveAndNode(t *testing.T) {
+	t.Setenv("DOCKER_CONFIG", t.TempDir())
+	reg := httptest.NewServer(ggcr.New(ggcr.Logger(log.New(io.Discard, "", 0))))
+	t.Cleanup(reg.Close)
+	host := strings.TrimPrefix(reg.URL, "http://")
+
+	dir := t.TempDir()
+	buildtest.Project(t, dir)
+	s, _ := store.Open(filepath.Join(dir, "a"))
+	policy := filepath.Join(dir, "policy.json")
+	c := serveUnix(t, s, WithNode("gpu-3", 8090), WithPolicyFile(policy))
+	ctx := context.Background()
+
+	ref := host + "/team/assistant:v1"
+	built, err := c.Build(ctx, api.BuildRequest{Weightfile: filepath.Join(dir, "Weightfile"), Tags: []string{ref}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Push(ctx, api.PushRequest{Ref: ref}, nil); err != nil {
+		t.Fatal(err)
+	}
+	images, err := c.Images(ctx)
+	if err != nil || len(images) != 1 || images[0].Base != built.Config.Layers[0].Chain {
+		t.Fatalf("images = %+v, %v", images, err)
+	}
+
+	res, err := c.Resolve(ctx, api.ResolveRequest{Ref: ref, Placement: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The assistant's experts sit on French, so French is baked into the
+	// serving base, which is not the base layer.
+	if res.Digest != built.Manifest.Digest.String() || res.Base != built.Config.Layers[0].Chain ||
+		res.ServingBase == "" || res.ServingBase == res.Base || res.Bytes <= built.Manifest.Size {
+		t.Errorf("placement resolve = %+v", res)
+	}
+	if plain, err := c.Resolve(ctx, api.ResolveRequest{Ref: ref}); err != nil || plain.ServingBase != "" {
+		t.Errorf("plain resolve = %+v, %v", plain, err)
+	}
+
+	// The policy file the daemon was given applies, as a pull's would.
+	_ = os.WriteFile(policy, []byte(`{"rules": [{"scope": "*", "action": "reject"}]}`), 0o644)
+	if _, err := c.Resolve(ctx, api.ResolveRequest{Ref: ref, Placement: true}); err == nil || !strings.Contains(err.Error(), "rejects") {
+		t.Errorf("placement under a reject rule: %v", err)
+	}
+	if got, err := c.Trust(ctx); err != nil || len(got.Rules) != 1 {
+		t.Errorf("trust from the policy file = %+v, %v", got, err)
+	}
+
+	node, err := c.Node(ctx)
+	if err != nil || node.Name != "gpu-3" || node.Serving || node.GatewayPort != 8090 {
+		t.Errorf("node = %+v, %v", node, err)
+	}
+
+	// Over TCP the API needs the key.
+	h := RequireKey(NewHandler(s, "test", nil), "k")
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	if _, err := api.NewRemoteClient(srv.URL, "k", nil).Images(ctx); err != nil {
+		t.Errorf("with the key: %v", err)
+	}
+	if _, err := api.NewRemoteClient(srv.URL, "", nil).Images(ctx); err == nil || !strings.Contains(err.Error(), "API key") {
+		t.Errorf("without the key: %v", err)
+	}
+	// Kubernetes probes cannot send the key; /healthz needs none.
+	if resp, err := http.Get(srv.URL + "/healthz"); err != nil || resp.StatusCode != http.StatusOK {
+		t.Errorf("health probe without the key: %v, %v", resp, err)
+	} else {
+		resp.Body.Close()
+	}
+}

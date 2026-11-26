@@ -40,8 +40,13 @@ type server struct {
 	runtime *serving.Runtime
 	ops     sync.RWMutex // shared by store operations, exclusive for prune
 
-	sigstore *trust.Sigstore
-	trustMu  sync.Mutex // serializes trust policy writes
+	sigstore   *trust.Sigstore
+	trustMu    sync.Mutex // serializes trust policy writes
+	policyFile string     // "" means <root>/policy.json
+
+	node        string // the machine's name, for /v1/node
+	gatewayPort int
+	insecure    []string // registries reached over plain HTTP
 }
 
 // shared runs h holding the store lock shared.
@@ -105,6 +110,7 @@ func NewHandler(s *store.Store, version string, logger *slog.Logger, opts ...Opt
 	mux.HandleFunc("POST /v1/stop", srv.serving(srv.stop))
 	mux.HandleFunc("GET /v1/containers/logs", srv.serving(srv.logs))
 	mux.HandleFunc("GET /v1/doctor", srv.doctor)
+	mux.HandleFunc("GET /v1/node", srv.nodeInfo)
 	// Signatures live in registries, not the store.
 	mux.HandleFunc("POST /v1/resolve", srv.resolve)
 	mux.HandleFunc("POST /v1/signatures", srv.attach)
@@ -215,7 +221,7 @@ func (s *server) push(w http.ResponseWriter, r *http.Request) {
 	}
 	send := startStream(w)
 	s.log.Info("push started", "ref", req.Ref)
-	res, err := registry.Push(r.Context(), s.store, req.Ref, registry.Options{PlainHTTP: req.PlainHTTP}, send)
+	res, err := registry.Push(r.Context(), s.store, req.Ref, s.registryOptions(req.PlainHTTP), send)
 	s.finishTransfer("push", req.Ref, res, err, send)
 }
 
@@ -401,6 +407,9 @@ func (s *server) images(w http.ResponseWriter, _ *http.Request) {
 		img := api.Image{
 			Ref: d.Annotations[ocispec.AnnotationRefName], Digest: d.Digest.String(),
 			Size: imageSize(m, d.Size), Layers: len(c.Layers), Arch: c.Arch.Family,
+		}
+		if len(c.Layers) > 0 {
+			img.Base = c.Layers[0].Chain
 		}
 		out = append(out, img)
 	}

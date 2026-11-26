@@ -32,6 +32,16 @@ type plan struct {
 	mix *spec.Layer
 }
 
+// ServingBase returns the chain ID of the base an engine would serve the
+// image on. Images with the same serving base share an engine.
+func ServingBase(c *spec.Config) (string, error) {
+	p, err := planFor(c)
+	if err != nil {
+		return "", err
+	}
+	return p.base.Chain, nil
+}
+
 func planFor(c *spec.Config) (*plan, error) {
 	stack, mix, err := build.Stack(c)
 	if err != nil {

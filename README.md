@@ -56,6 +56,8 @@ This is an [Nx](https://nx.dev) workspace with Go and Python projects.
 | `libs/go/squash` | `squash` | Go | Squash: picks the layers, hands blobs to the worker, stores the dense image |
 | `libs/go/serving` | `serving` | Go | Runtime: serving bases, engine processes, adapters, the gateway that routes by model, and doctor's device checks |
 | `libs/go/service` | `service` | Go | `wpk service`: wpkd as a launchd agent or systemd user unit |
+| `apps/wpk-control`, `libs/go/control` | `wpk-control`, `control` | Go | Cluster control plane: OpenAI gateway over the node agents, base-affinity placement, catalogue, metrics |
+| `deploy/helm/weightpack` | | Helm | Kubernetes chart: wpkd as a node-agent DaemonSet, wpk-control behind a Service |
 | `libs/go/worker`, `libs/go/workerpb` | `worker-client` | Go | gRPC client for the build worker; generated contract code |
 | `python/worker` | `worker` | Python | Build worker (squash, delta import, codecs) and `weightpack-engine`, the reference serving engine |
 | `python/vllm-plugin` | `vllm-plugin` | Python | vLLM plugin: composition loading, expert pool, routers |
@@ -156,6 +158,16 @@ curl http://127.0.0.1:8090/v1/chat/completions -H 'Content-Type: application/jso
 | CPU (`cpu`) | Reference engine | |
 
 `wpkd` detects the device (`nvidia-smi`, then Apple Silicon, then CPU); `--device` and `--engine` override it per container, and `wpkd --device`, `--engine-reference` and `--engine-vllm` set the defaults and commands. vLLM claims 90% of GPU memory by default, so two different bases on one GPU need a smaller share each, such as `--engine-vllm "vllm serve --gpu-memory-utilization 0.45"`. If the gateway listens beyond loopback (`--gateway 0.0.0.0:8090`), set `--gateway-key` and send it as `Authorization: Bearer <key>`.
+
+### Run on Kubernetes
+
+The Helm chart runs `wpkd` on each GPU node and `wpk-control` in front of them: one OpenAI endpoint for the cluster, which keeps a catalogue of images running and places each on a node already serving its base, so a new fine-tune of a running base loads only its adapters. See [docs/kubernetes.md](docs/kubernetes.md).
+
+```bash
+helm install weightpack deploy/helm/weightpack -n weightpack --create-namespace \
+  --set 'catalogue.models[0].name=qwen-tasks' --set 'catalogue.models[0].image=ghcr.io/acme/qwen-tasks:v1' \
+  --set 'catalogue.models[0].replicas=2'
+```
 
 ## Roadmap
 

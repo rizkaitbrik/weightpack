@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"sync"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -38,6 +39,10 @@ type Options struct {
 	// PlainHTTP talks to the registry over HTTP. Registries on localhost
 	// and 127.0.0.1 always use HTTP.
 	PlainHTTP bool
+	// InsecureHosts are registries (host or host:port) always reached over
+	// HTTP, as Docker's insecure-registries are: an in-cluster registry
+	// without TLS, say.
+	InsecureHosts []string
 	// Exact makes a pull refuse images with lossy layers.
 	Exact bool
 	// Verify, when set, runs on every pull once the reference resolves and
@@ -124,23 +129,9 @@ func Pull(ctx context.Context, s *store.Store, ref string, opts Options, progres
 	}
 
 	// Check the manifest and config before fetching any tensor.
-	m, err := fetchManifest(ctx, repo, root, r)
+	m, cfg, err := Describe(ctx, repo, r, root)
 	if err != nil {
 		return nil, err
-	}
-	if m.Config.Size > store.MaxManifestSize {
-		return nil, fmt.Errorf("pull %s: config of %d bytes is too large", r, m.Config.Size)
-	}
-	raw, err := content.FetchAll(ctx, repo, m.Config)
-	if err != nil {
-		return nil, fmt.Errorf("pull %s: config: %w", r, err)
-	}
-	var cfg spec.Config
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil, fmt.Errorf("pull %s: config: %w", r, err)
-	}
-	if err := spec.CheckImage(m, &cfg); err != nil {
-		return nil, fmt.Errorf("pull %s: refusing an inconsistent image: %w", r, err)
 	}
 	if opts.Exact {
 		for _, d := range m.Layers {
@@ -206,6 +197,31 @@ func Resolve(ctx context.Context, ref, verb string, opts Options) (reference.Ref
 	return r, repo, root, nil
 }
 
+// Describe fetches a remote image's manifest and config, the manifest root
+// in repo, and checks that they describe a consistent Weightpack image.
+// It fetches no tensor.
+func Describe(ctx context.Context, repo *remote.Repository, r reference.Reference, root ocispec.Descriptor) (*ocispec.Manifest, *spec.Config, error) {
+	m, err := fetchManifest(ctx, repo, root, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	if m.Config.Size > store.MaxManifestSize {
+		return nil, nil, fmt.Errorf("pull %s: config of %d bytes is too large", r, m.Config.Size)
+	}
+	raw, err := content.FetchAll(ctx, repo, m.Config)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pull %s: config: %w", r, err)
+	}
+	var cfg spec.Config
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, nil, fmt.Errorf("pull %s: config: %w", r, err)
+	}
+	if err := spec.CheckImage(m, &cfg); err != nil {
+		return nil, nil, fmt.Errorf("pull %s: refusing an inconsistent image: %w", r, err)
+	}
+	return m, &cfg, nil
+}
+
 // remoteRef parses a reference that must name a registry host.
 func remoteRef(ref, verb string) (reference.Reference, error) {
 	r, err := reference.Parse(ref)
@@ -225,7 +241,7 @@ func newRepository(r reference.Reference, opts Options) (*remote.Repository, err
 	if err != nil {
 		return nil, err
 	}
-	repo.PlainHTTP = opts.PlainHTTP || isLoopback(r.Host)
+	repo.PlainHTTP = opts.PlainHTTP || isLoopback(r.Host) || slices.Contains(opts.InsecureHosts, r.Host)
 	creds, err := credentials.NewStoreFromDocker(credentials.StoreOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("read Docker credentials: %w", err)

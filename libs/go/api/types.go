@@ -19,6 +19,7 @@
 //	POST /v1/stop                  StopRequest -> StopResponse
 //	GET  /v1/containers/logs?name=N[&follow=1]  -> the engine's log, as text
 //	GET  /v1/doctor                -> DoctorReport
+//	GET  /v1/node                  -> Node
 //	POST /v1/resolve               ResolveRequest -> ResolveResponse
 //	POST /v1/signatures            AttachRequest -> AttachResponse
 //	POST /v1/verify                VerifyRequest -> VerifyResponse
@@ -91,6 +92,9 @@ type RunRequest struct {
 	Engine string `json:"engine,omitempty"`
 	// Device is "cuda", "mps" or "cpu"; "" detects the best one.
 	Device string `json:"device,omitempty"`
+	// Owner names what started the container, such as a cluster control
+	// plane, which manages only its own.
+	Owner string `json:"owner,omitempty"`
 }
 
 // StopRequest stops containers by name.
@@ -130,6 +134,8 @@ type Container struct {
 	Created time.Time `json:"created"`
 	// Endpoint is the gateway's OpenAI base URL.
 	Endpoint string `json:"endpoint,omitempty"`
+	// Owner is the run request's Owner.
+	Owner string `json:"owner,omitempty"`
 }
 
 // PushRequest asks the daemon to push a local image. Ref must name a
@@ -227,6 +233,9 @@ type TransferResult struct {
 type ResolveRequest struct {
 	Ref       string `json:"ref"`
 	PlainHTTP bool   `json:"plain_http,omitempty"`
+	// Placement also checks the image against the trust policy, as a pull
+	// would, and reads its config, to say where it could run.
+	Placement bool `json:"placement,omitempty"`
 }
 
 // ResolveResponse is the manifest a remote reference names.
@@ -235,6 +244,13 @@ type ResolveResponse struct {
 	Digest    string `json:"digest"`
 	MediaType string `json:"media_type"`
 	Size      int64  `json:"size"`
+	// With Placement: the chain IDs of the image's base layer and of the
+	// base an engine serves it on, the total size of its blobs, and who
+	// signed it when the policy asks for a signature.
+	Base        string `json:"base,omitempty"`
+	ServingBase string `json:"serving_base,omitempty"`
+	Bytes       int64  `json:"bytes,omitempty"`
+	Signer      string `json:"signer,omitempty"`
 }
 
 // AttachRequest asks the daemon to store a Sigstore bundle that signs the
@@ -356,6 +372,9 @@ type Image struct {
 	Size   int64  `json:"size"`
 	Layers int    `json:"layers"`
 	Arch   string `json:"arch,omitempty"`
+	// Base is the chain ID of the image's base layer. Images with the same
+	// base share its blobs.
+	Base string `json:"base,omitempty"`
 }
 
 // ImageDetail is what `wpk inspect` prints.
@@ -364,6 +383,27 @@ type ImageDetail struct {
 	Digest   string           `json:"digest"`
 	Manifest ocispec.Manifest `json:"manifest"`
 	Config   spec.Config      `json:"config"`
+}
+
+// Node describes the machine a daemon runs on, for a cluster control plane
+// placing images: whether it serves, where, and how loaded it is.
+type Node struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// Serving is false when wpkd runs without a gateway.
+	Serving bool `json:"serving"`
+	// GatewayPort is the OpenAI gateway's port, on the same host as the API.
+	GatewayPort int `json:"gateway_port,omitempty"`
+	// Device is the default device containers run on; Devices are all the
+	// devices they can run on, and EngineKinds the engines installed
+	// ("reference", and "vllm" on an NVIDIA GPU with vLLM).
+	Device      string   `json:"device,omitempty"`
+	Devices     []string `json:"devices,omitempty"`
+	EngineKinds []string `json:"engine_kinds,omitempty"`
+	// Engines counts the engine processes running; MaxEngines caps them
+	// (0: no cap). A container on a base no engine serves yet needs one.
+	Engines    int `json:"engines"`
+	MaxEngines int `json:"max_engines,omitempty"`
 }
 
 // Check statuses.

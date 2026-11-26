@@ -1,0 +1,23 @@
+{{- if .Values.networkPolicy.enabled }}
+# The agents' API runs builds and pulls, and their gateways serve models:
+# only the control plane may reach them. Egress stays open, for registries.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "weightpack.agentService" . }}
+  labels:
+    {{- include "weightpack.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "weightpack.selectorLabels" (dict "root" . "component" "agent") | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "weightpack.selectorLabels" (dict "root" . "component" "control") | nindent 14 }}
+      ports:
+        - {port: {{ .Values.agent.apiPort }}}
+        - {port: {{ .Values.agent.gatewayPort }}}
+{{- end }}
