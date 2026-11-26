@@ -69,6 +69,7 @@ def _build():
         BN: tl.constexpr,
         BK: tl.constexpr,
         ALL_TOKENS: tl.constexpr,
+        GATHER: tl.constexpr,
         IEEE: tl.constexpr,
     ):
         if ALL_TOKENS:
@@ -102,15 +103,26 @@ def _build():
                     mask=mine[:, None] & (k < K)[None, :],
                     other=0.0,
                 )
-                byte_k = k0 // 8 + kb
-                byte = tl.load(
-                    signs_row[:, None] + byte_k[None, :],
-                    mask=n_ok[:, None] & (byte_k < KB)[None, :],
-                    other=0,
-                ).to(tl.int32)
-                bits = (byte[:, :, None] >> shifts[None, None, :]) & 1
-                w = tl.reshape(bits, (BN, BK)).to(tl.float32) * 2.0 - 1.0
-                w = w.to(x.dtype)
+                if GATHER:
+                    # Each weight's byte loaded where it is used: repeated
+                    # loads (from cache) but no reshape; faster for small
+                    # tiles.
+                    byte = tl.load(
+                        signs_row[:, None] + (k // 8)[None, :],
+                        mask=n_ok[:, None] & (k < K)[None, :],
+                        other=0,
+                    ).to(tl.int32)
+                    bits = (byte >> (7 - k % 8)[None, :]) & 1
+                else:
+                    byte_k = k0 // 8 + kb
+                    byte = tl.load(
+                        signs_row[:, None] + byte_k[None, :],
+                        mask=n_ok[:, None] & (byte_k < KB)[None, :],
+                        other=0,
+                    ).to(tl.int32)
+                    bits = (byte[:, :, None] >> shifts[None, None, :]) & 1
+                    bits = tl.reshape(bits, (BN, BK))
+                w = (bits.to(tl.float32) * 2.0 - 1.0).to(x.dtype)
                 if IEEE:
                     acc += tl.dot(x, tl.trans(w), input_precision="ieee")
                 else:
@@ -220,12 +232,10 @@ def linear_(y, x, slots, signs, row_scale, active, bias=None, bias_active=None):
         return
     if bias is None:
         bias, bias_active = row_scale, _idle(n_slots, x.device)
-    bn, bk = 64, 128
+    bm, bn, bk, gather, warps, stages = _tiles(t)
     if t <= SMALL:
-        bm = max(16, triton.next_power_of_2(t))
         grid = (triton.cdiv(n, bn), n_slots)
     else:
-        bm = 64
         grid = (triton.cdiv(t, bm), triton.cdiv(n, bn), n_slots)
     linear_kernel[grid](
         y,
@@ -247,8 +257,26 @@ def linear_(y, x, slots, signs, row_scale, active, bias=None, bias_active=None):
         BN=bn,
         BK=bk,
         ALL_TOKENS=t <= SMALL,
+        GATHER=gather,
         IEEE=x.dtype == torch.float32,
+        num_warps=warps,
+        num_stages=stages,
     )
+
+
+def _tiles(t: int):
+    """The linear kernel's tiles for t tokens: (BM, BN, BK, GATHER, warps,
+    stages), the fastest of a sweep on an RTX PRO 4500 inside CUDA graphs
+    (4096x4096, four slots): small tiles and repeated byte loads for a
+    decode batch of up to 32 tokens, reshaped 64x64 tiles up to SMALL, and
+    blocks of 64 tokens past it."""
+    import triton
+
+    if t <= 32:
+        return max(16, triton.next_power_of_2(t)), 32, 128, True, 4, 2
+    if t <= SMALL:
+        return triton.next_power_of_2(t), 64, 64, False, 4, 3
+    return 64, 64, 128, False, 4, 3
 
 
 def norm_(y, x, slots, delta, active, eps, var_size=-1):
