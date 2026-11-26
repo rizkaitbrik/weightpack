@@ -50,7 +50,9 @@ def active_but_last():
     return a
 
 
-SIZES = [(1, 64, 64), (7, 100, 13), (33, 200, 96)] + (
+# Up to SMALL tokens in one program, split along the inputs when rows are
+# few (16, 300, 1999); past it, in blocks of tokens (100, ...).
+SIZES = [(1, 64, 64), (7, 100, 13), (33, 200, 96), (16, 300, 1999), (100, 128, 64)] + (
     [(150, 96, 40)] if DEVICE == "cpu" else [(300, 896, 896), (40, 4864, 896)]
 )
 
