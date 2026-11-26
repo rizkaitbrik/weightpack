@@ -90,6 +90,10 @@ def test_load_delta(tmp_path):
     with pytest.raises(ValueError, match="sparse version 1"):
         load_delta(str(tmp_path))
 
+    # A fine-tune that changed nothing has no deltas.
+    (tmp_path / DELTA_FILE).write_text(json.dumps({**meta, "files": []}))
+    assert load_delta(str(tmp_path)) == {}
+
 
 def packed_layer(rng, out_sizes=(6, 4, 4), cols=24):
     """A packed linear layer, as vLLM's qkv_proj: three checkpoint matrices'

@@ -727,13 +727,14 @@ type deltaMeta struct {
 // delta writes a bit1 layer's blobs as they are stored, one tensor's delta
 // each (the signs and scale of a matrix, a whole float32 delta of any other
 // tensor), in tensor name order, and DeltaFile naming them. The engine
-// reads them as decoding does; the daemon does no tensor work.
+// reads them as decoding does; the daemon does no tensor work. A layer
+// whose fine-tune changed nothing has no blobs, and its file names none.
 func (e *exporter) delta(id string, ds []ocispec.Descriptor) error {
 	ds = slices.Clone(ds)
 	sort.Slice(ds, func(i, j int) bool {
 		return ds[i].Annotations[spec.AnnotationTensor] < ds[j].Annotations[spec.AnnotationTensor]
 	})
-	meta := deltaMeta{Version: 1, Codec: "bit1", Layer: id}
+	meta := deltaMeta{Version: 1, Codec: "bit1", Layer: id, Files: []string{}}
 	for _, d := range ds {
 		if d.MediaType != spec.MediaTypeDeltaBit1 {
 			return fmt.Errorf("layer %q holds a %s blob, not a bit1 delta", id, d.MediaType)
@@ -743,9 +744,6 @@ func (e *exporter) delta(id string, ds []ocispec.Descriptor) error {
 			return err
 		}
 		meta.Files = append(meta.Files, name)
-	}
-	if len(meta.Files) == 0 {
-		return fmt.Errorf("layer %q holds no deltas", id)
 	}
 	// vLLM reads an adapter config before its loader, which the
 	// weightpack-vllm plugin replaces for this directory, runs: a rank-1

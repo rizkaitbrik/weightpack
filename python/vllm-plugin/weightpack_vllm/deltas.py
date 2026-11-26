@@ -117,8 +117,7 @@ def load_delta(path: str) -> dict[str, Matrix | Vector]:
             out[name] = Vector(entries[name + WHOLE])
         else:
             raise ValueError(f"{file}: entries {sorted(entries)} are no bit1 delta")
-    if not out:
-        raise ValueError(f"{path}: the layer holds no deltas")
+    # No deltas: a fine-tune that changed nothing, served as the base.
     return out
 
 
