@@ -85,12 +85,15 @@ def arrow_prototype(a, b):
 
 def arrow_coefficients(x, prototypes, top_k: int):
     """Per-token expert weights, (tokens, experts) in float32: a softmax over
-    each token's top_k logits |x . prototype|, zero elsewhere."""
+    each token's top_k logits |x . prototype|, zero elsewhere. Equal logits
+    go to the expert listed first (torch.topk leaves that order unspecified),
+    so weightpack-vllm picks the same experts."""
     import torch
 
     sim = (x.to(torch.float32) @ prototypes.T).abs()
     k = min(top_k, prototypes.shape[0])
-    top, idx = torch.topk(sim, k, dim=1)
+    idx = sim.argsort(dim=1, descending=True, stable=True)[:, :k]
+    top = sim.gather(1, idx)
     full = torch.full_like(sim, float("-inf")).scatter(1, idx, top)
     return torch.softmax(full / TEMPERATURE, dim=1)
 

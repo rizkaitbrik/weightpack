@@ -142,7 +142,7 @@ A trust policy makes `wpkd` refuse images that lack a trusted signature, on `pul
 ```bash
 ./dist/apps/wpkd --worker "uv run --project python/worker weightpack-worker" \
   --engine-reference "uv run --project python/worker --extra serve weightpack-engine" &
-./dist/apps/wpk run assistant:v1            # model assistant:v1 routes each token across the experts (reference engine);
+./dist/apps/wpk run assistant:v1            # model assistant:v1 routes each token across the experts;
                                             # assistant:v1/<expert> picks one
 ./dist/apps/wpk run --name fr french:v1     # answers to model fr, on the same engine if the base is the same
 ./dist/apps/wpk ps

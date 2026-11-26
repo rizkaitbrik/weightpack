@@ -405,6 +405,70 @@ func TestGatewayKey(t *testing.T) {
 	resp.Body.Close()
 }
 
+// A run pins its serving files before it checks they exist; a prune at the
+// same time must not delete them once pinned.
+func TestPruneLeavesPinnedFiles(t *testing.T) {
+	rt := newFixture(t).rt
+	rel := filepath.Join("bases", "abc")
+	file := filepath.Join(rt.dir, rel, "base", "weights")
+	write := func(p string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("w"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A prune's leftovers go; an export's staging directory stays.
+	leftover := filepath.Join(rt.dir, "bases", pruneStaging+"1", "old", "weights")
+	staging := filepath.Join(rt.dir, "bases", ".export-1", "weights")
+	write(leftover)
+	write(staging)
+	write(file)
+	rt.pin([]string{rel}, 1)
+	if _, err := rt.PruneFiles(false); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]bool{file: true, staging: true, leftover: false} {
+		if _, err := os.Stat(p); (err == nil) != want {
+			t.Errorf("%s: exists %v, want %v", p, err == nil, want)
+		}
+	}
+	rt.pin([]string{rel}, -1)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 300; i++ {
+			rt.pin([]string{rel}, 1)
+			if _, err := os.Stat(file); err != nil {
+				write(file) // as a run exports what it does not find
+			}
+			for j := 0; j < 3; j++ {
+				time.Sleep(10 * time.Microsecond)
+				if _, err := os.Stat(file); err != nil {
+					t.Errorf("round %d: pinned file pruned: %v", i, err)
+					rt.pin([]string{rel}, -1)
+					return
+				}
+			}
+			rt.pin([]string{rel}, -1)
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			if _, err := rt.PruneFiles(false); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 func TestLogsAndPrune(t *testing.T) {
 	f := newFixture(t)
 	f.build(t, "french", "FROM ./base\nLAYER french ./adapters/french\n")
@@ -556,5 +620,78 @@ func TestMixWithoutTokenRouting(t *testing.T) {
 	}
 	if _, err := f.rt.Stop([]string{"domains"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMixOnVLLM(t *testing.T) {
+	for _, plugin := range []bool{true, false} {
+		var args []string
+		if !plugin {
+			args = []string{"--no-plugin"}
+		}
+		f := newFixture(t, args...)
+		f.build(t, "domains", "FROM ./base\nMIX domain targets=mlp top_k=1\n  EXPERT legal ./adapters/legal\n  EXPERT medical ./adapters/medical\n")
+		var warnings []string
+		c, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "domains", Engine: EngineVLLM, Device: "cuda"}, func(e api.Event) {
+			if e.Warning {
+				warnings = append(warnings, e.Message)
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !plugin {
+			if slices.Contains(c.Models, "domains") || len(warnings) != 1 || !strings.Contains(warnings[0], "weightpack-vllm plugin") {
+				t.Errorf("without the plugin: models %v, warnings %q", c.Models, warnings)
+			}
+			continue
+		}
+		if !slices.Equal(c.Models, []string{"domains", "domains/legal", "domains/medical"}) || c.Router != "arrow" || len(warnings) != 0 {
+			t.Fatalf("container = %+v, warnings %q", c, warnings)
+		}
+		// The mix directory: the stacked rank, the modules in the MIX's
+		// targets, and each expert's exported adapter.
+		dirs, _ := filepath.Glob(filepath.Join(f.store.Root(), "run", "mixes", "*-domain"))
+		if len(dirs) != 1 {
+			t.Fatalf("mix directories %v", dirs)
+		}
+		var cfg struct {
+			R       int      `json:"r"`
+			Alpha   int      `json:"lora_alpha"`
+			Modules []string `json:"target_modules"`
+		}
+		var mix struct {
+			TopK    int      `json:"top_k"`
+			Targets []string `json:"targets"`
+			Experts []struct {
+				ID   string `json:"id"`
+				Rank int    `json:"rank"`
+				Path string `json:"path"`
+			} `json:"experts"`
+		}
+		raw, _ := os.ReadFile(filepath.Join(dirs[0], "adapter_config.json"))
+		_ = json.Unmarshal(raw, &cfg)
+		raw, _ = os.ReadFile(filepath.Join(dirs[0], "weightpack_mix.json"))
+		_ = json.Unmarshal(raw, &mix)
+		if cfg.R != 8 || cfg.Alpha != 8 || !slices.Equal(cfg.Modules, []string{"down_proj", "gate_proj", "up_proj"}) {
+			t.Errorf("adapter config = %+v", cfg)
+		}
+		if mix.TopK != 1 || !slices.Equal(mix.Targets, []string{"gate", "up", "down"}) || len(mix.Experts) != 2 || mix.Experts[0].ID != "legal" || mix.Experts[0].Rank != 4 {
+			t.Errorf("mix = %+v", mix)
+		}
+		_, body := f.chat(t, map[string]any{"model": "domains", "messages": []any{}})
+		if got := strings.Split(content(t, body), "|")[1]; got != "top1 of legal,medical on gate,up,down" {
+			t.Errorf("domains reached %q", got)
+		}
+		// The mix directory is in use until the container stops.
+		if freed, _ := f.rt.PruneFiles(true); freed != 0 {
+			t.Errorf("a prune would free %d bytes in use", freed)
+		}
+		if _, err := f.rt.Stop([]string{"domains"}); err != nil {
+			t.Fatal(err)
+		}
+		if freed, _ := f.rt.PruneFiles(false); freed == 0 {
+			t.Error("the stopped mix's files stayed")
+		}
 	}
 }

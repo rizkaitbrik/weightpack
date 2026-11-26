@@ -29,13 +29,14 @@ class LoRAExpert:
 
 
 def top_k_gates(logits: np.ndarray, k: int) -> np.ndarray:
-    """Softmax over the top-k logits per token; zeros elsewhere.
+    """Softmax over the top-k logits per token; zeros elsewhere. Equal
+    logits go to the lower index.
 
     ``logits`` has shape (tokens, experts).
     """
     if not 1 <= k <= logits.shape[-1]:
         raise ValueError(f"k={k} out of range for {logits.shape[-1]} experts")
-    idx = np.argpartition(-logits, k - 1, axis=-1)[..., :k]
+    idx = np.argsort(-logits, axis=-1, kind="stable")[..., :k]
     picked = np.take_along_axis(logits, idx, axis=-1)
     picked = np.exp(picked - picked.max(axis=-1, keepdims=True))
     picked /= picked.sum(axis=-1, keepdims=True)
@@ -62,3 +63,17 @@ def mix_forward(
         if rows.size:
             y[rows] += gates[rows, i : i + 1] * expert.apply(x[rows])
     return y
+
+
+def arrow_prototype(expert: LoRAExpert) -> np.ndarray:
+    """Arrow's prototype: the unit top right singular vector of B @ A."""
+    _, _, vh = np.linalg.svd(expert.b.astype(np.float64) @ expert.a.astype(np.float64))
+    return vh[0]
+
+
+def arrow_gates(x: np.ndarray, prototypes: np.ndarray, k: int) -> np.ndarray:
+    """Arrow's routing weights, (tokens, experts): a softmax over each
+    token's top-k logits |x . v|."""
+    return top_k_gates(
+        np.abs(x.astype(np.float64) @ prototypes.T), min(k, len(prototypes))
+    )

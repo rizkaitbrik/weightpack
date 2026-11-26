@@ -75,6 +75,17 @@ def test_coefficients_pick_the_top_k():
     )
 
 
+@pytest.mark.parametrize("n", [2, 3, 8])
+def test_ties_go_to_the_first_expert(n):
+    # Experts with the same prototype (same A, B scaled) tie for every token.
+    protos = torch.ones(n, 4) / 2
+    x = torch.randn(5, 4)
+    c = arrow_coefficients(x, protos, top_k=1)
+    assert torch.equal(c, torch.eye(n)[[0] * 5])
+    c = arrow_coefficients(x, protos, top_k=2)
+    assert torch.allclose(c[:, :2], torch.full((5, 2), 0.5)) and (c[:, 2:] == 0).all()
+
+
 def test_domain():
     m = "base_model.model.model.layers.3.mlp.up_proj"
     assert in_domain(m, ["up"], "")

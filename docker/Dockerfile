@@ -53,8 +53,10 @@ ENTRYPOINT ["wpkd", "--gateway", "0.0.0.0:8090", "--worker", "weightpack-worker"
 # CUDA: vLLM by default, the reference engine as a fallback.
 FROM ${VLLM_IMAGE} AS cuda
 COPY python/worker /tmp/worker
-# torch and transformers come with vLLM; this adds the worker and peft.
-RUN python3 -m pip install --no-cache-dir "/tmp/worker[serve]" && rm -rf /tmp/worker
+COPY python/vllm-plugin /tmp/vllm-plugin
+# torch and transformers come with vLLM; this adds the worker and peft, and
+# weightpack-vllm, which routes each token of a MIX across its experts.
+RUN python3 -m pip install --no-cache-dir "/tmp/worker[serve]" /tmp/vllm-plugin && rm -rf /tmp/worker /tmp/vllm-plugin
 COPY --from=binaries /out/wpk /out/wpkd /usr/local/bin/
 ENV WPK_ROOT=/var/lib/weightpack HF_HOME=/var/lib/weightpack/hf
 VOLUME /var/lib/weightpack

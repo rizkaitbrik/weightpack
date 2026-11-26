@@ -31,10 +31,10 @@ docker exec wpkd wpk doctor     # then docker exec wpkd wpk … for every comman
 
 `docker/Dockerfile` builds both images from a checkout. The CUDA image starts from vLLM's.
 
-On a machine with an NVIDIA GPU, also install vLLM, which serves many adapters at once and batches requests:
+On a machine with an NVIDIA GPU, also install vLLM, which serves many adapters at once and batches requests, with the `weightpack-vllm` plugin, which lets it route each token of a mix across its experts:
 
 ```bash
-uv tool install vllm
+uv tool install vllm --with "weightpack-vllm @ git+https://github.com/rizkaitbrik/weightpack#subdirectory=python/vllm-plugin"
 ```
 
 ## 2. Start the daemon
@@ -162,7 +162,7 @@ wpk service uninstall     # stops wpkd; the store stays in ~/.weightpack
 | Machine | Device | Engine | Notes |
 | --- | --- | --- | --- |
 | Mac with Apple Silicon | `mps` | Reference engine (transformers + PEFT on Metal) | macOS 14 or later |
-| Linux with an NVIDIA GPU | `cuda` | vLLM if installed, else the reference engine | `uv tool install vllm`; the `serve` extra brings CUDA torch |
+| Linux with an NVIDIA GPU | `cuda` | vLLM if installed, else the reference engine | `uv tool install vllm` with the `weightpack-vllm` plugin (step 1) for token routing; the `serve` extra brings CUDA torch |
 | Anything else | `cpu` | Reference engine | Fine for small models and tests |
 
 `wpkd` picks the device itself. `wpk run --device cpu` or `--engine reference` overrides it for one container, and `wpkd --device` sets the default. vLLM claims 90% of GPU memory, so to serve two different bases on one GPU, give each a share: `wpkd --engine-vllm "vllm serve --gpu-memory-utilization 0.45"`.
