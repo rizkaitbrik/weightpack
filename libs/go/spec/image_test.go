@@ -94,6 +94,46 @@ func TestCheckImageAcceptsBuiltImage(t *testing.T) {
 	}
 }
 
+// A trained mix holds its router, sealed into its digest; an Arrow mix
+// holds nothing.
+func TestCheckImageRouter(t *testing.T) {
+	trained := func(router string, blobs int) (*ocispec.Manifest, *Config) {
+		m, c := builtImage()
+		for i := range c.Layers {
+			c.Layers[i].Digest, c.Layers[i].Chain = "", ""
+		}
+		c.Layers[2].Router = router
+		for i := 0; i < blobs; i++ {
+			d := ocispec.Descriptor{MediaType: MediaTypeRouter, Digest: dg(string(rune('a' + i))), Size: 1,
+				Annotations: map[string]string{AnnotationLayer: "domain", AnnotationTitle: RouterFile}}
+			m.Layers = append(m.Layers, d)
+		}
+		seal(m, c)
+		return m, c
+	}
+	if err := CheckImage(trained(RouterTrained, 1)); err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		router string
+		blobs  int
+	}{
+		"trained without its router": {RouterTrained, 0},
+		"two routers":                {RouterTrained, 2},
+		"arrow with a router":        {RouterArrow, 1},
+	} {
+		if err := CheckImage(trained(c.router, c.blobs)); err == nil {
+			t.Errorf("%s: no error", name)
+		}
+	}
+	// The router is part of the mix: another router is another mix.
+	m, c := trained(RouterTrained, 1)
+	m.Layers[len(m.Layers)-1].Digest = dg("f")
+	if err := CheckImage(m, c); err == nil {
+		t.Error("swapped router: no error")
+	}
+}
+
 func TestCheckImageRejectsTampering(t *testing.T) {
 	cases := map[string]func(m *ocispec.Manifest, c *Config){
 		"artifact type":     func(m *ocispec.Manifest, _ *Config) { m.ArtifactType = "application/x" },

@@ -95,7 +95,7 @@ Running qwen-tasks on the reference engine (mps)
   model     qwen-tasks/math
 ```
 
-`qwen-tasks` itself picks experts token by token, with the Arrow router: a prompt that mixes SQL and arithmetic can use both experts in one reply. Arrow needs no training, but it routes coarsely; when you know the domain, name the expert. Each expert is its own model name, so a request picks one:
+`qwen-tasks` itself picks experts token by token, with the Arrow router: a prompt that mixes SQL and arithmetic can use both experts in one reply. Arrow needs no training, but it routes coarsely. To route by examples of your own traffic, add `ROUTER train data=./mix.jsonl steps=600` under the `EXPERT` lines and build again: the build trains the router on your data with the experts frozen (see [Trained routers](weightfile.md#trained-routers)). When you know the domain, name the expert. Each expert is its own model name, so a request picks one:
 
 ```bash
 curl http://127.0.0.1:8090/v1/chat/completions -H 'Content-Type: application/json' -d '{

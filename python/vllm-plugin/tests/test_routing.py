@@ -56,8 +56,9 @@ def t(a):
     return torch.from_numpy(np.ascontiguousarray(a))
 
 
+@pytest.mark.parametrize("router", ["arrow", "trained"])
 @pytest.mark.parametrize("top_k", [1, 2])
-def test_gated_lora_matches_the_reference(top_k):
+def test_gated_lora_matches_the_reference(top_k, router):
     rng = np.random.default_rng(0)
     outs = (12, 8)  # two slices, as q and k of a packed qkv_proj
     # Three experts of different ranks: e0 touches only slice 0, e2 only
@@ -93,9 +94,25 @@ def test_gated_lora_matches_the_reference(top_k):
         a_stacked[s][0, 0, :3] = t(plain[s].a)
         b_stacked[s][0, 0, :, :3] = t(plain[s].b)
 
-    routing = Routing(len(outs), SLOTS, MAX_RANK, IN, 4, "cpu", torch.float32)
+    # A trained router's rows per slice, one per expert of the mix; the
+    # rows of experts that do not touch a slice are never read.
+    rows = None
+    if router == "trained":
+        rows = [
+            (
+                t(rng.standard_normal((3, IN)).astype(np.float32)),
+                t(rng.standard_normal(3).astype(np.float32)),
+            )
+            for _ in outs
+        ]
+    routing = Routing(len(outs), SLOTS, MAX_RANK, IN, 4, "cpu")
     routing.set_slot(
-        1, ranks, top_k, [a[1, 0] for a in a_stacked], [b[1, 0] for b in b_stacked]
+        1,
+        ranks,
+        top_k,
+        [a[1, 0] for a in a_stacked],
+        [b[1, 0] for b in b_stacked],
+        rows,
     )
     assert routing.touch[0, 1].tolist() == [True, True, False, False]
     assert routing.touch[1, 1].tolist() == [False, True, True, False]
@@ -112,9 +129,14 @@ def test_gated_lora_matches_the_reference(top_k):
     offset = 0
     for s, out in enumerate(outs):
         name = f"layers.0.self_attn.{'qk'[s]}_proj"
-        here = [e[name] for e in experts if name in e]
-        protos = np.stack([reference.arrow_prototype(e) for e in here])
-        gates = reference.arrow_gates(x, protos, top_k)
+        touching = [i for i, e in enumerate(experts) if name in e]
+        here = [experts[i][name] for i in touching]
+        if rows is None:
+            protos = np.stack([reference.arrow_prototype(e) for e in here])
+            gates = reference.arrow_gates(x, protos, top_k)
+        else:
+            w, b = (r.numpy()[touching] for r in rows[s])
+            gates = reference.router_gates(x, w, b, top_k)
         for row, slot in enumerate(slots):
             if slot == 1:
                 want[row, offset : offset + out] = sum(
@@ -136,7 +158,7 @@ def test_gated_lora_matches_the_reference(top_k):
 
 
 def test_gates_leave_other_tokens_alone():
-    routing = Routing(1, SLOTS, 8, IN, 4, "cpu", torch.float32)
+    routing = Routing(1, SLOTS, 8, IN, 4, "cpu")
     x = torch.randn(5, IN)
     g = routing.gates(x, torch.tensor([0, 1, -1, 2, 0]))
     assert torch.equal(g, torch.ones(1, 5, 8))
@@ -175,7 +197,10 @@ def test_load_mix(tmp_path):
     }
     (tmp_path / "weightpack_mix.json").write_text(json.dumps(mix))
     assert load_mix(str(tmp_path))["top_k"] == 1
-    for bad in ({"version": 2}, {"top_k": 2}, {"router": "trained"}):
+    trained = {**mix, "router": "trained", "router_file": "/r.safetensors"}
+    (tmp_path / "weightpack_mix.json").write_text(json.dumps(trained))
+    assert load_mix(str(tmp_path))["router_file"] == "/r.safetensors"
+    for bad in ({"version": 2}, {"top_k": 2}, {"router": "trained"}, {"router": "x"}):
         (tmp_path / "weightpack_mix.json").write_text(json.dumps({**mix, **bad}))
         with pytest.raises(ValueError):
             load_mix(str(tmp_path))
@@ -194,7 +219,7 @@ def test_ties_pick_exactly_top_k(n):
     b = t(rng.standard_normal((4, 1)).astype(np.float32))
     a_slot = torch.cat([a] * n)
     b_slot = torch.cat([b * (i + 1) for i in range(n)], dim=1)
-    routing = Routing(1, SLOTS, n, IN, n, "cpu", torch.float32)
+    routing = Routing(1, SLOTS, n, IN, n, "cpu")
     x = torch.randn(5, IN)
     for top_k in (1, 2):
         routing.set_slot(0, [1] * n, top_k, [a_slot], [b_slot])

@@ -44,6 +44,9 @@ func (f *File) Config() (*spec.Config, error) {
 			TopK:    m.TopK,
 			Router:  m.Router.Kind,
 		}
+		if m.Router.Trained() {
+			mix.Router = spec.RouterTrained
+		}
 		for _, e := range m.Experts {
 			mix.Experts = append(mix.Experts, e.ID)
 		}

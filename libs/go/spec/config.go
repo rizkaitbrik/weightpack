@@ -21,9 +21,22 @@ const (
 	KindDeltaSparse LayerKind = "delta.sparse"
 	KindFFNExpert   LayerKind = "ffn-expert"
 	KindMix         LayerKind = "mix"
-	KindRouter      LayerKind = "router"
 	KindMeta        LayerKind = "meta"
 )
+
+// Routers of a mix. Arrow's prototypes are a function of the experts'
+// weights, so an Arrow mix holds no blobs; a trained mix holds its router's
+// weights in one router.v1 blob (see RouterFile).
+const (
+	RouterArrow   = "arrow"
+	RouterTrained = "trained"
+)
+
+// RouterFile titles a trained mix's router.v1 blob: a safetensors file
+// holding, for each routed module, <module>.router.weight [experts, in] and
+// <module>.router.bias [experts] in float32, one row per expert in mix
+// order. A token's logit for an expert is |w . x| + b.
+const RouterFile = "router.safetensors"
 
 // Config is the image config blob (MediaTypeConfig).
 type Config struct {

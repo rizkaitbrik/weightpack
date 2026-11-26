@@ -6,6 +6,7 @@
 //	                         there are several), config.json, tokenizer, …
 //	DIR/adapters/<id>/       a PEFT LoRA adapter per LoRA layer:
 //	                         adapter_config.json, adapter_model.safetensors
+//	DIR/routers/<id>.safetensors  a MIX's trained router, if it has one
 //	DIR/chat_template.jinja  the image's TEMPLATE, if it has one
 //	DIR/LICENSE              the image's LICENSE file, if it has one
 //
@@ -56,6 +57,8 @@ type Options struct {
 	// not rebuild the image.
 	NoBase   bool
 	Adapters []string
+	// Routers writes a trained MIX's router in a partial export too.
+	Routers bool
 }
 
 // Export writes the image ref names to opts.Dir. It writes into a staging
@@ -131,6 +134,11 @@ func Export(ctx context.Context, s *store.Store, ref string, opts Options, progr
 			continue
 		}
 		if err := e.adapter(l, byLayer[l.ID], baseTensors); err != nil {
+			return nil, err
+		}
+	}
+	if m := plan.mix; m != nil && m.Router == spec.RouterTrained && (!partial || opts.Routers) {
+		if err := e.copyBlob(RouterPath(m.ID), byLayer[m.ID][0]); err != nil {
 			return nil, err
 		}
 	}
@@ -582,7 +590,7 @@ func (e *exporter) imageMeta(ds []ocispec.Descriptor) (map[string]bool, error) {
 		if err := checkTitle(title); err != nil {
 			return nil, err
 		}
-		if title == "Weightfile" || title == "base" || title == "adapters" {
+		if title == "Weightfile" || title == "base" || title == "adapters" || title == "routers" {
 			return nil, fmt.Errorf("image meta file %q collides with the export layout", title)
 		}
 		if err := e.copyBlob(title, d); err != nil {
@@ -613,10 +621,14 @@ func (e *exporter) weightfile(ref, digest string, p *layerPlan, files map[string
 		for _, x := range p.experts {
 			fmt.Fprintf(&b, "  EXPERT %s ./adapters/%s\n", x.ID, x.ID)
 		}
-		if m.Router != "arrow" {
-			return fmt.Errorf("MIX %s uses router %q, which export cannot write yet", m.ID, m.Router)
+		switch m.Router {
+		case spec.RouterArrow:
+			b.WriteString("  ROUTER arrow\n")
+		case spec.RouterTrained:
+			fmt.Fprintf(&b, "  ROUTER ./%s\n", RouterPath(m.ID))
+		default:
+			return fmt.Errorf("MIX %s uses router %q, which export cannot write", m.ID, m.Router)
 		}
-		b.WriteString("  ROUTER arrow\n")
 	}
 	if files["chat_template.jinja"] {
 		b.WriteString("TEMPLATE ./chat_template.jinja\n")
@@ -677,3 +689,7 @@ func quote(v string) (string, error) {
 	}
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`, nil
 }
+
+// RouterPath is where an export puts a MIX's trained router, relative to
+// the export directory.
+func RouterPath(mix string) string { return filepath.Join("routers", mix+".safetensors") }

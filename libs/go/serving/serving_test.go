@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
 	"github.com/rizkaitbrik/weightpack/libs/go/build"
 	"github.com/rizkaitbrik/weightpack/libs/go/build/buildtest"
+	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 	"github.com/rizkaitbrik/weightpack/libs/go/store"
 )
 
@@ -693,5 +695,69 @@ func TestMixOnVLLM(t *testing.T) {
 		if freed, _ := f.rt.PruneFiles(false); freed == 0 {
 			t.Error("the stopped mix's files stayed")
 		}
+	}
+}
+
+// A mix with a trained router: each engine gets the router's file, which
+// stays pinned while the container runs.
+func TestTrainedMix(t *testing.T) {
+	for _, engine := range []string{EngineReference, EngineVLLM} {
+		t.Run(engine, func(t *testing.T) {
+			f := newFixture(t)
+			var ts []buildtest.Tensor
+			for blk := 0; blk < 2; blk++ {
+				for _, m := range []string{"gate_proj", "up_proj", "down_proj"} {
+					in := int64(buildtest.Hidden)
+					if m == "down_proj" {
+						in = buildtest.Inter
+					}
+					name := fmt.Sprintf("model.layers.%d.mlp.%s.router.", blk, m)
+					ts = append(ts,
+						buildtest.Tensor{Name: name + "weight", Shape: []int64{2, in}, Seed: int64(len(ts))},
+						buildtest.Tensor{Name: name + "bias", Shape: []int64{2}, Seed: int64(len(ts) + 1)})
+				}
+			}
+			buildtest.WriteSafetensors(t, filepath.Join(f.dir, "router.safetensors"), ts)
+			f.build(t, "domains", "FROM ./base\nMIX domain targets=mlp top_k=1\n  EXPERT legal ./adapters/legal\n  EXPERT medical ./adapters/medical\n  ROUTER ./router.safetensors\n")
+			req := api.RunRequest{Ref: "domains"}
+			if engine == EngineVLLM {
+				req.Engine, req.Device = EngineVLLM, "cuda"
+			}
+			c := f.run(t, req)
+			if c.Router != spec.RouterTrained || c.Models[0] != "domains" {
+				t.Fatalf("container = %+v", c)
+			}
+			files, _ := filepath.Glob(filepath.Join(f.store.Root(), "run", "routers", "*-domain", "routers", "domain.safetensors"))
+			if len(files) != 1 {
+				t.Fatalf("router files %v", files)
+			}
+			_, body := f.chat(t, map[string]any{"model": "domains", "messages": []any{}})
+			if got := strings.Split(content(t, body), "|")[1]; !strings.HasSuffix(got, "on gate,up,down by domain.safetensors") {
+				t.Errorf("domains reached %q", got)
+			}
+			if engine == EngineVLLM {
+				var mix struct {
+					Router     string `json:"router"`
+					RouterFile string `json:"router_file"`
+				}
+				dirs, _ := filepath.Glob(filepath.Join(f.store.Root(), "run", "mixes", "*-domain"))
+				raw, _ := os.ReadFile(filepath.Join(dirs[0], "weightpack_mix.json"))
+				if err := json.Unmarshal(raw, &mix); err != nil || mix.Router != "trained" || mix.RouterFile != files[0] {
+					t.Errorf("mix = %+v (%v)", mix, err)
+				}
+			}
+			if freed, _ := f.rt.PruneFiles(true); freed != 0 {
+				t.Errorf("a prune would free %d bytes in use", freed)
+			}
+			if _, err := f.rt.Stop([]string{"domains"}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.rt.PruneFiles(false); err != nil {
+				t.Fatal(err)
+			}
+			if left, _ := os.ReadDir(filepath.Join(f.store.Root(), "run", "routers")); len(left) != 0 {
+				t.Errorf("routers left after prune: %v", left)
+			}
+		})
 	}
 }

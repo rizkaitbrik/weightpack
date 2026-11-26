@@ -10,7 +10,7 @@ uv tool install vllm --with "weightpack-vllm @ git+https://github.com/rizkaitbri
 pip install ./python/vllm-plugin
 ```
 
-`wpkd` does the rest: for a MIX image on vLLM it writes a mix directory (an adapter config and `weightpack_mix.json`) and loads it with `/v1/load_lora_adapter`. The plugin stacks the experts into one adapter and gates each expert's rank block per token with the Arrow router; see the design doc's Token routing section.
+`wpkd` does the rest: for a MIX image on vLLM it writes a mix directory (an adapter config and `weightpack_mix.json`) and loads it with `/v1/load_lora_adapter`. The plugin stacks the experts into one adapter and gates each expert's rank block per token with the Arrow router, or with the trained router whose file `weightpack_mix.json` names; see the design doc's Token routing section.
 
 - `weightpack_vllm/routing.py`: the stacking and the gating, in torch, tested without vLLM against `reference.py`, the NumPy ground truth.
 - `weightpack_vllm/patches.py`: the four small patches into vLLM's LoRA path, written against vLLM 0.34 and run end to end on 0.29.

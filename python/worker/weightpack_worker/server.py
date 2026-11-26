@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import queue
 import signal
 import sys
 import threading
@@ -24,9 +25,14 @@ from weightpack_worker.squash import LoRALayer, squash
 __version__ = "0.1.0"
 
 
+class Cancelled(Exception):
+    """The daemon went away while a router trained."""
+
+
 class Worker(worker_pb2_grpc.WorkerServicer):
-    """Implements Info, Squash and EncodeLayer (XOR); Evaluate is not done
-    yet and answers UNIMPLEMENTED (the generated base class does that)."""
+    """Implements Info, Squash, EncodeLayer (XOR) and TrainRouter; Evaluate
+    is not done yet and answers UNIMPLEMENTED (the generated base class does
+    that)."""
 
     def Info(self, request, context):  # noqa: N802 (gRPC method name)
         return worker_pb2.InfoResponse(
@@ -88,6 +94,71 @@ class Worker(worker_pb2_grpc.WorkerServicer):
             tensors=[
                 worker_pb2.MergedTensor(name=name, file=file) for name, file in merged
             ]
+        )
+
+    def TrainRouter(self, request, context):  # noqa: N802
+        """Trains in a thread of its own and streams its progress."""
+        try:
+            from weightpack_worker import router_train
+        except ImportError as exc:  # pragma: no cover - needs a bare install
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                f"training a router needs torch, transformers and peft "
+                f"(pip install 'weightpack-worker[serve]'): {exc}",
+            )
+        events: queue.Queue = queue.Queue()
+        outcome: dict = {}
+
+        def progress(step, steps, loss):
+            if not context.is_active():
+                raise Cancelled
+            event = worker_pb2.TrainRouterProgress(step=step, steps=steps, loss=loss)
+            events.put(event)
+
+        def run():
+            try:
+                outcome["result"] = router_train.train(
+                    request.base_dir,
+                    [(e.id, e.dir) for e in request.experts],
+                    list(request.targets),
+                    request.blocks,
+                    request.top_k,
+                    request.data,
+                    request.out_file,
+                    router_train.Options(steps=request.steps or 2000),
+                    device=request.device or "auto",
+                    progress=progress,
+                    chat_template=request.chat_template or None,
+                )
+            except Exception as exc:  # reported to the daemon below
+                outcome["error"] = exc
+            finally:
+                events.put(None)
+
+        threading.Thread(target=run, daemon=True).start()
+        while (event := events.get()) is not None:
+            yield event
+        if "error" in outcome:
+            exc = outcome["error"]
+            if isinstance(exc, Cancelled):
+                return
+            code = (
+                grpc.StatusCode.FAILED_PRECONDITION
+                if isinstance(exc, (ValueError, OSError, KeyError))
+                else grpc.StatusCode.INTERNAL
+            )
+            context.abort(code, f"{type(exc).__name__}: {exc}")
+        res = outcome["result"]
+        yield worker_pb2.TrainRouterProgress(
+            step=request.steps,
+            steps=request.steps,
+            done=True,
+            examples=res.examples,
+            heldout=res.heldout,
+            arrow_loss=res.arrow_loss,
+            trained_loss=res.trained_loss,
+            device=res.device,
+            seconds=res.seconds,
         )
 
 

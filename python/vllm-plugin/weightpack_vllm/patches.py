@@ -91,13 +91,17 @@ def apply() -> None:
         }
         out = cls(kw["lora_model_id"], total, loras)
         out.weightpack_mix = {"ranks": ranks, "top_k": int(mix["top_k"])}
+        if mix.get("router") == "trained":
+            out.weightpack_mix["router"] = routing.load_router(mix["router_file"])
         logger.info(
-            "weightpack: mix of %d experts (%s), rank %d over %d modules, top_k %d",
+            "weightpack: mix of %d experts (%s), rank %d over %d modules, top_k %d, "
+            "%s router",
             len(ranks),
             ", ".join(e["id"] for e in mix["experts"]),
             total,
             len(loras),
             mix["top_k"],
+            mix.get("router", "arrow"),
         )
         return out
 
@@ -131,7 +135,6 @@ def apply() -> None:
                 in_features=a.shape[-1],
                 max_experts=MAX_EXPERTS,
                 device=a.device,
-                dtype=a.dtype,
             )
             module._weightpack_routing = r
             _routings[id(a)] = r
@@ -149,20 +152,33 @@ def apply() -> None:
         model = self._registered_adapters[lora_id]
         index = self.lora_index_to_id.index(model.id)
         mix = getattr(model, "weightpack_mix", None)
-        for module in self.modules.values():
+        # A packed layer (qkv_proj, gate_up_proj) lists the modules its
+        # slices hold, in slice order; a trained router has rows per module.
+        packed = getattr(self, "packed_modules", {})
+        for name, module in self.modules.items():
             r = getattr(module, "_weightpack_routing", None)
             if r is None:
                 continue
             if mix is None:
                 r.clear(index)
-            else:
-                r.set_slot(
-                    index,
-                    mix["ranks"],
-                    mix["top_k"],
-                    [a[index, 0] for a in module.lora_a_stacked],
-                    [b[index, 0] for b in module.lora_b_stacked],
-                )
+                continue
+            rows = None
+            if "router" in mix:
+                parts = packed.get(name, [name])
+                if len(parts) != len(module.lora_a_stacked):
+                    raise ValueError(
+                        f"{name}: {len(module.lora_a_stacked)} LoRA slices, "
+                        f"{len(parts)} modules"
+                    )
+                rows = [mix["router"].get(p) for p in parts]
+            r.set_slot(
+                index,
+                mix["ranks"],
+                mix["top_k"],
+                [a[index, 0] for a in module.lora_a_stacked],
+                [b[index, 0] for b in module.lora_b_stacked],
+                rows,
+            )
         return result
 
     Manager.activate_adapter = activate_adapter

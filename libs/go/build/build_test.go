@@ -277,7 +277,7 @@ func TestBuildRejects(t *testing.T) {
 		{name: "codec on an image layer", wf: "FROM ./base\nLAYER x oci://r.example.com/x:1 codec=xor\n", want: "a layer from an image is stored already"},
 		{name: "hf base without a client", wf: "FROM hf://acme/llama\n", want: "need wpkd's Hugging Face client"},
 		{name: "hf layer without a client", wf: "FROM ./base\nLAYER x hf://acme/lora\n", want: "need wpkd's Hugging Face client"},
-		{name: "router train", wf: "FROM ./base\nMIX m\n EXPERT a ./adapters/legal\n ROUTER train data=./d.jsonl\n", want: "ROUTER train is not supported yet"},
+		{name: "router train without a worker", wf: "FROM ./base\nMIX m\n EXPERT a ./adapters/legal\n ROUTER train data=./d.jsonl\n", want: "Weightfile:4: ROUTER train: training a router needs wpkd's build worker"},
 		{name: "missing template", wf: "FROM ./base\nTEMPLATE ./nope.jinja\n", want: "TEMPLATE"},
 		{name: "bad tag", wf: "FROM ./base\n", tags: []string{"Bad Tag"}, want: "bad"},
 		{name: "parse error", wf: "FROM ./base\nLAYER\n", want: "Weightfile"},

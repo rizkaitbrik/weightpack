@@ -25,7 +25,7 @@ LICENSE inherit
 | `LAYER`     | `LAYER <id> <source> [codec=…] [eval=…] [max_drop=…]`    | Stacked on everything above it. Must come before any `MIX`.       |
 | `MIX`       | `MIX <id> [targets=…] [blocks=…] [top_k=…]`              | At most one per image, on top of the stack. Opens a block.        |
 | `EXPERT`    | `EXPERT <id> <source> [codec=…] [eval=…] [max_drop=…]`   | Belongs to the open `MIX`. Every expert has the mix's parent.     |
-| `ROUTER`    | `ROUTER arrow` or `ROUTER train data=<path> [steps=<n>]` | At most one per `MIX`. Default `arrow`; `steps` defaults to 2000. |
+| `ROUTER`    | `ROUTER arrow`, `ROUTER train data=<path> [steps=<n>]` or `ROUTER <path>` | At most one per `MIX`. Default `arrow`; `steps` defaults to 2000. A path names a router trained before, such as the `routers/<mix>.safetensors` an export writes. |
 | `TEMPLATE`  | `TEMPLATE <path>`                                        | Chat template. At most once.                                      |
 | `LICENSE`   | `LICENSE inherit \| <SPDX id> \| <path>`                 | At most once.                                                     |
 | `LABEL`     | `LABEL <key>=<value> ...`                                | Manifest annotations, as in a Dockerfile. Each key once.          |
@@ -89,7 +89,7 @@ Without `codec=`, or with `codec=lora`, the source is an adapter and is stored a
 | ----------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `FROM`            | A local directory, a Hugging Face repository (`hf://`), or an image (`oci://ref` or a bare reference)         | From a directory: `*.safetensors` (or the files `model.safetensors.index.json` names), `config.json`, and `tokenizer.json` or `tokenizer.model`; other tokenizer files, `generation_config.json`, `README.md` and license files are kept as meta blobs. From an image: its base and stack of layers, unchanged. |
 | `LAYER`, `EXPERT` | A local PEFT LoRA adapter directory, a Hugging Face repository or folder (`hf://`), or an image (`oci://ref`) | From a directory or repository: `adapter_config.json` and `adapter_model.safetensors`, including `modules_to_save` copies. From an image: its top layer.                                                                                                                                                        |
-| `ROUTER`          | `arrow`                                                                                                       | Nothing: Arrow prototypes are a function of the experts' weights, computed when the mix is served                                                                                                                                                                                                                                                |
+| `ROUTER`          | `arrow`, `train data=<jsonl> [steps=<n>]`, or a local router file (`./…`)                       | Arrow: nothing, its prototypes are a function of the experts' weights, computed when the mix is served. `train`: the data, to train a router with the experts frozen (see Trained routers below). A file: a router trained before, checked against the mix and stored as the mix's `router.v1` blob |
 | `TEMPLATE`        | A local file                                                                                                  | Stored as `chat_template.jinja`                                                                                                                                                                                                                                                                                 |
 | `LICENSE`         | `inherit`, an SPDX id, or a local file (`./…`)                                                                | A file is stored as `LICENSE`; an SPDX id becomes the manifest's licenses annotation                                                                                                                                                                                                                            |
 | `LABEL`           | `key=value` pairs                                                                                             | Each becomes a manifest annotation                                                                                                                                                                                                                                                                              |
@@ -104,6 +104,14 @@ The build checks every adapter against the base before storing it: each module's
 
 An adapter trained with `modules_to_save` (a classification head, a resized `lm_head`) carries full copies of those modules beside its LoRA matrices. Each copy is stored in the LoRA layer as a `tensor.v1` blob under the base tensor's name and must match the base tensor's dtype and shape. Squash replaces the base tensor with the copy at that layer's place in the chain, before any LoRA delta of the same layer; export writes the copies back with PEFT's names and the `modules_to_save` list.
 
+### Trained routers
+
+`ROUTER train data=./mix.jsonl steps=2000` trains the mix's router while the build runs, with the base and the experts frozen. It needs `wpkd`'s build worker (`--worker`) with torch, transformers and PEFT, and runs on CUDA, Metal or the CPU.
+
+- **Data.** JSON Lines, one example per line: `{"messages": [...]}`, of which only the last assistant turn is learnt, through the image's chat template; `{"prompt": "...", "completion": "..."}`, of which the completion is learnt; or `{"text": "..."}`, learnt whole. A few thousand examples that mix the experts' domains are enough; examples are cut at 512 tokens.
+- **What the build does.** It trains on the base and experts exactly as `wpk run` would serve them, starting from Arrow, and reports the held-out loss (a tenth of the data, at most 200 examples) with Arrow and with the trained router. The router is cached: rebuilding with the same chain, data, steps, template and worker reuses it.
+- **What the image holds.** The router's weights, as the mix's `router.v1` blob. `wpk export` writes them to `routers/<mix>.safetensors` and its Weightfile says `ROUTER ./routers/<mix>.safetensors`, so the export rebuilds the same image without training again.
+
 ### Images as sources
 
 An image named by `FROM`, `LAYER` or `EXPERT` comes from the local store, or is pulled when the store lacks it (only the missing blobs move; registries on localhost use plain HTTP, and for another insecure registry `wpk pull --plain-http` it first). A bare reference such as `FROM assistant:v1` can also name a local tag.
@@ -113,6 +121,6 @@ An image named by `FROM`, `LAYER` or `EXPERT` comes from the local store, or is 
 
 Building `FROM` a pushed base gives the same image digest as building from the base's directory.
 
-Not yet supported, each with a clear error: lossy imports (`codec=bit1|sparse`), `ROUTER train`, pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `rank_pattern` or `alpha_pattern`.
+Not yet supported, each with a clear error: lossy imports (`codec=bit1|sparse`), pickle weights (`*.bin`, `*.pt`; convert to safetensors), and adapters that use DoRA, `fan_in_fan_out`, trained biases, `rank_pattern` or `alpha_pattern`.
 
 Building the same inputs twice gives the same image digest and stores nothing new; the build cache also lets a rebuild skip reading unchanged source files (`wpk build --no-cache` reads them anyway). Two images on the same base share its blobs, so the second stores only its own layers.

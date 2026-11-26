@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -329,5 +330,60 @@ func TestPartialExportOverAnXORLayer(t *testing.T) {
 	}
 	if err := p.check([]string{"finance"}); err == nil {
 		t.Error("exporting the XOR layer as an adapter was accepted")
+	}
+}
+
+// An image with a trained router exports it, and its Weightfile names it,
+// so the export rebuilds the same image without training again.
+func TestExportTrainedRouter(t *testing.T) {
+	f := newFixture(t)
+	var ts []buildtest.Tensor
+	for i, m := range []string{"gate_proj", "up_proj", "down_proj"} {
+		in := int64(buildtest.Hidden)
+		if m == "down_proj" {
+			in = buildtest.Inter
+		}
+		name := "model.layers.1.mlp." + m + ".router."
+		ts = append(ts,
+			buildtest.Tensor{Name: name + "weight", Shape: []int64{2, in}, Seed: int64(i)},
+			buildtest.Tensor{Name: name + "bias", Shape: []int64{2}, Seed: int64(i + 10)})
+	}
+	buildtest.WriteSafetensors(t, filepath.Join(f.dir, "router.safetensors"), ts)
+	wf := filepath.Join(f.dir, "Weightfile.trained")
+	body := strings.Replace(buildtest.Assistant, "ROUTER arrow", "ROUTER ./router.safetensors", 1)
+	if err := os.WriteFile(wf, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := f.build(t, wf, "trained")
+
+	out := filepath.Join(f.dir, "out")
+	if _, err := Export(context.Background(), f.store, "trained", Options{Dir: out}, nil); err != nil {
+		t.Fatal(err)
+	}
+	router, err := safetensors.Open(filepath.Join(out, RouterPath("domain")))
+	if err != nil || len(router.Tensors) != len(ts) {
+		t.Fatalf("exported router: %v", err)
+	}
+	router.Close()
+	written, _ := os.ReadFile(filepath.Join(out, "Weightfile"))
+	if !strings.Contains(string(written), "  ROUTER ./routers/domain.safetensors\n") {
+		t.Errorf("Weightfile:\n%s", written)
+	}
+	s2, _ := store.Open(filepath.Join(f.dir, "store2"))
+	rebuilt, err := build.Build(context.Background(), s2, build.Options{Weightfile: filepath.Join(out, "Weightfile")}, nil)
+	if err != nil || rebuilt.Manifest.Digest.String() != want {
+		t.Errorf("rebuilt: %v %v, want %s", err, rebuilt, want)
+	}
+
+	// A partial export writes the router only when asked.
+	for _, routers := range []bool{false, true} {
+		dir := filepath.Join(f.dir, "partial-"+strconv.FormatBool(routers))
+		if _, err := Export(context.Background(), f.store, "trained", Options{Dir: dir, NoBase: true, Adapters: []string{}, Routers: routers}, nil); err != nil {
+			t.Fatal(err)
+		}
+		_, err := os.Stat(filepath.Join(dir, RouterPath("domain")))
+		if (err == nil) != routers {
+			t.Errorf("partial export, routers %v: router file %v", routers, err)
+		}
 	}
 }
