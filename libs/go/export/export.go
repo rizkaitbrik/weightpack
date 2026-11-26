@@ -216,7 +216,7 @@ func planLayers(c *spec.Config) (*layerPlan, error) {
 	}
 	for _, l := range p.adapters() {
 		if l.Kind != spec.KindLoRA {
-			return nil, fmt.Errorf("layer %q is %s; only LoRA layers can be exported so far", l.ID, l.Kind)
+			return nil, fmt.Errorf("layer %q is %s, which has no PEFT form; wpk squash the image and export the result to get dense weights", l.ID, l.Kind)
 		}
 	}
 	return p, nil

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -71,6 +72,14 @@ type Fidelity struct {
 	MeasuredDrop *float64 `json:"measured_drop,omitempty"`
 }
 
+// layerID is the form of a layer id: lowercase letters, digits, '.', '_'
+// and '-', starting with a letter or digit, at most 64 characters. Ids name
+// export directories, so the form also keeps them clear of path syntax.
+var layerID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// ValidLayerID reports whether id has the form a layer id must have.
+func ValidLayerID(id string) bool { return layerID.MatchString(id) }
+
 // SchemaV1 is the current config schema identifier.
 const SchemaV1 = "weightpack.config.v1"
 
@@ -110,7 +119,7 @@ func ArchFingerprint(tensors []TensorInfo, tokenizerDigest string) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// Validate checks the composition rules of the design:
+// Validate checks the composition rules of the design: well-formed,
 // unique ids, known parents, exactly one base, and every expert of a mix
 // sharing the mix's parent.
 func (c *Config) Validate() error {
@@ -122,6 +131,9 @@ func (c *Config) Validate() error {
 	for _, l := range c.Layers {
 		if l.ID == "" {
 			return errors.New("layer with empty id")
+		}
+		if !ValidLayerID(l.ID) {
+			return fmt.Errorf("bad layer id %q: want lowercase letters, digits, '.', '_' or '-', starting with a letter or digit, at most 64 characters", l.ID)
 		}
 		if _, dup := byID[l.ID]; dup {
 			return fmt.Errorf("duplicate layer id %q", l.ID)

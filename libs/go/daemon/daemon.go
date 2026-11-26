@@ -132,6 +132,9 @@ func (s *server) build(w http.ResponseWriter, r *http.Request) {
 	send := startStream(w)
 	s.log.Info("build started", "weightfile", req.Weightfile, "tags", req.Tags)
 	opts := build.Options{Weightfile: req.Weightfile, Tags: req.Tags, Pull: s.pullForBuild}
+	if s.worker != nil {
+		opts.Worker = s.worker
+	}
 	res, err := build.Build(r.Context(), s.store, opts, send)
 	if err != nil {
 		s.log.Info("build failed", "weightfile", req.Weightfile, "err", err)

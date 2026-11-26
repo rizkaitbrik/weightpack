@@ -83,6 +83,22 @@ def read_header(path: str | Path) -> dict[str, TensorInfo]:
     return out
 
 
+def storage_dtype(dtype: str) -> np.dtype:
+    """The NumPy dtype a safetensors dtype's raw values are stored as."""
+    return _STORAGE[dtype]
+
+
+def index_tensors(paths: list[str]) -> dict[str, tuple[str, TensorInfo]]:
+    """Map every tensor name in the given files to (path, info)."""
+    out: dict[str, tuple[str, TensorInfo]] = {}
+    for p in paths:
+        for name, info in read_header(p).items():
+            if name in out:
+                raise ValueError(f"tensor {name} is in both {out[name][0]} and {p}")
+            out[name] = (p, info)
+    return out
+
+
 def load_raw(path: str | Path, info: TensorInfo) -> np.ndarray:
     """Return a tensor's raw values, memory-mapped and read-only."""
     storage = _STORAGE[info.dtype]

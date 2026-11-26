@@ -60,7 +60,8 @@ class WorkerServicer:
     """Missing associated documentation comment in .proto file."""
 
     def EncodeLayer(self, request, context):
-        """Extract and encode a delta of `target` against `parent`, tensor by tensor.
+        """Encode a full fine-tune as a delta over its parent, tensor by tensor,
+        writing one delta file per tensor that changed to out_dir.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -81,8 +82,8 @@ class WorkerServicer:
         raise NotImplementedError('Method not implemented!')
 
     def Squash(self, request, context):
-        """Bake LoRA layers into the base tensors they modify and write the merged
-        tensors to out_dir.
+        """Bake XOR and LoRA layers into the base tensors they modify and write the
+        merged tensors to out_dir.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

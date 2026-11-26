@@ -225,6 +225,12 @@ func TestPullRefusesBadImages(t *testing.T) {
 		{name: "inconsistent", ref: "tampered:1", kind: spec.KindLoRA, media: spec.MediaTypeLoRA,
 			mutate: func(_ *ocispec.Manifest, c *spec.Config) { c.Layers[1].Alpha = 64 },
 			want:   "inconsistent image"},
+		{name: "path-like layer id", ref: "pathy:1", kind: spec.KindLoRA, media: spec.MediaTypeLoRA,
+			mutate: func(m *ocispec.Manifest, c *spec.Config) {
+				c.Layers[1].ID = "../escaped"
+				m.Layers[1].Annotations[spec.AnnotationLayer] = "../escaped"
+			},
+			want: "bad layer id"},
 		{name: "lossy under exact", ref: "lossy:1", kind: spec.KindDeltaBit1, media: spec.MediaTypeDeltaBit1,
 			opts: Options{Exact: true}, want: "lossy blob"},
 	}

@@ -1,4 +1,4 @@
-// Package squash bakes an image's LoRA layers into its base tensors and
+// Package squash bakes an image's XOR and LoRA layers into its base tensors and
 // stores the result as a new image with a single base layer: a dense model
 // any engine can load once exported.
 //
@@ -28,6 +28,7 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/rizkaitbrik/weightpack/libs/go/api"
+	"github.com/rizkaitbrik/weightpack/libs/go/build"
 	"github.com/rizkaitbrik/weightpack/libs/go/reference"
 	"github.com/rizkaitbrik/weightpack/libs/go/safetensors"
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
@@ -104,10 +105,32 @@ func Squash(ctx context.Context, s *store.Store, w workerpb.WorkerClient, ref st
 		}
 		req.Base = append(req.Base, &workerpb.Blob{Digest: d.Digest.String(), MediaType: d.MediaType, Path: p})
 	}
+	inDir, err := s.TempDir("squash-in-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(inDir)
 	var ids []string
+	sawLoRA := false
 	for _, l := range chain {
-		if l.Kind != spec.KindLoRA {
-			return nil, fmt.Errorf("squash %s: layer %q is %s; only LoRA layers can be squashed so far", ref, l.ID, l.Kind)
+		switch l.Kind {
+		case spec.KindDeltaXOR:
+			// XOR layers apply to the base's bits first, exactly; one above a
+			// LoRA layer could not have been built.
+			if sawLoRA {
+				return nil, fmt.Errorf("squash %s: XOR layer %q sits above a LoRA layer", ref, l.ID)
+			}
+			x, err := build.DecodeXORLayer(s, l.ID, byLayer[l.ID], inDir)
+			if err != nil {
+				return nil, err
+			}
+			req.XorLayers = append(req.XorLayers, x)
+			ids = append(ids, l.ID)
+			continue
+		case spec.KindLoRA:
+			sawLoRA = true
+		default:
+			return nil, fmt.Errorf("squash %s: layer %q is %s, which squash cannot bake in yet", ref, l.ID, l.Kind)
 		}
 		scaling, err := Scaling(l)
 		if err != nil {

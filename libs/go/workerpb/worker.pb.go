@@ -88,30 +88,31 @@ func (Codec) EnumDescriptor() ([]byte, []int) {
 	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{0}
 }
 
-type TensorRef struct {
+// An XOR layer: delta.xor.v1 blobs, each holding one tensor's bits XORed
+// with the same tensor of the layer's parent. The daemon hands the worker
+// uncompressed files, whatever entropy coder the store keeps them in.
+type XORLayer struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`     // e.g. model.layers.12.mlp.up_proj.weight
-	Digest        string                 `protobuf:"bytes,2,opt,name=digest,proto3" json:"digest,omitempty"` // sha256:<hex> of the blob in the wpkd store
-	Dtype         string                 `protobuf:"bytes,3,opt,name=dtype,proto3" json:"dtype,omitempty"`
-	Shape         []int64                `protobuf:"varint,4,rep,packed,name=shape,proto3" json:"shape,omitempty"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Blobs         []*Blob                `protobuf:"bytes,2,rep,name=blobs,proto3" json:"blobs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *TensorRef) Reset() {
-	*x = TensorRef{}
+func (x *XORLayer) Reset() {
+	*x = XORLayer{}
 	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *TensorRef) String() string {
+func (x *XORLayer) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*TensorRef) ProtoMessage() {}
+func (*XORLayer) ProtoMessage() {}
 
-func (x *TensorRef) ProtoReflect() protoreflect.Message {
+func (x *XORLayer) ProtoReflect() protoreflect.Message {
 	mi := &file_weightpack_worker_v1_worker_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -123,47 +124,41 @@ func (x *TensorRef) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use TensorRef.ProtoReflect.Descriptor instead.
-func (*TensorRef) Descriptor() ([]byte, []int) {
+// Deprecated: Use XORLayer.ProtoReflect.Descriptor instead.
+func (*XORLayer) Descriptor() ([]byte, []int) {
 	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *TensorRef) GetName() string {
+func (x *XORLayer) GetId() string {
 	if x != nil {
-		return x.Name
+		return x.Id
 	}
 	return ""
 }
 
-func (x *TensorRef) GetDigest() string {
+func (x *XORLayer) GetBlobs() []*Blob {
 	if x != nil {
-		return x.Digest
-	}
-	return ""
-}
-
-func (x *TensorRef) GetDtype() string {
-	if x != nil {
-		return x.Dtype
-	}
-	return ""
-}
-
-func (x *TensorRef) GetShape() []int64 {
-	if x != nil {
-		return x.Shape
+		return x.Blobs
 	}
 	return nil
 }
 
 type EncodeLayerRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	LayerId       string                 `protobuf:"bytes,1,opt,name=layer_id,json=layerId,proto3" json:"layer_id,omitempty"`
-	ParentChainId string                 `protobuf:"bytes,2,opt,name=parent_chain_id,json=parentChainId,proto3" json:"parent_chain_id,omitempty"`
-	Parent        []*TensorRef           `protobuf:"bytes,3,rep,name=parent,proto3" json:"parent,omitempty"`
-	Target        []*TensorRef           `protobuf:"bytes,4,rep,name=target,proto3" json:"target,omitempty"`
-	Codec         Codec                  `protobuf:"varint,5,opt,name=codec,proto3,enum=weightpack.worker.v1.Codec" json:"codec,omitempty"`
-	EntropyCoder  string                 `protobuf:"bytes,6,opt,name=entropy_coder,json=entropyCoder,proto3" json:"entropy_coder,omitempty"` // "", "zipnn" or "zstd"
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Codec Codec                  `protobuf:"varint,1,opt,name=codec,proto3,enum=weightpack.worker.v1.Codec" json:"codec,omitempty"` // only CODEC_XOR so far
+	// The parent's tensors: the base layer's tensor.v1 blobs, then the XOR
+	// layers between the base and the new layer, bottom first. XOR layers can
+	// only sit on the base or on other XOR layers, so the parent's bits are
+	// exact.
+	Base    []*Blob     `protobuf:"bytes,2,rep,name=base,proto3" json:"base,omitempty"`
+	Parents []*XORLayer `protobuf:"bytes,3,rep,name=parents,proto3" json:"parents,omitempty"`
+	// The fine-tuned model's safetensors files. Its tensor names, dtypes and
+	// shapes must match the base's.
+	TargetFiles []string `protobuf:"bytes,4,rep,name=target_files,json=targetFiles,proto3" json:"target_files,omitempty"`
+	// Directory the worker writes deltas to: one safetensors file per tensor
+	// that differs from the parent, holding target XOR parent with the
+	// tensor's name, dtype and shape. The daemon checks and stores them.
+	OutDir        string `protobuf:"bytes,5,opt,name=out_dir,json=outDir,proto3" json:"out_dir,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -198,34 +193,6 @@ func (*EncodeLayerRequest) Descriptor() ([]byte, []int) {
 	return file_weightpack_worker_v1_worker_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *EncodeLayerRequest) GetLayerId() string {
-	if x != nil {
-		return x.LayerId
-	}
-	return ""
-}
-
-func (x *EncodeLayerRequest) GetParentChainId() string {
-	if x != nil {
-		return x.ParentChainId
-	}
-	return ""
-}
-
-func (x *EncodeLayerRequest) GetParent() []*TensorRef {
-	if x != nil {
-		return x.Parent
-	}
-	return nil
-}
-
-func (x *EncodeLayerRequest) GetTarget() []*TensorRef {
-	if x != nil {
-		return x.Target
-	}
-	return nil
-}
-
 func (x *EncodeLayerRequest) GetCodec() Codec {
 	if x != nil {
 		return x.Codec
@@ -233,9 +200,30 @@ func (x *EncodeLayerRequest) GetCodec() Codec {
 	return Codec_CODEC_UNSPECIFIED
 }
 
-func (x *EncodeLayerRequest) GetEntropyCoder() string {
+func (x *EncodeLayerRequest) GetBase() []*Blob {
 	if x != nil {
-		return x.EntropyCoder
+		return x.Base
+	}
+	return nil
+}
+
+func (x *EncodeLayerRequest) GetParents() []*XORLayer {
+	if x != nil {
+		return x.Parents
+	}
+	return nil
+}
+
+func (x *EncodeLayerRequest) GetTargetFiles() []string {
+	if x != nil {
+		return x.TargetFiles
+	}
+	return nil
+}
+
+func (x *EncodeLayerRequest) GetOutDir() string {
+	if x != nil {
+		return x.OutDir
 	}
 	return ""
 }
@@ -243,10 +231,7 @@ func (x *EncodeLayerRequest) GetEntropyCoder() string {
 type EncodedTensor struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	MediaType     string                 `protobuf:"bytes,2,opt,name=media_type,json=mediaType,proto3" json:"media_type,omitempty"` // e.g. application/vnd.weightpack.delta.xor.v1+zipnn
-	Digest        string                 `protobuf:"bytes,3,opt,name=digest,proto3" json:"digest,omitempty"`
-	Size          int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
-	RelativeError float64                `protobuf:"fixed64,5,opt,name=relative_error,json=relativeError,proto3" json:"relative_error,omitempty"` // 0 for lossless codecs
+	File          string                 `protobuf:"bytes,2,opt,name=file,proto3" json:"file,omitempty"` // file name inside out_dir
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -288,38 +273,18 @@ func (x *EncodedTensor) GetName() string {
 	return ""
 }
 
-func (x *EncodedTensor) GetMediaType() string {
+func (x *EncodedTensor) GetFile() string {
 	if x != nil {
-		return x.MediaType
+		return x.File
 	}
 	return ""
-}
-
-func (x *EncodedTensor) GetDigest() string {
-	if x != nil {
-		return x.Digest
-	}
-	return ""
-}
-
-func (x *EncodedTensor) GetSize() int64 {
-	if x != nil {
-		return x.Size
-	}
-	return 0
-}
-
-func (x *EncodedTensor) GetRelativeError() float64 {
-	if x != nil {
-		return x.RelativeError
-	}
-	return 0
 }
 
 type EncodeLayerResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Tensors       []*EncodedTensor       `protobuf:"bytes,1,rep,name=tensors,proto3" json:"tensors,omitempty"`
-	LayerDigest   string                 `protobuf:"bytes,2,opt,name=layer_digest,json=layerDigest,proto3" json:"layer_digest,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Only tensors that differ from the parent; the rest cost nothing.
+	Tensors       []*EncodedTensor `protobuf:"bytes,1,rep,name=tensors,proto3" json:"tensors,omitempty"`
+	Unchanged     int64            `protobuf:"varint,2,opt,name=unchanged,proto3" json:"unchanged,omitempty"` // tensors equal to the parent's
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -361,11 +326,11 @@ func (x *EncodeLayerResponse) GetTensors() []*EncodedTensor {
 	return nil
 }
 
-func (x *EncodeLayerResponse) GetLayerDigest() string {
+func (x *EncodeLayerResponse) GetUnchanged() int64 {
 	if x != nil {
-		return x.LayerDigest
+		return x.Unchanged
 	}
-	return ""
+	return 0
 }
 
 type EvaluateRequest struct {
@@ -695,7 +660,10 @@ type SquashRequest struct {
 	Layers []*LoRALayer `protobuf:"bytes,2,rep,name=layers,proto3" json:"layers,omitempty"`
 	// Directory the worker writes merged tensors to, one safetensors file per
 	// tensor. The daemon creates it and removes it afterwards.
-	OutDir        string `protobuf:"bytes,3,opt,name=out_dir,json=outDir,proto3" json:"out_dir,omitempty"`
+	OutDir string `protobuf:"bytes,3,opt,name=out_dir,json=outDir,proto3" json:"out_dir,omitempty"`
+	// XOR layers between the base and the LoRA layers, bottom first. They are
+	// applied to the base's bits first, exactly, before any LoRA math.
+	XorLayers     []*XORLayer `protobuf:"bytes,4,rep,name=xor_layers,json=xorLayers,proto3" json:"xor_layers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -749,6 +717,13 @@ func (x *SquashRequest) GetOutDir() string {
 		return x.OutDir
 	}
 	return ""
+}
+
+func (x *SquashRequest) GetXorLayers() []*XORLayer {
+	if x != nil {
+		return x.XorLayers
+	}
+	return nil
 }
 
 type MergedTensor struct {
@@ -805,8 +780,8 @@ func (x *MergedTensor) GetFile() string {
 
 type SquashResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Only the base tensors some layer modifies; every other tensor is
-	// unchanged and keeps its blob.
+	// Only the base tensors some layer modifies (XOR or LoRA); every other
+	// tensor is unchanged and keeps its blob.
 	Tensors       []*MergedTensor `protobuf:"bytes,1,rep,name=tensors,proto3" json:"tensors,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -853,29 +828,22 @@ var File_weightpack_worker_v1_worker_proto protoreflect.FileDescriptor
 
 const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"\n" +
-	"!weightpack/worker/v1/worker.proto\x12\x14weightpack.worker.v1\"c\n" +
-	"\tTensorRef\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
-	"\x06digest\x18\x02 \x01(\tR\x06digest\x12\x14\n" +
-	"\x05dtype\x18\x03 \x01(\tR\x05dtype\x12\x14\n" +
-	"\x05shape\x18\x04 \x03(\x03R\x05shape\"\xa1\x02\n" +
-	"\x12EncodeLayerRequest\x12\x19\n" +
-	"\blayer_id\x18\x01 \x01(\tR\alayerId\x12&\n" +
-	"\x0fparent_chain_id\x18\x02 \x01(\tR\rparentChainId\x127\n" +
-	"\x06parent\x18\x03 \x03(\v2\x1f.weightpack.worker.v1.TensorRefR\x06parent\x127\n" +
-	"\x06target\x18\x04 \x03(\v2\x1f.weightpack.worker.v1.TensorRefR\x06target\x121\n" +
-	"\x05codec\x18\x05 \x01(\x0e2\x1b.weightpack.worker.v1.CodecR\x05codec\x12#\n" +
-	"\rentropy_coder\x18\x06 \x01(\tR\fentropyCoder\"\x95\x01\n" +
+	"!weightpack/worker/v1/worker.proto\x12\x14weightpack.worker.v1\"L\n" +
+	"\bXORLayer\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x120\n" +
+	"\x05blobs\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\xed\x01\n" +
+	"\x12EncodeLayerRequest\x121\n" +
+	"\x05codec\x18\x01 \x01(\x0e2\x1b.weightpack.worker.v1.CodecR\x05codec\x12.\n" +
+	"\x04base\x18\x02 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x04base\x128\n" +
+	"\aparents\x18\x03 \x03(\v2\x1e.weightpack.worker.v1.XORLayerR\aparents\x12!\n" +
+	"\ftarget_files\x18\x04 \x03(\tR\vtargetFiles\x12\x17\n" +
+	"\aout_dir\x18\x05 \x01(\tR\x06outDir\"7\n" +
 	"\rEncodedTensor\x12\x12\n" +
-	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
-	"\n" +
-	"media_type\x18\x02 \x01(\tR\tmediaType\x12\x16\n" +
-	"\x06digest\x18\x03 \x01(\tR\x06digest\x12\x12\n" +
-	"\x04size\x18\x04 \x01(\x03R\x04size\x12%\n" +
-	"\x0erelative_error\x18\x05 \x01(\x01R\rrelativeError\"w\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04file\x18\x02 \x01(\tR\x04file\"r\n" +
 	"\x13EncodeLayerResponse\x12=\n" +
-	"\atensors\x18\x01 \x03(\v2#.weightpack.worker.v1.EncodedTensorR\atensors\x12!\n" +
-	"\flayer_digest\x18\x02 \x01(\tR\vlayerDigest\"D\n" +
+	"\atensors\x18\x01 \x03(\v2#.weightpack.worker.v1.EncodedTensorR\atensors\x12\x1c\n" +
+	"\tunchanged\x18\x02 \x01(\x03R\tunchanged\"D\n" +
 	"\x0fEvaluateRequest\x12\x1b\n" +
 	"\timage_ref\x18\x01 \x01(\tR\bimageRef\x12\x14\n" +
 	"\x05suite\x18\x02 \x01(\tR\x05suite\">\n" +
@@ -894,11 +862,13 @@ const file_weightpack_worker_v1_worker_proto_rawDesc = "" +
 	"\tLoRALayer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x18\n" +
 	"\ascaling\x18\x02 \x01(\x01R\ascaling\x120\n" +
-	"\x05blobs\x18\x03 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\x91\x01\n" +
+	"\x05blobs\x18\x03 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x05blobs\"\xd0\x01\n" +
 	"\rSquashRequest\x12.\n" +
 	"\x04base\x18\x01 \x03(\v2\x1a.weightpack.worker.v1.BlobR\x04base\x127\n" +
 	"\x06layers\x18\x02 \x03(\v2\x1f.weightpack.worker.v1.LoRALayerR\x06layers\x12\x17\n" +
-	"\aout_dir\x18\x03 \x01(\tR\x06outDir\"6\n" +
+	"\aout_dir\x18\x03 \x01(\tR\x06outDir\x12=\n" +
+	"\n" +
+	"xor_layers\x18\x04 \x03(\v2\x1e.weightpack.worker.v1.XORLayerR\txorLayers\"6\n" +
 	"\fMergedTensor\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04file\x18\x02 \x01(\tR\x04file\"N\n" +
@@ -934,7 +904,7 @@ var file_weightpack_worker_v1_worker_proto_enumTypes = make([]protoimpl.EnumInfo
 var file_weightpack_worker_v1_worker_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_weightpack_worker_v1_worker_proto_goTypes = []any{
 	(Codec)(0),                  // 0: weightpack.worker.v1.Codec
-	(*TensorRef)(nil),           // 1: weightpack.worker.v1.TensorRef
+	(*XORLayer)(nil),            // 1: weightpack.worker.v1.XORLayer
 	(*EncodeLayerRequest)(nil),  // 2: weightpack.worker.v1.EncodeLayerRequest
 	(*EncodedTensor)(nil),       // 3: weightpack.worker.v1.EncodedTensor
 	(*EncodeLayerResponse)(nil), // 4: weightpack.worker.v1.EncodeLayerResponse
@@ -949,28 +919,30 @@ var file_weightpack_worker_v1_worker_proto_goTypes = []any{
 	(*SquashResponse)(nil),      // 13: weightpack.worker.v1.SquashResponse
 }
 var file_weightpack_worker_v1_worker_proto_depIdxs = []int32{
-	1,  // 0: weightpack.worker.v1.EncodeLayerRequest.parent:type_name -> weightpack.worker.v1.TensorRef
-	1,  // 1: weightpack.worker.v1.EncodeLayerRequest.target:type_name -> weightpack.worker.v1.TensorRef
-	0,  // 2: weightpack.worker.v1.EncodeLayerRequest.codec:type_name -> weightpack.worker.v1.Codec
-	3,  // 3: weightpack.worker.v1.EncodeLayerResponse.tensors:type_name -> weightpack.worker.v1.EncodedTensor
-	0,  // 4: weightpack.worker.v1.InfoResponse.codecs:type_name -> weightpack.worker.v1.Codec
-	9,  // 5: weightpack.worker.v1.LoRALayer.blobs:type_name -> weightpack.worker.v1.Blob
-	9,  // 6: weightpack.worker.v1.SquashRequest.base:type_name -> weightpack.worker.v1.Blob
-	10, // 7: weightpack.worker.v1.SquashRequest.layers:type_name -> weightpack.worker.v1.LoRALayer
-	12, // 8: weightpack.worker.v1.SquashResponse.tensors:type_name -> weightpack.worker.v1.MergedTensor
-	2,  // 9: weightpack.worker.v1.Worker.EncodeLayer:input_type -> weightpack.worker.v1.EncodeLayerRequest
-	5,  // 10: weightpack.worker.v1.Worker.Evaluate:input_type -> weightpack.worker.v1.EvaluateRequest
-	7,  // 11: weightpack.worker.v1.Worker.Info:input_type -> weightpack.worker.v1.InfoRequest
-	11, // 12: weightpack.worker.v1.Worker.Squash:input_type -> weightpack.worker.v1.SquashRequest
-	4,  // 13: weightpack.worker.v1.Worker.EncodeLayer:output_type -> weightpack.worker.v1.EncodeLayerResponse
-	6,  // 14: weightpack.worker.v1.Worker.Evaluate:output_type -> weightpack.worker.v1.EvaluateResponse
-	8,  // 15: weightpack.worker.v1.Worker.Info:output_type -> weightpack.worker.v1.InfoResponse
-	13, // 16: weightpack.worker.v1.Worker.Squash:output_type -> weightpack.worker.v1.SquashResponse
-	13, // [13:17] is the sub-list for method output_type
-	9,  // [9:13] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	9,  // 0: weightpack.worker.v1.XORLayer.blobs:type_name -> weightpack.worker.v1.Blob
+	0,  // 1: weightpack.worker.v1.EncodeLayerRequest.codec:type_name -> weightpack.worker.v1.Codec
+	9,  // 2: weightpack.worker.v1.EncodeLayerRequest.base:type_name -> weightpack.worker.v1.Blob
+	1,  // 3: weightpack.worker.v1.EncodeLayerRequest.parents:type_name -> weightpack.worker.v1.XORLayer
+	3,  // 4: weightpack.worker.v1.EncodeLayerResponse.tensors:type_name -> weightpack.worker.v1.EncodedTensor
+	0,  // 5: weightpack.worker.v1.InfoResponse.codecs:type_name -> weightpack.worker.v1.Codec
+	9,  // 6: weightpack.worker.v1.LoRALayer.blobs:type_name -> weightpack.worker.v1.Blob
+	9,  // 7: weightpack.worker.v1.SquashRequest.base:type_name -> weightpack.worker.v1.Blob
+	10, // 8: weightpack.worker.v1.SquashRequest.layers:type_name -> weightpack.worker.v1.LoRALayer
+	1,  // 9: weightpack.worker.v1.SquashRequest.xor_layers:type_name -> weightpack.worker.v1.XORLayer
+	12, // 10: weightpack.worker.v1.SquashResponse.tensors:type_name -> weightpack.worker.v1.MergedTensor
+	2,  // 11: weightpack.worker.v1.Worker.EncodeLayer:input_type -> weightpack.worker.v1.EncodeLayerRequest
+	5,  // 12: weightpack.worker.v1.Worker.Evaluate:input_type -> weightpack.worker.v1.EvaluateRequest
+	7,  // 13: weightpack.worker.v1.Worker.Info:input_type -> weightpack.worker.v1.InfoRequest
+	11, // 14: weightpack.worker.v1.Worker.Squash:input_type -> weightpack.worker.v1.SquashRequest
+	4,  // 15: weightpack.worker.v1.Worker.EncodeLayer:output_type -> weightpack.worker.v1.EncodeLayerResponse
+	6,  // 16: weightpack.worker.v1.Worker.Evaluate:output_type -> weightpack.worker.v1.EvaluateResponse
+	8,  // 17: weightpack.worker.v1.Worker.Info:output_type -> weightpack.worker.v1.InfoResponse
+	13, // 18: weightpack.worker.v1.Worker.Squash:output_type -> weightpack.worker.v1.SquashResponse
+	15, // [15:19] is the sub-list for method output_type
+	11, // [11:15] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_weightpack_worker_v1_worker_proto_init() }
