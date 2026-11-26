@@ -170,6 +170,9 @@ class Routing:
     def __init__(self, n_slices, slots, max_rank, in_features, max_experts, device):
         import torch
 
+        # The op is registered now, before vLLM compiles the model: torch
+        # .compile cannot trace a registration.
+        gate_op()
         self.max_experts = max_experts
         # Float32 whatever the weights' dtype, so routing reads the same
         # values weightpack-engine does.
