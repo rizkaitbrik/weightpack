@@ -78,37 +78,10 @@ The full syntax is in the [Weightfile reference](docs/weightfile.md).
 
 Weightpack is split the way Docker is: a thin CLI, one daemon per machine that owns the store, and a standard OCI registry between machines. One rule shapes the code: **Go works around the tensors, Python works on them.** The Go daemon moves bytes, hashes, checks and stores. Every per-weight operation (squash, delta codecs, evals, router training) runs in a Python worker over a local gRPC socket.
 
-```mermaid
-flowchart LR
-  subgraph host["One machine"]
-    direction TB
-    cli["wpk<br/>CLI"]
-    subgraph wpkd["wpkd daemon (Go)"]
-      direction TB
-      api["HTTP API on a Unix socket"]
-      builder["Builder<br/>Weightfile, chain IDs, fingerprint"]
-      store[("Store<br/>blobs/sha256 CAS<br/>index.json tags<br/>build cache")]
-      reg["Registry client<br/>push, pull, Sigstore, trust policy"]
-      runtime["Runtime<br/>serving bases, engines, adapters"]
-      gateway["OpenAI gateway<br/>:8090"]
-      api --> builder & reg & runtime
-      builder --> store
-      reg --> store
-      runtime --> store
-    end
-    worker["Python worker<br/>squash, codecs, evals,<br/>router training"]
-    engine["Engine process<br/>vLLM + weightpack-vllm plugin<br/>or weightpack-engine"]
-    cli -- "wpkd.sock" --> api
-    builder -- "gRPC: blob paths in,<br/>staged files out" --> worker
-    runtime -- "spawns, loads adapters" --> engine
-    gateway -- "by model name" --> engine
-  end
-  registry[("OCI registry<br/>GHCR, Harbor, ECR, Docker Hub")]
-  hf[("Hugging Face Hub")]
-  reg <-- "missing blobs only" --> registry
-  builder -- "hf:// sources" --> hf
-  client["OpenAI client"] --> gateway
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/architecture-dark.svg">
+  <img src="assets/diagrams/architecture-light.svg" alt="Architecture: wpk talks to the wpkd daemon, which owns the store, transfers blobs to registries and the Hugging Face Hub, runs builds through the Python worker and serves images through engine processes behind its OpenAI gateway." width="100%">
+</picture>
 
 | Component | Language | Owns |
 | --- | --- | --- |
@@ -125,23 +98,10 @@ Only the daemon ever writes to the store. It hands the worker read-only paths to
 
 An image is a standard OCI manifest, so any OCI registry stores it unchanged. Its blobs are tensors, one per blob, and its config declares the layer graph.
 
-```mermaid
-flowchart LR
-  manifest["OCI manifest"]
-  config["Config blob<br/>weightpack.config.v1<br/>arch fingerprint, tokenizer,<br/>layer graph, fidelity records"]
-  subgraph blobs["Layer blobs, one per tensor (canonical safetensors)"]
-    direction TB
-    t["tensor.v1<br/>a base tensor"]
-    l["lora.v1<br/>A and B of one module"]
-    x["delta.xor.v1+zstd<br/>bits XORed with the parent"]
-    b["delta.bit1.v1<br/>sign bits + one scale"]
-    s["delta.sparse.v1+zstd<br/>bitmap + kept values"]
-    r["router.v1<br/>a trained MIX router"]
-    m["meta.v1<br/>config.json, tokenizer, template"]
-  end
-  manifest --> config
-  manifest --> blobs
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/image-format-dark.svg">
+  <img src="assets/diagrams/image-format-light.svg" alt="Image format: an OCI manifest points at a Weightpack config blob and at layer blobs, one tensor per blob, typed by media type." width="100%">
+</picture>
 
 Four rules make composition safe:
 
@@ -150,18 +110,10 @@ Four rules make composition safe:
 3. **Declared targets.** Every delta lists the tensors it touches, so untouched tensors cost nothing.
 4. **One parent per mix.** Every expert in a `MIX` has the mix's parent chain.
 
-```mermaid
-flowchart BT
-  base["base<br/>chain = digest(base)"]
-  support["LAYER support · lora<br/>chain = sha256(chain(base) + digest(support))"]
-  mix["MIX tasks · router: trained<br/>chain = sha256(chain(support) + digest(mix))"]
-  py["python · lora"]
-  sql["sql · lora"]
-  math["math · lora"]
-  base --> support --> mix
-  support --> py & sql & math
-  py & sql & math -. "experts by reference" .-> mix
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/chain-ids-dark.svg">
+  <img src="assets/diagrams/chain-ids-light.svg" alt="Chain IDs: base, then the support layer, then three expert layers mounted by reference in a MIX." width="100%">
+</picture>
 
 Tensor blobs use one canonical byte layout: tensors sorted by name, packed data, and a compact JSON header with sorted keys. The same tensor therefore has the same digest whatever file, shard or writer it came from. Dedup happens per tensor, and building the same inputs twice gives the same manifest digest. All the details are in the [design doc](docs/design.md#image-format).
 
@@ -169,31 +121,10 @@ Tensor blobs use one canonical byte layout: tensors sorted by name, packed data,
 
 `wpk build` resolves each source (a local path, `hf://`, or `oci://`), splits safetensors files into tensor blobs without decoding a value, checks every layer against its parent, and writes the image. Each step is cached on the identity of its inputs, so a rebuild of unchanged sources reads nothing.
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant U as wpk
-  participant D as wpkd
-  participant S as Store
-  participant H as HF Hub / registry
-  participant W as Python worker
-  U->>D: build (Weightfile, context)
-  D->>D: parse and validate the Weightfile
-  D->>H: fetch missing sources (hash-checked, trust policy for FROM)
-  D->>S: split base and adapters into tensor blobs (byte ranges, no decoding)
-  D->>D: check each LoRA against the base: names, shapes, dtypes
-  opt codec=xor, bit1 or sparse
-    D->>W: Import (parent blob paths, fine-tune paths, staging dir)
-    W-->>D: one staged file per changed tensor (+ eval scores)
-    D->>D: check, canonicalise, zstd, gate on max_drop
-  end
-  opt ROUTER train
-    D->>W: TrainRouter (serving base, experts, data), streams progress
-    W-->>D: router.safetensors
-  end
-  D->>S: write config + manifest, tag name:tag
-  D-->>U: image digest
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/build-dark.svg">
+  <img src="assets/diagrams/build-light.svg" alt="Build sequence between wpk, wpkd, the store, the sources and the Python worker." width="100%">
+</picture>
 
 `wpk squash` follows the same pattern. The worker computes `W + Σ scalingᵢ · BᵢAᵢ` in float32 and rounds once, which matches PEFT's `merge_and_unload` bit for bit. The daemon stores only the tensors that changed. `wpk export` writes an image back out as a Hugging Face model directory, PEFT adapters, and a Weightfile that rebuilds the same manifest digest.
 
@@ -201,21 +132,10 @@ sequenceDiagram
 
 A full fine-tune changes every weight, so deduplication alone saves almost nothing. `wpk import` (or `codec=` on a layer) stores it as a delta over its parent instead.
 
-```mermaid
-flowchart LR
-  ft["Full fine-tune<br/>safetensors"] --> check{"Same tensors, tokenizer<br/>and config as the parent?"}
-  check -- no --> refuse["Build error"]
-  check -- yes --> delta["Per changed tensor:<br/>delta vs parent"]
-  delta --> codec{"codec"}
-  codec -- xor --> xor["Bits XORed with the parent<br/>lossless, bit-exact"]
-  codec -- bit1 --> bit1["Sign bits + one scale per matrix<br/>scales calibrated by KL distillation"]
-  codec -- sparse --> sparse["Top-density entries<br/>bitmap + values"]
-  bit1 & sparse --> eval["Eval: fine-tune vs decoded layer<br/>own suite or the self suite"]
-  eval --> gate{"drop <= max_drop?"}
-  gate -- no --> refuse
-  gate -- yes --> rec["Layer + fidelity record"]
-  xor --> layer["Layer"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/import-dark.svg">
+  <img src="assets/diagrams/import-light.svg" alt="Import flow: checks, delta, codec, eval gate, and the resulting layer." width="100%">
+</picture>
 
 Every lossy layer carries a fidelity record with its source digest, codec, eval suite, both scores and the measured drop. `wpk history` shows it, and `wpk pull --exact` refuses any image that contains a lossy layer.
 
@@ -223,26 +143,10 @@ Every lossy layer carries a fidelity record with its source digest, codec, eval 
 
 `push` and `pull` speak the OCI distribution API with the credentials `docker login` stores, and move only the blobs the other side lacks. A pull checks signatures, then the manifest and config (every digest and chain ID recomputed), before it fetches a single tensor.
 
-```mermaid
-sequenceDiagram
-  participant U as wpk
-  participant D as wpkd
-  participant R as OCI registry
-  participant F as Sigstore (Fulcio, Rekor)
-  Note over U,F: Publish
-  U->>D: push name:tag
-  D->>R: HEAD each blob, upload only the missing ones, then the manifest
-  U->>F: sign (key, or keyless with OIDC)
-  U->>D: store the Sigstore bundle as an OCI 1.1 referrer
-  D->>R: PUT the signature manifest (subject = image)
-  Note over U,F: Consume
-  U->>D: pull name:tag
-  D->>R: resolve the reference
-  D->>D: trust policy: longest matching scope (signed, accept or reject)
-  D->>R: fetch the referrers and verify the bundles
-  D->>R: fetch the manifest and config, recompute digests and chain IDs
-  D->>R: fetch only the missing tensor blobs
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/distribution-dark.svg">
+  <img src="assets/diagrams/distribution-light.svg" alt="Push, sign, pull and verify sequence between wpk, wpkd, the OCI registry and Sigstore." width="100%">
+</picture>
 
 Signatures use cosign v3's format, so `cosign verify` checks what `wpk` signs and the other way round. Private keys and identity tokens stay in `wpk` and never reach the daemon.
 
@@ -250,27 +154,10 @@ Signatures use cosign v3's format, so `cosign verify` checks what `wpk` signs an
 
 `wpk run` serves an image on `wpkd`'s OpenAI-compatible gateway. Engines apply one adapter per request, so everything below an image's adapters is baked into a dense **serving base**, named by the chain ID of its top layer. Images that share lower layers share one serving base, one engine process, and one copy of the weights in GPU memory.
 
-```mermaid
-flowchart LR
-  client["OpenAI client"] --> gw["wpkd gateway :8090<br/>routes by model,<br/>injects the image's chat template"]
-  subgraph e1["Engine A · serving base = chain(qwen base)"]
-    direction TB
-    b1[("Base weights<br/>loaded once")]
-    a1["adapter: support:v1"]
-    a2["adapter: french:v1"]
-    m1["mix: qwen-tasks<br/>python + sql + math"]
-  end
-  subgraph e2["Engine B · serving base = chain(llama base + xor layer)"]
-    direction TB
-    b2[("Base weights<br/>loaded once")]
-    a3["adapter: legal:v2"]
-  end
-  gw -- "model support:v1" --> a1
-  gw -- "model fr" --> a2
-  gw -- "model qwen-tasks<br/>(per-token routing)" --> m1
-  gw -- "model qwen-tasks/sql<br/>(one expert)" --> m1
-  gw -- "model legal:v2" --> a3
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/serving-dark.svg">
+  <img src="assets/diagrams/serving-light.svg" alt="Serving: the gateway routes requests by model name to engine processes; each engine holds one serving base and its adapters." width="100%">
+</picture>
 
 - The first container on a base starts an engine on a loopback port. Later containers on the same base add their adapters at runtime through `/v1/load_lora_adapter`. The engine stops with its last container.
 - XOR and lossy layers, and every stacked LoRA layer except the top one, are squashed into the serving base. The top LoRA layer, or each expert of a MIX, is served as an adapter.
@@ -288,18 +175,10 @@ A MIX's own model name routes every token. In each LoRA module the mix covers, t
 
 $$y = W x + \sum_{i \in \mathrm{TopK}(g(x))} g_i(x)\, s_i B_i A_i x$$
 
-```mermaid
-flowchart LR
-  x["hidden state x"] --> W["W x<br/>(base, once)"]
-  x --> g["router g(x)<br/>logit_i = abs(x · w_i) + b_i<br/>top-k, softmax"]
-  x --> A["A = [A₁; A₂; A₃]<br/>shrink: z = x Aᵀ"]
-  g --> scale["scale each expert's block of z<br/>by its routing coefficient"]
-  A --> scale
-  scale --> B["B = [s₁B₁, s₂B₂, s₃B₃]<br/>expand: z Bᵀ"]
-  W --> sum(("+"))
-  B --> sum
-  sum --> y["y"]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/token-routing-dark.svg">
+  <img src="assets/diagrams/token-routing-light.svg" alt="Token routing: the base product plus router-gated LoRA shrink and expand steps." width="100%">
+</picture>
 
 - **Arrow router (zero-shot).** An expert's prototype in a module is the top right singular vector of its BA, computed exactly from the small factors when the mix loads. No training and no stored weights are needed.
 - **Trained router.** `ROUTER train` starts from Arrow, adds a bias, and trains the router with the experts frozen on the language-modelling loss of the routed model. It uses a straight-through top-k and activation checkpointing, and stores the result as one `router.v1` blob.
@@ -309,22 +188,10 @@ flowchart LR
 
 The Helm chart runs `wpkd` on each GPU node as a DaemonSet, and `wpk-control` in front of them as one OpenAI endpoint for the cluster. The control plane is stateless. It discovers agents through a headless Service, reads a catalogue of models from a ConfigMap, and moves each model one step toward its replica count on every pass.
 
-```mermaid
-flowchart TB
-  client["OpenAI client"] --> svc["wpk-control (Deployment + Service)<br/>gateway · placement · catalogue · /metrics"]
-  cm[("ConfigMap<br/>catalogue")] --> svc
-  svc -- "requests: fewest in flight" --> n1
-  svc -- "requests" --> n2
-  svc -. "place: pull, run, stop" .-> n1
-  svc -.-> n2
-  subgraph n1["GPU node A"]
-    a1["wpkd agent"] --> e1["engine: base X<br/>model-1, model-2"]
-  end
-  subgraph n2["GPU node B"]
-    a2["wpkd agent"] --> e2["engine: base Y<br/>model-3"]
-  end
-  reg[("OCI registry")] -- "missing blobs only,<br/>signatures checked" --> a1 & a2
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/diagrams/kubernetes-dark.svg">
+  <img src="assets/diagrams/kubernetes-light.svg" alt="Kubernetes: wpk-control places models on wpkd node agents by base affinity and routes requests to them." width="100%">
+</picture>
 
 **Base affinity is the placement rule.** A new replica goes, in order of preference, to a node whose engine already serves the image's serving base, then to a node that holds the image, then to one that holds its base layer, and otherwise to the least-loaded node. A new fine-tune of a running base therefore loads only its adapters. Before placing an image, the control plane has an agent resolve it under the trust policy, so it never places an image the nodes would refuse. See [docs/kubernetes.md](docs/kubernetes.md).
 
