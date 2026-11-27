@@ -50,6 +50,7 @@ trap finish EXIT
 echo "== tiny model, experts and what weightpack-engine generates"
 uv run --project python/worker --group parity python - "$work" "$srv" "$DTYPE" <<'PY'
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -71,58 +72,76 @@ transformers.LlamaForCausalLM(transformers.LlamaConfig(
     num_attention_heads=2, num_key_value_heads=2, max_position_embeddings=128,
     tie_word_embeddings=False, eos_token_id=62, bos_token_id=61, pad_token_id=63,
 )).save_pretrained(base)
-for seed, name in ((0, "one"), (1, "two")):
-    torch.manual_seed(seed)
-    model = transformers.AutoModelForCausalLM.from_pretrained(base)
-    cfg = peft.LoraConfig(r=4, lora_alpha=16, target_modules=["q_proj", "v_proj"], init_lora_weights=False)
-    peft.get_peft_model(model, cfg).save_pretrained(work / name)
 
-# A router trained on text that counts, so it has something to learn.
-data = work / "mix.jsonl"
-data.write_text("".join(
-    json.dumps({"text": " ".join(f"t{(s + step * i) % 60}" for i in range(12))}) + "\n"
-    for step in (1, -2) for s in range(0, 60, 2)
-))
-router_train.train(
-    str(base), [("one", str(work / "one")), ("two", str(work / "two"))], ["q", "k", "v", "o"],
-    "", 1, str(data), str(work / "router.safetensors"),
-    router_train.Options(steps=30, batch_size=8, learning_rate=0.05), device="cpu",
-)
 
-# Mix directories, as wpkd writes them, with the server's paths: the
-# same experts routed to the top one by Arrow (mix) and by the trained
-# router (mix3), and blended over both by Arrow (mix2).
-for name, top_k in (("mix", 1), ("mix2", 2), ("mix3", 1)):
-    mix = work / name
-    mix.mkdir()
-    (mix / "adapter_config.json").write_text(json.dumps({
-        "peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 8, "lora_alpha": 8,
-        "target_modules": ["q_proj", "v_proj"], "bias": "none", "use_rslora": False,
-        "fan_in_fan_out": False, "base_model_name_or_path": "",
-    }))
-    desc = {
-        "version": 1, "router": "arrow", "top_k": top_k, "targets": ["q", "k", "v", "o"], "blocks": "",
-        "experts": [{"id": "one", "rank": 4, "path": f"{srv}/one"}, {"id": "two", "rank": 4, "path": f"{srv}/two"}],
+def build(seeds):
+    """Experts one and two from seeds, a trained router over them and the
+    mix directories, as wpkd writes them, with the server's paths."""
+    for seed, name in zip(seeds, ("one", "two"), strict=True):
+        shutil.rmtree(work / name, ignore_errors=True)
+        torch.manual_seed(seed)
+        model = transformers.AutoModelForCausalLM.from_pretrained(base)
+        cfg = peft.LoraConfig(r=4, lora_alpha=16, target_modules=["q_proj", "v_proj"], init_lora_weights=False)
+        peft.get_peft_model(model, cfg).save_pretrained(work / name)
+    # A router trained on text that counts, so it has something to learn.
+    data = work / "mix.jsonl"
+    data.write_text("".join(
+        json.dumps({"text": " ".join(f"t{(s + step * i) % 60}" for i in range(12))}) + "\n"
+        for step in (1, -2) for s in range(0, 60, 2)
+    ))
+    router_train.train(
+        str(base), [("one", str(work / "one")), ("two", str(work / "two"))], ["q", "k", "v", "o"],
+        "", 1, str(data), str(work / "router.safetensors"),
+        router_train.Options(steps=30, batch_size=8, learning_rate=0.05), device="cpu",
+    )
+    # The same experts routed to the top one by Arrow (mix) and by the
+    # trained router (mix3), and blended over both by Arrow (mix2).
+    for name, top_k in (("mix", 1), ("mix2", 2), ("mix3", 1)):
+        mix = work / name
+        mix.mkdir(exist_ok=True)
+        (mix / "adapter_config.json").write_text(json.dumps({
+            "peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 8, "lora_alpha": 8,
+            "target_modules": ["q_proj", "v_proj"], "bias": "none", "use_rslora": False,
+            "fan_in_fan_out": False, "base_model_name_or_path": "",
+        }))
+        desc = {
+            "version": 1, "router": "arrow", "top_k": top_k, "targets": ["q", "k", "v", "o"], "blocks": "",
+            "experts": [{"id": "one", "rank": 4, "path": f"{srv}/one"}, {"id": "two", "rank": 4, "path": f"{srv}/two"}],
+        }
+        if name == "mix3":
+            desc.update(router="trained", router_file=f"{srv}/router.safetensors")
+        (mix / "weightpack_mix.json").write_text(json.dumps(desc))
+
+
+def replies(dtype, device):
+    engine = Engine(str(base), device=device, dtype=dtype, served_name="base")
+    engine.load_adapter("one", str(work / "one"))
+    engine.load_adapter("two", str(work / "two"))
+    engine.load_mix("mix", ["one", "two"], 1, ["q", "k", "v", "o"])
+    engine.load_mix("mix2", ["one", "two"], 2, ["q", "k", "v", "o"])
+    engine.load_mix("mix3", ["one", "two"], 1, ["q", "k", "v", "o"], "", "trained", str(work / "router.safetensors"))
+    ids = engine.encode_chat(PROMPT)
+    return {
+        name: engine.generate(name, ids, {"max_tokens": 8, "temperature": 0})[0]
+        for name in ("base", "one", "two", "mix", "mix2", "mix3")
     }
-    if name == "mix3":
-        desc.update(router="trained", router_file=f"{srv}/router.safetensors")
-    (mix / "weightpack_mix.json").write_text(json.dumps(desc))
 
+
+# Experts whose replies are the same in float32 and bfloat16, all of them
+# different and 8 tokens long: a reply on a near-tie (two tokens' logits
+# closer than rounding moves them) would part ways on a GPU's kernels with
+# nothing wrong. Seeds 0 and 1 gave expert one such a tie at its first
+# token (logits 0.5421 and 0.5418); 16 and 17 are the first pair past it.
+SEEDS = (16, 17)
+build(SEEDS)
+exact = replies("float32", "cpu")
+assert len(set(exact.values())) == len(exact), f"replies are not all different: {exact}"
+rounded = replies("bfloat16", "cpu")
+assert rounded == exact, f"replies change with rounding, pick other SEEDS: {exact} {rounded}"
 device = "cpu" if dtype == "float32" else "cuda"
-engine = Engine(str(base), device=device, dtype=dtype, served_name="base")
-engine.load_adapter("one", str(work / "one"))
-engine.load_adapter("two", str(work / "two"))
-engine.load_mix("mix", ["one", "two"], 1, ["q", "k", "v", "o"])
-engine.load_mix("mix2", ["one", "two"], 2, ["q", "k", "v", "o"])
-engine.load_mix("mix3", ["one", "two"], 1, ["q", "k", "v", "o"], "", "trained", str(work / "router.safetensors"))
-ids = engine.encode_chat(PROMPT)
-want = {}
-for name in ("base", "one", "two", "mix", "mix2", "mix3"):
-    want[name], _, _ = engine.generate(name, ids, {"max_tokens": 8, "temperature": 0})
+want = exact if dtype == "float32" else replies(dtype, device)
 (work / "want.json").write_text(json.dumps({"prompt": PROMPT, "replies": want}))
 print(json.dumps(want, indent=1))
-# Otherwise matching replies would not show that vLLM routes at all.
-assert len(set(want.values())) == len(want), "replies are not all different"
 PY
 
 serve_args=(--served-model-name base --enable-lora --max-lora-rank 16 --max-loras 4 --dtype "$DTYPE" --max-model-len 128)

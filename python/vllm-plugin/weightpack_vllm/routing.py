@@ -25,6 +25,7 @@ connects it to vLLM.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -162,13 +163,16 @@ class Routing:
     and each mix's prototypes, rank blocks and top_k.
 
     Its buffers are allocated once, before vLLM captures CUDA graphs, and
-    gates() always runs, so captured graphs route tokens of mixes loaded
-    later.
+    the gate op runs in every batch with an adapter token, so captured
+    graphs route tokens of mixes loaded later.
     """
 
     def __init__(self, n_slices, slots, max_rank, in_features, max_experts, device):
         import torch
 
+        # The op is registered now, before vLLM compiles the model: torch
+        # .compile cannot trace a registration.
+        gate_op()
         self.max_experts = max_experts
         # Float32 whatever the weights' dtype, so routing reads the same
         # values weightpack-engine does.
@@ -241,36 +245,117 @@ class Routing:
         float32: each mix token's routing coefficient for the expert that
         owns each rank position, and 1 for every other token. token_slots
         is each token's adapter slot, -1 for none."""
-        import torch
+        return gates(x, token_slots, *self.tensors())
 
-        n_slices, slots, n_exp, in_f = self.protos.shape
-        t = x.shape[0]
-        slot = token_slots.clamp(min=0)
-        mix = self.is_mix[slot] & (token_slots >= 0)
-        k = self.top_k[slot].view(t, 1)
-        experts = self.rank_expert[slot]  # (t, R)
-        positions = torch.arange(n_exp, device=x.device).expand(t, n_exp)
-        xf = x.to(torch.float32)
-        out = []
-        for s in range(n_slices):
-            protos = self.protos[s].reshape(slots * n_exp, in_f).to(torch.float32)
-            logits = (xf @ protos.T).abs().view(t, slots, n_exp)
-            logits = logits.gather(1, slot.view(t, 1, 1).expand(t, 1, n_exp)).squeeze(1)
-            logits = logits + self.bias[s][slot]
-            logits = logits.masked_fill(~self.touch[s][slot], float("-inf"))
-            # Exactly top_k experts, ties to the lower index, as the engine.
-            order = logits.argsort(dim=1, descending=True, stable=True)
-            place = torch.empty_like(order).scatter_(1, order, positions)
-            logits = logits.masked_fill(place >= k, float("-inf"))
-            coeff = torch.softmax(logits, dim=1).nan_to_num(0.0)
-            g = coeff.gather(1, experts)
-            out.append(torch.where(mix.view(t, 1), g, torch.ones_like(g)))
-        return torch.stack(out)
+    def tensors(self):
+        """The routing state as the gate op takes it."""
+        return (
+            self.is_mix,
+            self.top_k,
+            self.protos,
+            self.bias,
+            self.touch,
+            self.rank_expert,
+        )
+
+
+def gates(x, token_slots, is_mix, top_k, protos, bias, touch, rank_expert):
+    """Routing.gates() over a routing state's tensors."""
+    import torch
+
+    n_slices, slots, n_exp, in_f = protos.shape
+    t = x.shape[0]
+    slot = token_slots.clamp(min=0)
+    mix = is_mix[slot] & (token_slots >= 0)
+    k = top_k[slot].view(t, 1)
+    experts = rank_expert[slot]  # (t, R)
+    positions = torch.arange(n_exp, device=x.device).expand(t, n_exp)
+    xf = x.to(torch.float32)
+    out = []
+    for s in range(n_slices):
+        p = protos[s].reshape(slots * n_exp, in_f).to(torch.float32)
+        logits = (xf @ p.T).abs().view(t, slots, n_exp)
+        logits = logits.gather(1, slot.view(t, 1, 1).expand(t, 1, n_exp)).squeeze(1)
+        logits = logits + bias[s][slot]
+        logits = logits.masked_fill(~touch[s][slot], float("-inf"))
+        # Exactly top_k experts, ties to the lower index, as the engine.
+        order = logits.argsort(dim=1, descending=True, stable=True)
+        place = torch.empty_like(order).scatter_(1, order, positions)
+        logits = logits.masked_fill(place >= k, float("-inf"))
+        coeff = torch.softmax(logits, dim=1).nan_to_num(0.0)
+        g = coeff.gather(1, experts)
+        out.append(torch.where(mix.view(t, 1), g, torch.ones_like(g)))
+    return torch.stack(out)
+
+
+# Each LoRA layer's routing, by the address of its first lora_a buffer,
+# which vLLM allocates once. The gate op looks it up when it runs, so code
+# torch.compile traces holds no reference to it: vLLM's compile cache
+# would save such a reference by the object's id in this process, which
+# the next process does not have.
+_attached: dict[int, Routing] = {}
+
+
+def attach(lora_a, routing: Routing) -> None:
+    """Routes the LoRA layer whose first lora_a buffer is lora_a."""
+    _attached[lora_a.data_ptr()] = routing
+
+
+_gate_op = None
+
+
+def gate_op():
+    """weightpack::gate_(buffer, x, token_slots, lora_a, no_lora): buffer *=
+    the gates of the layer whose first lora_a buffer is lora_a, in place,
+    as one op opaque to torch.compile. On CUDA it runs routing_kernel's
+    Triton kernel, which stops at once for a token of no mix; elsewhere
+    gates() in torch. no_lora is vLLM's host flag for a batch with no
+    adapter token (its own LoRA kernels skip on it, and it picks which CUDA
+    graph replays), and the op then does nothing; so it does for a layer
+    with no routing. WEIGHTPACK_KERNELS=triton runs the kernel on the CPU
+    too, under TRITON_INTERPRET=1, to test it inside vLLM without a GPU."""
+    global _gate_op
+    if _gate_op is not None:
+        return _gate_op
+    import torch
+
+    from . import routing_kernel
+
+    forced = os.environ.get("WEIGHTPACK_KERNELS") == "triton"
+    chosen = []
+
+    @torch.library.custom_op(
+        "weightpack::gate_",
+        mutates_args=("buffer",),
+        schema="(Tensor(a!) buffer, Tensor x, Tensor token_slots, Tensor lora_a, "
+        "Tensor? no_lora) -> ()",
+    )
+    def gate_(buffer, x, token_slots, lora_a, no_lora):
+        if no_lora is not None and bool(no_lora[0]):
+            return
+        routing = _attached.get(lora_a.data_ptr())
+        if routing is None:
+            return
+        state = routing.tensors()
+        kernel = (x.is_cuda or forced) and routing_kernel.available()
+        if not chosen:
+            chosen.append(kernel)
+            logging.getLogger("vllm.weightpack").info(
+                "weightpack: routing gates run on %s",
+                "a Triton kernel" if kernel else "torch ops",
+            )
+        if kernel:
+            routing_kernel.gate_(buffer, x, token_slots, *state)
+        else:
+            buffer.mul_(gates(x, token_slots, *state))
+
+    gate_.register_fake(lambda *args: None)
+    _gate_op = torch.ops.weightpack.gate_
+    return _gate_op
 
 
 def gated_lora_linear(
     wrapper,
-    routing: Routing,
     y,
     x,
     lora_a_stacked,
@@ -280,8 +365,9 @@ def gated_lora_linear(
     **kwargs,
 ) -> None:
     """vLLM's add_lora_linear with the shrink buffer gated per token: shrink,
-    scale each rank position by its gate, expand. Returns y, as vLLM's does
-    for platforms that do not update it in place."""
+    scale each rank position by its gate, expand. The layer's routing is
+    the one attached to lora_a_stacked[0]. Returns y, as vLLM's does for
+    platforms that do not update it in place."""
     import torch
 
     add_inputs = kwargs.pop("add_inputs", True)
@@ -291,7 +377,12 @@ def gated_lora_linear(
         (len(output_slices), t, rank), dtype=torch.float32, device=x.device
     )
     wrapper.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
-    buffer.mul_(routing.gates(x, wrapper._token_lora_indices[:t]))
+    # vLLM's flag for a batch with no adapter token, where its LoRA kernels
+    # skip; versions or platforms without it gate every batch.
+    no_lora = getattr(
+        getattr(wrapper, "token_mapping_meta", None), "no_lora_flag_cpu", None
+    )
+    gate_op()(buffer, x, wrapper._token_lora_indices[:t], lora_a_stacked[0], no_lora)
     wrapper.add_expand(
         y, buffer, lora_b_stacked, output_slices, add_inputs=add_inputs, **kwargs
     )

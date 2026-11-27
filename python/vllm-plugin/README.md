@@ -15,6 +15,7 @@ pip install ./python/vllm-plugin
 For a bit1 fine-tune, `wpkd` starts vLLM with `WEIGHTPACK_DELTA_SLOTS=1` and `--max-loras 4`, exports the layer's blobs with a `weightpack_delta.json`, and loads that directory with `/v1/load_lora_adapter`. The plugin gives each adapter slot buffers beside every linear layer, embedding and RMSNorm (1/16 of the base's matrices per slot), writes a fine-tune's deltas into its slot's buffers, and adds each token's delta to the base's output; see the design doc's Full fine-tunes section.
 
 - `weightpack_vllm/routing.py`: the stacking and the gating, in torch, tested without vLLM against `reference.py`, the NumPy ground truth.
+- `weightpack_vllm/routing_kernel.py`: the gating as one Triton kernel for CUDA, which stops at once for a token of no mix, tested against `routing.py` on a GPU or under Triton's interpreter (`tests/test_routing_kernel.py`).
 - `weightpack_vllm/deltas.py`: reading a bit1 layer, the per-slot buffers and the per-token delta products, in torch, tested without vLLM against the dense fine-tunes.
 - `weightpack_vllm/bit1_kernel.py`: the CUDA kernels for the delta products (Triton), tested against `deltas.py` on a GPU or under Triton's interpreter (`tests/test_bit1_kernel.py`), and timed on a 7B model's projections by `tests/bench_bit1_kernels.py`.
 - `weightpack_vllm/patches.py`: the patches into vLLM's LoRA path and its linear, embedding and RMSNorm layers, written against vLLM 0.34 and run end to end on 0.29.
