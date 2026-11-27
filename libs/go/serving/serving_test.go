@@ -60,7 +60,7 @@ func (f *fixture) build(t *testing.T, tag, weightfile string) {
 	if err := os.WriteFile(p, []byte(weightfile), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := build.Build(context.Background(), f.store, build.Options{Weightfile: p, Tags: []string{tag}}, nil); err != nil {
+	if _, err := build.Build(context.Background(), f.store, build.Options{Weightfile: p, Tags: []string{tag}, Worker: f.worker}, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -759,5 +759,263 @@ func TestTrainedMix(t *testing.T) {
 				t.Errorf("routers left after prune: %v", left)
 			}
 		})
+	}
+}
+
+// Full fine-tunes imported as bit1 layers run on the reference engine over
+// the layers below them: the plain base and two fine-tunes of it share one
+// engine and one copy of the weights, each fine-tune loaded as its deltas.
+// vLLM serves no deltas yet, so there a bit1 layer is baked into a base of
+// its own.
+func TestBit1LayersShareTheBase(t *testing.T) {
+	f := newFixture(t)
+	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
+	writeFinetune(t, filepath.Join(f.dir, "legal-ft"), 9)
+	writeFinetune(t, filepath.Join(f.dir, "same"), 0) // changes nothing
+	f.build(t, "plain", "FROM ./base\n")
+	f.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
+	f.build(t, "legal", "FROM ./base\nLAYER legal ./legal-ft codec=bit1 calibrate=0 max_drop=1\n")
+	f.build(t, "same", "FROM ./base\nLAYER same ./same codec=bit1 calibrate=0 max_drop=1\n")
+
+	plain := f.run(t, api.RunRequest{Ref: "plain"})
+	var events []string
+	finance, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "finance"}, func(e api.Event) { events = append(events, e.Message) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	legal := f.run(t, api.RunRequest{Ref: "legal"})
+	if finance.EngineID != plain.EngineID || legal.EngineID != plain.EngineID || finance.Base != plain.Base || legal.Base != plain.Base {
+		t.Errorf("engines %s %s %s, bases %s %s %s: want one", plain.EngineID, finance.EngineID, legal.EngineID, plain.Base, finance.Base, legal.Base)
+	}
+	// A fine-tune that changed nothing is a bit1 layer with no deltas: it
+	// runs as the base does.
+	same := f.run(t, api.RunRequest{Ref: "same"})
+	_, sameCfg, _, _ := f.rt.read("same")
+	raw, err := os.ReadFile(filepath.Join(f.store.Root(), "run", "deltas", hexOf(sameCfg.Layers[1].Chain)+"-same", "deltas", "same", "weightpack_delta.json"))
+	if err != nil || same.EngineID != plain.EngineID || !strings.Contains(string(raw), `"files": []`) {
+		t.Errorf("unchanged fine-tune: engine %s (base %s), %s, %v", same.EngineID, plain.EngineID, raw, err)
+	}
+	if _, err := f.rt.Stop([]string{"same"}); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.engineStarts(t); n != 1 {
+		t.Errorf("%d engine starts, want 1", n)
+	}
+	if f.worker.count() != 0 {
+		t.Errorf("%d squashes: a bit1 layer served over its base bakes nothing", f.worker.count())
+	}
+	if !slices.Equal(finance.Models, []string{"finance"}) || !slices.Equal(finance.Adapters, []string{"finance"}) {
+		t.Errorf("finance = %+v", finance)
+	}
+	if got := strings.Join(events, "\n"); !strings.Contains(got, "finance as a bit1 delta over it") {
+		t.Errorf("events = %q", events)
+	}
+
+	// The engine got the layer's blobs as they are stored, and their list.
+	_, cfg, _, _ := f.rt.read("finance")
+	layer := cfg.Layers[1]
+	dir := filepath.Join(f.store.Root(), "run", "deltas", hexOf(layer.Chain)+"-finance", "deltas", "finance")
+	raw, err = os.ReadFile(filepath.Join(dir, "weightpack_delta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		Version int
+		Codec   string
+		Layer   string
+		Files   []string
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatal(err)
+	}
+	// The fine-tune changes the query and value projections of each block.
+	if meta.Version != 1 || meta.Codec != "bit1" || meta.Layer != "finance" || len(meta.Files) != 4 {
+		t.Errorf("weightpack_delta.json = %s", raw)
+	}
+	for _, file := range meta.Files {
+		if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
+			t.Error(err)
+		}
+	}
+
+	// Each model reaches its own name in the engine.
+	_, body := f.chat(t, map[string]any{"model": "finance", "messages": []any{}})
+	if parts := strings.Split(content(t, body), "|"); !strings.HasPrefix(parts[0], "bit1-") || !strings.HasSuffix(parts[0], "-finance") || parts[1] != "finance" {
+		t.Errorf("finance reached %q", parts)
+	}
+	e := f.rt.containers["plain"].engine
+	if got := f.loaded(t, e); len(got) != 3 {
+		t.Errorf("engine models %v", got)
+	}
+
+	// Stopping a fine-tune unloads it; its files go with a prune once
+	// nothing uses them.
+	if _, err := f.rt.Stop([]string{"finance"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.loaded(t, e); len(got) != 2 {
+		t.Errorf("after stopping finance the engine has %v", got)
+	}
+	if _, err := f.rt.PruneFiles(false); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(filepath.Join(f.store.Root(), "run", "deltas"))
+	if len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), "-legal") {
+		t.Errorf("deltas left after prune: %v", entries)
+	}
+
+	// On a vLLM without weightpack-vllm 0.2, the layer is baked into a
+	// serving base of its own.
+	events = nil
+	onVLLM, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "finance", Name: "finance-vllm", Engine: EngineVLLM, Device: "cuda"}, func(e api.Event) { events = append(events, e.Message) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onVLLM.Base != layer.Chain || len(onVLLM.Adapters) != 0 || f.worker.count() != 1 {
+		t.Errorf("on vLLM: base %s (layer %s), adapters %v, %d squashes", onVLLM.Base, layer.Chain, onVLLM.Adapters, f.worker.count())
+	}
+	if got := strings.Join(events, "\n"); !strings.Contains(got, "layer finance is baked into this image's serving base") || !strings.Contains(got, "weightpack-vllm 0.2.0 or later") {
+		t.Errorf("events = %q", events)
+	}
+	// Placement plans for every engine, so it names the baked base.
+	if b, err := ServingBase(cfg); err != nil || b != layer.Chain {
+		t.Errorf("ServingBase = %s, %v; want %s", b, err, layer.Chain)
+	}
+}
+
+// A MIX's experts must be LoRA layers, bit1 or not.
+func TestPlanRefusesBit1Experts(t *testing.T) {
+	cfg := &spec.Config{Layers: []spec.Layer{
+		{ID: "base", Kind: spec.KindBase, Chain: "sha256:aa"},
+		{ID: "fin", Kind: spec.KindDeltaBit1, Parent: "base", Chain: "sha256:bb"},
+		{ID: "mix", Kind: spec.KindMix, Parent: "base", Chain: "sha256:cc", Experts: []string{"fin"}, TopK: 1},
+	}}
+	if _, err := planFor(cfg, true); err == nil || !strings.Contains(err.Error(), "engines serve only LoRA layers") {
+		t.Errorf("planFor = %v", err)
+	}
+}
+
+// With weightpack-vllm 0.2 beside it, vLLM serves bit1 fine-tunes over
+// their base too, on an engine started with delta slots: the first image on
+// the base decides, so a base whose engine has none bakes them instead.
+func TestBit1LayersOnVLLM(t *testing.T) {
+	f := newFixture(t)
+	f.rt.pluginVersion = func(context.Context) string { return "0.2.0" }
+	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
+	writeFinetune(t, filepath.Join(f.dir, "legal-ft"), 9)
+	f.build(t, "plain", "FROM ./base\n")
+	f.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
+	f.build(t, "legal", "FROM ./base\nLAYER legal ./legal-ft codec=bit1 calibrate=0 max_drop=1\n")
+	onVLLM := func(ref string) api.RunRequest {
+		return api.RunRequest{Ref: ref, Engine: EngineVLLM, Device: "cuda"}
+	}
+
+	finance := f.run(t, onVLLM("finance"))
+	legal := f.run(t, onVLLM("legal"))
+	plain := f.run(t, onVLLM("plain"))
+	if finance.EngineID != plain.EngineID || legal.EngineID != plain.EngineID || finance.Base != plain.Base || f.worker.count() != 0 {
+		t.Errorf("engines %s %s %s, bases %s %s, %d squashes: want one engine, no squash",
+			finance.EngineID, legal.EngineID, plain.EngineID, finance.Base, plain.Base, f.worker.count())
+	}
+	starts, _ := os.ReadFile(f.starts)
+	if !strings.Contains(string(starts), "max-loras=4 deltas=1") {
+		t.Errorf("engine started as %q, want delta slots", starts)
+	}
+	dir := filepath.Join(f.store.Root(), "run", "deltas")
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 2 {
+		t.Fatalf("delta directories %v", entries)
+	}
+	cfg := filepath.Join(dir, entries[0].Name(), "deltas")
+	sub, _ := os.ReadDir(cfg)
+	if _, err := os.Stat(filepath.Join(cfg, sub[0].Name(), "adapter_config.json")); err != nil {
+		t.Errorf("vLLM needs an adapter config: %v", err)
+	}
+	_, body := f.chat(t, map[string]any{"model": "legal", "messages": []any{}})
+	if parts := strings.Split(content(t, body), "|"); !strings.HasPrefix(parts[0], "bit1-") || parts[1] != "legal" {
+		t.Errorf("legal reached %q", parts)
+	}
+
+	// A base whose vLLM engine was started for a plain image has no delta
+	// slots: a fine-tune on it is baked, and told why.
+	g := newFixture(t)
+	g.rt.pluginVersion = func(context.Context) string { return "0.2.0" }
+	writeFinetune(t, filepath.Join(g.dir, "finance"), 7)
+	g.build(t, "plain", "FROM ./base\n")
+	g.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
+	plain = g.run(t, onVLLM("plain"))
+	var events []string
+	finance, err := g.rt.Run(context.Background(), onVLLM("finance"), func(e api.Event) { events = append(events, e.Message) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finance.EngineID == plain.EngineID || g.worker.count() != 1 {
+		t.Errorf("a fine-tune shared an engine with no delta slots (%d squashes)", g.worker.count())
+	}
+	if got := strings.Join(events, "\n"); !strings.Contains(got, "started without delta slots") {
+		t.Errorf("events = %q", events)
+	}
+}
+
+func TestVersionAtLeast(t *testing.T) {
+	for _, c := range []struct {
+		v    string
+		want bool
+	}{{"0.2.0", true}, {"0.2.1", true}, {"0.10.0", true}, {"1.0", true}, {"0.1.9", false}, {"0.2.0rc1", true}, {"0.1", false}} {
+		if got := versionAtLeast(c.v, "0.2.0"); got != c.want {
+			t.Errorf("versionAtLeast(%q) = %v", c.v, got)
+		}
+	}
+}
+
+// A delta export made before vLLM served bit1 layers has no adapter
+// config, which vLLM reads first: a run on vLLM writes it.
+func TestOldDeltaExportsGetAnAdapterConfig(t *testing.T) {
+	f := newFixture(t)
+	f.rt.pluginVersion = func(context.Context) string { return "0.2.0" }
+	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
+	f.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
+	f.run(t, api.RunRequest{Ref: "finance"})
+	if _, err := f.rt.Stop([]string{"finance"}); err != nil {
+		t.Fatal(err)
+	}
+	_, cfg, _, _ := f.rt.read("finance")
+	config := filepath.Join(f.store.Root(), "run", "deltas", hexOf(cfg.Layers[1].Chain)+"-finance", "deltas", "finance", "adapter_config.json")
+	if err := os.Remove(config); err != nil {
+		t.Fatal(err)
+	}
+	c := f.run(t, api.RunRequest{Ref: "finance", Engine: EngineVLLM, Device: "cuda"})
+	if !slices.Equal(c.Adapters, []string{"finance"}) {
+		t.Errorf("finance on vLLM = %+v", c)
+	}
+	if _, err := os.Stat(config); err != nil {
+		t.Errorf("adapter config not written back: %v", err)
+	}
+}
+
+// A plain image that starts the base's vLLM engine, without delta slots,
+// between a fine-tune's planning and its acquire leaves the fine-tune baked,
+// on an engine of its own, rather than failing to load.
+func TestBit1LayerRacingAPlainImage(t *testing.T) {
+	f := newFixture(t)
+	f.rt.pluginVersion = func(context.Context) string { return "0.2.0" }
+	writeFinetune(t, filepath.Join(f.dir, "finance"), 7)
+	f.build(t, "plain", "FROM ./base\n")
+	f.build(t, "finance", "FROM ./base\nLAYER finance ./finance codec=bit1 calibrate=0 max_drop=1\n")
+	var plain *api.Container
+	f.rt.beforeAcquire = func() {
+		f.rt.beforeAcquire = nil
+		plain = f.run(t, api.RunRequest{Ref: "plain", Engine: EngineVLLM, Device: "cuda"})
+	}
+	var events []string
+	finance, err := f.rt.Run(context.Background(), api.RunRequest{Ref: "finance", Engine: EngineVLLM, Device: "cuda"}, func(e api.Event) { events = append(events, e.Message) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain == nil || finance.EngineID == plain.EngineID || len(finance.Adapters) != 0 || f.worker.count() != 1 {
+		t.Errorf("finance %+v beside plain %+v, %d squashes: want it baked on its own engine", finance, plain, f.worker.count())
+	}
+	if got := strings.Join(events, "\n"); !strings.Contains(got, "started without delta slots") {
+		t.Errorf("events = %q", events)
 	}
 }

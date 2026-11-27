@@ -59,6 +59,10 @@ type Options struct {
 	Adapters []string
 	// Routers writes a trained MIX's router in a partial export too.
 	Routers bool
+	// Deltas writes those bit1 layers as the reference engine serves them,
+	// over the layers below them (see DeltaDir). It makes the export a
+	// partial one.
+	Deltas []string
 }
 
 // Export writes the image ref names to opts.Dir. It writes into a staging
@@ -111,7 +115,12 @@ func Export(ctx context.Context, s *store.Store, ref string, opts Options, progr
 		id := d.Annotations[spec.AnnotationLayer]
 		byLayer[id] = append(byLayer[id], d)
 	}
-	partial := opts.NoBase || opts.Adapters != nil
+	partial := opts.NoBase || opts.Adapters != nil || opts.Deltas != nil
+	for _, id := range opts.Deltas {
+		if !slices.ContainsFunc(plan.stack, func(l spec.Layer) bool { return l.ID == id && l.Kind == spec.KindDeltaBit1 }) {
+			return nil, fmt.Errorf("export %s: the image has no bit1 layer %q in its stack", ref, id)
+		}
+	}
 	for _, id := range opts.Adapters {
 		if !slices.ContainsFunc(plan.adapters(), func(l spec.Layer) bool { return l.ID == id }) {
 			return nil, fmt.Errorf("export %s: the image has no LoRA layer %q", ref, id)
@@ -134,6 +143,11 @@ func Export(ctx context.Context, s *store.Store, ref string, opts Options, progr
 			continue
 		}
 		if err := e.adapter(l, byLayer[l.ID], baseTensors); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range opts.Deltas {
+		if err := e.delta(id, byLayer[id]); err != nil {
 			return nil, err
 		}
 	}
@@ -693,3 +707,87 @@ func quote(v string) (string, error) {
 // RouterPath is where an export puts a MIX's trained router, relative to
 // the export directory.
 func RouterPath(mix string) string { return filepath.Join("routers", mix+".safetensors") }
+
+// DeltaDir is where an export puts a bit1 layer for the reference engine,
+// relative to the export directory.
+func DeltaDir(layer string) string { return filepath.Join("deltas", layer) }
+
+// DeltaFile describes a bit1 layer's directory for the reference engine,
+// which loads it as it loads an adapter (python/worker deltas.py).
+const DeltaFile = "weightpack_delta.json"
+
+// deltaMeta is DeltaFile's content, version 1.
+type deltaMeta struct {
+	Version int      `json:"version"`
+	Codec   string   `json:"codec"`
+	Layer   string   `json:"layer"`
+	Files   []string `json:"files"`
+}
+
+// delta writes a bit1 layer's blobs as they are stored, one tensor's delta
+// each (the signs and scale of a matrix, a whole float32 delta of any other
+// tensor), in tensor name order, and DeltaFile naming them. The engine
+// reads them as decoding does; the daemon does no tensor work. A layer
+// whose fine-tune changed nothing has no blobs, and its file names none.
+func (e *exporter) delta(id string, ds []ocispec.Descriptor) error {
+	ds = slices.Clone(ds)
+	sort.Slice(ds, func(i, j int) bool {
+		return ds[i].Annotations[spec.AnnotationTensor] < ds[j].Annotations[spec.AnnotationTensor]
+	})
+	meta := deltaMeta{Version: 1, Codec: "bit1", Layer: id, Files: []string{}}
+	for _, d := range ds {
+		if d.MediaType != spec.MediaTypeDeltaBit1 {
+			return fmt.Errorf("layer %q holds a %s blob, not a bit1 delta", id, d.MediaType)
+		}
+		name := fmt.Sprintf("%06d.safetensors", len(meta.Files))
+		if err := e.copyBlob(filepath.Join(DeltaDir(id), name), d); err != nil {
+			return err
+		}
+		meta.Files = append(meta.Files, name)
+	}
+	if err := e.writeJSON(filepath.Join(DeltaDir(id), deltaAdapterFile), deltaAdapter); err != nil {
+		return err
+	}
+	return e.writeJSON(filepath.Join(DeltaDir(id), DeltaFile), meta)
+}
+
+// deltaAdapter is what vLLM reads before its loader, which the
+// weightpack-vllm plugin replaces for a delta directory, runs: a rank-1
+// adapter with no LoRA weights.
+var deltaAdapter = map[string]any{
+	"peft_type": "LORA", "task_type": "CAUSAL_LM", "r": 1, "lora_alpha": 1,
+	"target_modules": []string{}, "bias": "none", "use_rslora": false,
+	"fan_in_fan_out": false, "base_model_name_or_path": "",
+}
+
+const deltaAdapterFile = "adapter_config.json"
+
+// EnsureDeltaAdapter writes a delta directory's adapter config if it has
+// none, as one exported before vLLM served bit1 layers lacks. It writes a
+// temporary file and renames it into place, leaving the deltas, which an
+// engine may be reading, as they are.
+func EnsureDeltaAdapter(dir string) error {
+	path := filepath.Join(dir, deltaAdapterFile)
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+	raw, err := json.MarshalIndent(deltaAdapter, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+deltaAdapterFile+"-*")
+	if err != nil {
+		return err
+	}
+	_, err = tmp.Write(append(raw, '\n'))
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp.Name())
+	}
+	return err
+}

@@ -36,7 +36,7 @@ func WriteServingFiles(ctx context.Context, s *store.Store, w workerpb.WorkerCli
 	if err := s.ReadJSON(m.Config.Digest.String(), &cfg); err != nil {
 		return nil, err
 	}
-	p, err := planFor(&cfg)
+	p, err := planFor(&cfg, false)
 	if err != nil {
 		return nil, err
 	}

@@ -17,7 +17,7 @@ addopts = """
 
 [project]
 name = "weightpack-vllm"
-version = "0.1.0"
+version = "0.2.0"
 description = "Weightpack plugin for vLLM: composition loading, expert pool, routers"
 requires-python = ">=3.10,<4"
 readme = 'README.md'

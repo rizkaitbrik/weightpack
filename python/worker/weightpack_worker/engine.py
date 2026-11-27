@@ -8,7 +8,11 @@ and vLLM alike. The base and every adapter are separate model names; a
 request picks one with its ``model`` field. Requests run one at a time.
 
 Beyond vLLM's API, ``/v1/load_mix`` and ``/v1/unload_mix`` name a MIX of
-loaded adapters that routes each token to its own experts (see mixing.py).
+loaded adapters that routes each token to its own experts (see mixing.py),
+and ``/v1/load_lora_adapter`` also takes a full fine-tune stored as a bit1
+delta over the base (a directory with weightpack_delta.json): the engine
+switches its weights to the fine-tune for the fine-tune's requests, so any
+number of them share one copy of the weights (see deltas.py).
 
 It is the engine for machines without vLLM (Macs, CPU servers), and the
 reference vLLM is checked against.
@@ -109,7 +113,8 @@ class StopFilter:
 
 
 class Engine:
-    """One base model and its LoRA adapters, ready to generate."""
+    """One base model, its LoRA adapters and its bit1 fine-tunes, ready to
+    generate."""
 
     def __init__(
         self,
@@ -129,6 +134,12 @@ class Engine:
             model_dir, dtype=torch_dtype
         ).to(self.device)
         self.model.eval()
+        from .deltas import Switcher
+
+        # By checkpoint name, before an adapter wraps any module.
+        tensors = dict(self.model.named_parameters(remove_duplicate=False))
+        tensors.update(self.model.named_buffers(remove_duplicate=False))
+        self.switcher = Switcher(tensors, model_dir, self.device)
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_dir)
         if chat_template:
             self.tokenizer.chat_template = Path(chat_template).read_text()
@@ -136,15 +147,22 @@ class Engine:
         self.peft = None  # a PeftModel once the first adapter is loaded
         self.adapters: dict[str, str] = {}
         self.mixes: dict = {}  # name -> mixing.Mix
+        self.deltas: dict = {}  # name -> deltas.Delta
         self.lock = threading.Lock()
 
     # Adapters -----------------------------------------------------------
 
     def load_adapter(self, name: str, path: str) -> None:
+        """Loads a LoRA adapter, or a fine-tune stored as a bit1 delta."""
         import peft
+
+        from .deltas import is_delta_dir
 
         with self.lock:
             self._check_free(name)
+            if is_delta_dir(path):
+                self.deltas[name] = self.switcher.load(name, path)
+                return
             if self.peft is None:
                 self.peft = peft.PeftModel.from_pretrained(
                     self.model, path, adapter_name=name
@@ -157,6 +175,11 @@ class Engine:
 
     def unload_adapter(self, name: str) -> None:
         with self.lock:
+            if name in self.deltas:
+                if self.switcher.active is self.deltas[name]:
+                    self.switcher.activate(None)
+                del self.deltas[name]
+                return
             if name not in self.adapters:
                 raise KeyError(name)
             users = [m for m, mix in self.mixes.items() if name in mix.experts]
@@ -195,19 +218,28 @@ class Engine:
             del self.mixes[name]
 
     def _check_free(self, name: str) -> None:
-        if name == self.served_name or name in self.adapters or name in self.mixes:
+        if name in self.models():
             raise ValueError(f"model name {name!r} is already in use")
 
     def models(self) -> list[str]:
-        return [self.served_name, *self.adapters, *self.mixes]
+        return [self.served_name, *self.adapters, *self.mixes, *self.deltas]
 
     # Generation ---------------------------------------------------------
 
     def _model_for(self, name: str):
         """The module to run for a model name, and a context that selects
-        the adapter (or turns adapters off for the base)."""
+        the adapter (or turns adapters off for the base). The weights are
+        switched first to the fine-tune a bit1 delta gives, or back to the
+        base for every other model."""
         import contextlib
 
+        if name not in self.models():
+            raise KeyError(name)
+        self.switcher.activate(self.deltas.get(name))
+        if name in self.deltas:
+            if self.peft is None:
+                return self.model, contextlib.nullcontext()
+            return self.peft, self.peft.disable_adapter()
         if name == self.served_name:
             if self.peft is None:
                 return self.model, contextlib.nullcontext()
