@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import os
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # A child of vLLM's logger, so vLLM's logging prints it.
 logger = logging.getLogger("vllm.weightpack")
@@ -26,12 +26,21 @@ def register() -> None:
     global _registered
     if _registered or os.environ.get("WEIGHTPACK_DISABLE") == "1":
         return
+    if os.environ.get("WEIGHTPACK_DELTA_SLOTS") == "1":
+        # vLLM's compile cache does not know these patches: a graph cached
+        # without them would serve every fine-tune as the base, and one
+        # cached with them refers to another process's buffers. So an engine
+        # with delta slots compiles afresh and caches nothing.
+        os.environ["VLLM_DISABLE_COMPILE_CACHE"] = "1"
     try:
         from . import patches
 
         patches.apply()
-    except Exception:  # an unexpected vLLM: serve without mixes, loudly
-        logger.exception("weightpack-vllm %s: token routing is off", __version__)
+    except Exception:  # an unexpected vLLM: serve without the plugin, loudly
+        logger.exception(
+            "weightpack-vllm %s: token routing and bit1 fine-tunes are off",
+            __version__,
+        )
         return
     _registered = True
     logger.info("weightpack-vllm %s: token routing on", __version__)
