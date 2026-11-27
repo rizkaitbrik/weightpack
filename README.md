@@ -1,4 +1,10 @@
-# Weightpack
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/weightpack-stacked-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/brand/weightpack-stacked-light.svg">
+    <img src="assets/brand/weightpack-stacked-light.svg" alt="Weightpack" width="240">
+  </picture>
+</p>
 
 **Docker for neural nets.** Weightpack ships a model as a base plus small, content-addressed weight layers. You can stack layers, or mix them side by side as experts behind a router, push the result to any OCI registry, and serve many images on one copy of the base behind a single OpenAI-compatible endpoint.
 
