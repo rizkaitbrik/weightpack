@@ -213,7 +213,8 @@ wpk build -t assistant ./project
 wpk push --sign --key release.key ghcr.io/acme/assistant
 wpk pull --exact ghcr.io/acme/assistant
 wpk run assistant
-curl http://127.0.0.1:8090/v1/chat/completions -H 'Content-Type: application/json' \
+curl http://127.0.0.1:8090/v1/chat/completions \
+  -H 'Content-Type: application/json' \
   -d '{"model":"assistant/legal","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
