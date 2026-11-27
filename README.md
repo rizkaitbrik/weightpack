@@ -20,8 +20,8 @@
 
 ```bash
 wpk build -t qwen-tasks .          # Weightfile -> image
-wpk push ghcr.io/acme/qwen-tasks   # sends only the blobs the registry lacks
-wpk run qwen-tasks                 # OpenAI endpoint, routed per token across experts
+wpk push ghcr.io/acme/qwen-tasks   # only the missing blobs
+wpk run qwen-tasks                 # OpenAI-compatible endpoint
 ```
 
 ## <img src="assets/brand/icons/base.svg" width="24" height="24" alt=""> Why
@@ -50,13 +50,15 @@ A **Weightfile** declares an image:
 ```dockerfile
 FROM hf://Qwen/Qwen2.5-0.5B-Instruct@7ae557604adf67be50417f59c2c2f167def9a775
 
-LAYER support ./adapters/support                    # stack: a LoRA trained on the base
+# Stack: a LoRA trained on the base
+LAYER support ./adapters/support
 
-MIX tasks top_k=1                                   # mix: experts trained on base + support
+# Mix: experts trained on base + support, behind a router
+MIX tasks top_k=1
   EXPERT python ./adapters/python
   EXPERT sql    oci://ghcr.io/acme/experts/sql:1.4
   EXPERT math   hf://acme/qwen2.5-0.5b-math-lora
-  ROUTER train data=./mix.jsonl steps=600           # or: ROUTER arrow (zero-shot)
+  ROUTER train data=./mix.jsonl steps=600   # or: ROUTER arrow
 ```
 
 A full fine-tune becomes a delta with `codec=xor` (lossless) or `codec=bit1|sparse max_drop=<n>` (eval-gated).
@@ -200,7 +202,7 @@ Method and caveats are in the [design doc](docs/design.md).
 **Install** (macOS on Apple Silicon, Linux), then see the [quickstart](docs/quickstart.md):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rizkaitbrik/weightpack/main/scripts/install.sh | sh
+curl -fsSL   https://raw.githubusercontent.com/rizkaitbrik/weightpack/main/scripts/install.sh | sh
 wpk service install && wpk doctor
 ```
 
@@ -208,11 +210,11 @@ wpk service install && wpk doctor
 
 ```bash
 wpk build -t assistant:v1 ./project
-wpk push --sign --key release.key registry.example.com/team/assistant:v1
-wpk pull --exact registry.example.com/team/assistant:v1
+wpk push --sign --key release.key ghcr.io/acme/assistant:v1
+wpk pull --exact ghcr.io/acme/assistant:v1
 wpk run assistant:v1
 curl http://127.0.0.1:8090/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model": "assistant:v1/legal", "messages": [{"role": "user", "content": "Hi"}]}'
+  -d '{"model":"assistant:v1/legal","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
 **Develop** (Node.js 22+, Go 1.27+, Python 3.10+, [uv](https://docs.astral.sh/uv/)):
