@@ -305,6 +305,12 @@ func TestPartialExport(t *testing.T) {
 		t.Error("the chat template is missing")
 	}
 
+	// Only a bit1 layer of the stack exports as deltas.
+	for _, id := range []string{"french", "legal", "nope"} {
+		if _, err := Export(context.Background(), f.store, "assistant", Options{Dir: filepath.Join(f.dir, "x"), Deltas: []string{id}}, nil); err == nil || !strings.Contains(err.Error(), `no bit1 layer "`+id+`" in its stack`) {
+			t.Errorf("deltas %s: %v", id, err)
+		}
+	}
 	if _, err := Export(context.Background(), f.store, "assistant", Options{Dir: filepath.Join(f.dir, "x"), Adapters: []string{"nope"}}, nil); err == nil || !strings.Contains(err.Error(), `no LoRA layer "nope"`) {
 		t.Errorf("unknown adapter: %v", err)
 	}

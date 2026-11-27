@@ -39,6 +39,15 @@ var DefaultEngines = map[string][]string{
 // vllmRanks are the LoRA ranks vLLM accepts for --max-lora-rank.
 var vllmRanks = []int{16, 32, 64, 128, 256, 320, 512}
 
+// vllmDeltaSlots is --max-loras for a vLLM engine that serves bit1
+// fine-tunes: the weightpack-vllm plugin gives each adapter slot delta
+// buffers, 1/16 of the base's matrices each, so it is fewer than the 8 an
+// engine for LoRA adapters alone has.
+const vllmDeltaSlots = 4
+
+// pluginDeltas is the first weightpack-vllm that serves bit1 fine-tunes.
+const pluginDeltas = "0.2.0"
+
 // engine is one engine process serving one serving base on one device.
 type engine struct {
 	id      string
@@ -49,6 +58,9 @@ type engine struct {
 	served  string // the base's model name inside the engine
 	logPath string
 	maxRank int // vLLM's --max-lora-rank; 0 for the reference engine
+	// deltas says a vLLM engine was started with delta slots, so it serves
+	// bit1 fine-tunes over its base (the reference engine always does).
+	deltas bool
 
 	url   string
 	cmd   *exec.Cmd
@@ -96,8 +108,12 @@ func (e *engine) command(base []string, modelDir string, port int) *exec.Cmd {
 	case EngineVLLM:
 		// Images sharing a base may differ in chat template, so the gateway
 		// sends each image's template with its requests.
+		maxLoRAs := 8
+		if e.deltas {
+			maxLoRAs = vllmDeltaSlots
+		}
 		args = []string{modelDir, "--host", "127.0.0.1", "--port", p, "--served-model-name", e.served,
-			"--enable-lora", "--max-lora-rank", strconv.Itoa(e.maxRank), "--max-loras", "8",
+			"--enable-lora", "--max-lora-rank", strconv.Itoa(e.maxRank), "--max-loras", strconv.Itoa(maxLoRAs),
 			"--trust-request-chat-template"}
 	default:
 		args = []string{"--model", modelDir, "--host", "127.0.0.1", "--port", p, "--device", e.device,
@@ -108,6 +124,12 @@ func (e *engine) command(base []string, modelDir string, port int) *exec.Cmd {
 	if e.kind == EngineVLLM {
 		// Lets wpkd load and unload adapters while vLLM runs.
 		cmd.Env = append(cmd.Env, "VLLM_ALLOW_RUNTIME_LORA_UPDATING=True")
+		if e.deltas {
+			// vLLM's compile cache does not know the plugin's patches, so an
+			// engine with delta slots compiles afresh (weightpack-vllm sets
+			// this too).
+			cmd.Env = append(cmd.Env, "WEIGHTPACK_DELTA_SLOTS=1", "VLLM_DISABLE_COMPILE_CACHE=1")
+		}
 	}
 	setProcAttr(cmd)
 	return cmd

@@ -1,9 +1,10 @@
 // Package serving runs images: wpk run, ps, stop and logs, and the gateway
 // that routes OpenAI requests to them.
 //
-// An image is served as a dense serving base plus the LoRA adapters on top
-// of it (see plan). The base is exported once, as a Hugging Face directory,
-// under <root>/run; its adapters are exported beside it as PEFT adapters.
+// An image is served as a dense serving base plus the LoRA adapters, or the
+// bit1 fine-tune, on top of it (see plan). The base is exported once, as a
+// Hugging Face directory, under <root>/run; its adapters are exported beside
+// it as PEFT adapters, and a bit1 layer as its own blobs (export.DeltaDir).
 // One engine process serves each base on a device, and every container on
 // that base shares it: the base's weights load once, and each container's
 // adapter loads into the running engine. The gateway sends each request to
@@ -31,6 +32,7 @@ import (
 	goruntime "runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -90,6 +92,14 @@ type Runtime struct {
 
 	detectOnce sync.Once
 	detected   string
+
+	// plugin is weightpack-vllm's version beside vLLM, or "", asked once;
+	// tests replace pluginVersion.
+	pluginOnce    sync.Once
+	plugin        string
+	pluginVersion func(context.Context) string
+
+	beforeAcquire func() // a test's hook between planning and acquire
 }
 
 type container struct {
@@ -135,11 +145,67 @@ func New(cfg Config) *Runtime {
 		}
 	}
 	cfg.Engines = engines
-	return &Runtime{
+	rt := &Runtime{
 		cfg: cfg, dir: filepath.Join(cfg.Store.Root(), "run"), storeLock: noLock{},
 		engines: map[string]*engine{}, containers: map[string]*container{},
 		routes: map[string]route{}, reserved: map[string]bool{}, pins: map[string]int{}, prep: map[string]*sync.Mutex{},
 	}
+	rt.pluginVersion = func(ctx context.Context) string { return vllmPlugin(ctx, cfg.Engines[EngineVLLM][0]) }
+	return rt
+}
+
+// vllmServesDeltas says whether the weightpack-vllm beside vLLM serves
+// bit1 fine-tunes.
+func (rt *Runtime) vllmServesDeltas(ctx context.Context) bool {
+	rt.pluginOnce.Do(func() { rt.plugin = rt.pluginVersion(ctx) })
+	return rt.plugin != "" && versionAtLeast(rt.plugin, pluginDeltas)
+}
+
+// planDeltas says whether the image's bit1 layer, if one tops it, is served
+// over the layers below it on this engine, and if not, why not.
+func (rt *Runtime) planDeltas(ctx context.Context, cfg *spec.Config, kind, device string) (bool, string) {
+	if kind == EngineReference {
+		return true, ""
+	}
+	shared, err := planFor(cfg, true)
+	if err != nil || len(shared.adapters) != 1 || shared.adapters[0].Kind != spec.KindDeltaBit1 {
+		return false, ""
+	}
+	if !rt.vllmServesDeltas(ctx) {
+		return false, fmt.Sprintf("vLLM serves bit1 fine-tunes over their base with weightpack-vllm %s or later installed beside it", pluginDeltas)
+	}
+	rt.mu.Lock()
+	e := rt.engines[shared.base.Chain+" "+kind+" "+device]
+	rt.mu.Unlock()
+	if e != nil && !e.hasExited() && !e.deltas {
+		return false, noDeltaSlots
+	}
+	return true, ""
+}
+
+// noDeltaSlots says why a fine-tune is baked when its base's vLLM engine
+// has no delta slots.
+const noDeltaSlots = "the vllm engine on its base was started without delta slots, by an image with no bit1 layer; to share it, stop that base's containers (wpk ps) and run this image first"
+
+// errNoDeltaSlots is acquire's answer to a plan with a bit1 layer when the
+// base's vLLM engine, started meanwhile by another image, has no delta
+// slots: Run then plans the image again, baked.
+var errNoDeltaSlots = errors.New(noDeltaSlots)
+
+// versionAtLeast compares dotted versions number by number.
+func versionAtLeast(v, min string) bool {
+	a, b := strings.Split(v, "."), strings.Split(min, ".")
+	for i := range b {
+		x, y := 0, 0
+		if i < len(a) {
+			x, _ = strconv.Atoi(strings.TrimFunc(a[i], func(r rune) bool { return r < '0' || r > '9' }))
+		}
+		y, _ = strconv.Atoi(b[i])
+		if x != y {
+			return x > y
+		}
+	}
+	return true
 }
 
 // SetStoreLock sets the lock the runtime holds while it reads the store or
@@ -234,14 +300,36 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		rt.mu.Unlock()
 	}()
 
-	step := "run " + req.Ref
 	digest, cfg, template, err := rt.read(req.Ref)
 	if err != nil {
 		return nil, err
 	}
-	p, err := planFor(cfg)
+	c, err := rt.run(ctx, req, progress, name, kind, device, digest, cfg, template, false)
+	if errors.Is(err, errNoDeltaSlots) {
+		// Another image started the base's engine, without delta slots,
+		// after this one was planned: bake the fine-tune instead.
+		c, err = rt.run(ctx, req, progress, name, kind, device, digest, cfg, template, true)
+	}
+	return c, err
+}
+
+// run serves an image Run has read and reserved a name for; baked plans it
+// with its bit1 layer baked into the base.
+func (rt *Runtime) run(ctx context.Context, req api.RunRequest, progress func(api.Event), name, kind, device, digest string, cfg *spec.Config, template string, baked bool) (*api.Container, error) {
+	step := "run " + req.Ref
+	deltas, why := rt.planDeltas(ctx, cfg, kind, device)
+	if baked && deltas && kind != EngineReference {
+		deltas, why = false, noDeltaSlots
+	}
+	p, err := planFor(cfg, deltas)
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", req.Ref, err)
+	}
+	if why != "" {
+		shared, _ := planFor(cfg, true)
+		progress(api.Event{Step: step, Message: fmt.Sprintf(
+			"layer %s is baked into this image's serving base, not shared with the other images on its base: %s",
+			shared.adapters[0].ID, why)})
 	}
 	maxRank := 0
 	for _, a := range p.adapters {
@@ -266,7 +354,7 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		if a.Chain == "" {
 			return nil, fmt.Errorf("layer %q has no chain ID; rebuild the image", a.ID)
 		}
-		adapterRels[i] = filepath.Join("adapters", hexOf(a.Chain)+"-"+a.ID)
+		adapterRels[i] = filepath.Join(servedDir(a), hexOf(a.Chain)+"-"+a.ID)
 	}
 	rels := append([]string{baseRel}, adapterRels...)
 	mixRel := ""
@@ -297,6 +385,9 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		}
 	}
 
+	if rt.beforeAcquire != nil {
+		rt.beforeAcquire()
+	}
 	e, started, err := rt.acquire(p, kind, device, maxRank, filepath.Join(rt.dir, baseRel, "base"))
 	if err != nil {
 		return nil, err
@@ -337,7 +428,11 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	}
 	for i, a := range p.adapters {
 		an := adapterName(a)
-		if err := e.loadAdapter(ctx, an, filepath.Join(rt.dir, adapterRels[i], "adapters", a.ID)); err != nil {
+		dir := filepath.Join(rt.dir, adapterRels[i], "adapters", a.ID)
+		if a.Kind == spec.KindDeltaBit1 {
+			dir = filepath.Join(rt.dir, adapterRels[i], export.DeltaDir(a.ID))
+		}
+		if err := e.loadAdapter(ctx, an, dir); err != nil {
 			for _, loaded := range c.adapters {
 				e.unloadAdapter(loaded)
 			}
@@ -480,13 +575,18 @@ func (rt *Runtime) prepareBase(ctx context.Context, digest string, p *plan, rel,
 	return err
 }
 
-// prepareAdapter exports one LoRA layer as a PEFT adapter, unless an
-// earlier run did. A layer's chain ID pins its content and parents; its
-// id names the directory export writes.
+// prepareAdapter exports one LoRA layer as a PEFT adapter, or a bit1 layer
+// as its deltas, unless an earlier run did. A layer's chain ID pins its
+// content and parents; its id names the directory export writes.
 func (rt *Runtime) prepareAdapter(ctx context.Context, digest string, a spec.Layer, rel string, progress func(api.Event)) error {
 	dir := filepath.Join(rt.dir, rel)
 	defer rt.lockPrep(rel)()
 	if _, err := os.Stat(dir); err == nil {
+		if a.Kind == spec.KindDeltaBit1 {
+			// One exported before vLLM served bit1 layers has no adapter
+			// config, which vLLM reads first.
+			return export.EnsureDeltaAdapter(filepath.Join(dir, export.DeltaDir(a.ID)))
+		}
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
@@ -494,7 +594,11 @@ func (rt *Runtime) prepareAdapter(ctx context.Context, digest string, a spec.Lay
 	}
 	rt.storeLock.Lock()
 	defer rt.storeLock.Unlock()
-	_, err := export.Export(ctx, rt.cfg.Store, digest, export.Options{Dir: dir, NoBase: true, Adapters: []string{a.ID}}, progress)
+	opts := export.Options{Dir: dir, NoBase: true, Adapters: []string{a.ID}}
+	if a.Kind == spec.KindDeltaBit1 {
+		opts.Adapters, opts.Deltas = []string{}, []string{a.ID}
+	}
+	_, err := export.Export(ctx, rt.cfg.Store, digest, opts, progress)
 	return err
 }
 
@@ -534,6 +638,9 @@ func (rt *Runtime) acquire(p *plan, kind, device string, maxRank int, modelDir s
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	if e := rt.engines[key]; e != nil && !e.hasExited() {
+		if kind == EngineVLLM && !e.deltas && slices.ContainsFunc(p.adapters, func(a spec.Layer) bool { return a.Kind == spec.KindDeltaBit1 }) {
+			return nil, false, errNoDeltaSlots
+		}
 		e.refs++
 		return e, false, nil
 	}
@@ -556,6 +663,10 @@ func (rt *Runtime) acquire(p *plan, kind, device string, maxRank int, modelDir s
 	if kind == EngineVLLM {
 		// Headroom for adapters that later images on this base bring.
 		e.maxRank, _ = vllmRank(max(maxRank, 64))
+		// Delta slots for bit1 fine-tunes, if the first image is one.
+		for _, a := range p.adapters {
+			e.deltas = e.deltas || a.Kind == spec.KindDeltaBit1
+		}
 	}
 	rt.engines[key] = e
 	go e.start(rt.cfg.Engines[kind], modelDir, rt.cfg.StartTimeout)
@@ -819,7 +930,7 @@ func (rt *Runtime) pruneable(dryRun bool) ([]string, error) {
 		}
 	}
 	var doomed []string
-	for _, sub := range []string{"bases", "adapters", "mixes", "routers", "logs"} {
+	for _, sub := range []string{"bases", "adapters", "deltas", "mixes", "routers", "logs"} {
 		dir := filepath.Join(rt.dir, sub)
 		entries, err := os.ReadDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
@@ -857,9 +968,24 @@ func (rt *Runtime) pruneable(dryRun bool) ([]string, error) {
 	return doomed, nil
 }
 
-// adapterName is a LoRA layer's name inside an engine. It is the same for
-// the same layer on the same chain, so containers of one image share it.
-func adapterName(a spec.Layer) string { return "lora-" + short(a.Chain) + "-" + a.ID }
+// adapterName is a LoRA or bit1 layer's name inside an engine. It is the
+// same for the same layer on the same chain, so containers of one image
+// share it.
+func adapterName(a spec.Layer) string {
+	if a.Kind == spec.KindDeltaBit1 {
+		return "bit1-" + short(a.Chain) + "-" + a.ID
+	}
+	return "lora-" + short(a.Chain) + "-" + a.ID
+}
+
+// servedDir is the directory under <root>/run that holds a layer served on
+// top of a base: a PEFT adapter, or a bit1 layer's deltas.
+func servedDir(a spec.Layer) string {
+	if a.Kind == spec.KindDeltaBit1 {
+		return "deltas"
+	}
+	return "adapters"
+}
 
 // mixRank is the rank of a MIX as one adapter: its experts' together.
 func mixRank(p *plan) int {

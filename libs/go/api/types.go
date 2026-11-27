@@ -125,7 +125,8 @@ type Container struct {
 	// Base is the chain ID of the serving base: the image's base with
 	// every layer below its adapters baked in.
 	Base string `json:"base"`
-	// Adapters are the layers served as LoRA adapters on that base.
+	// Adapters are the layers served on that base at request time: LoRA
+	// adapters, or a full fine-tune's bit1 layer on the reference engine.
 	Adapters []string `json:"adapters,omitempty"`
 	// Router is set ("arrow") when the model named Name routes each token
 	// across a MIX's experts; Name/<expert> still picks one expert.

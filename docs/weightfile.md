@@ -79,7 +79,7 @@ name: finance-v2
 data: finance.jsonl # relative to this file
 ```
 
-Without `eval=`, the suite is the fine-tune's greedy replies to a fixed set of general prompts, on which the fine-tune scores about 100: the drop is then about the share of reply tokens where the layer's first choice differs from the fine-tune's. A rebuild reuses the deltas and the eval from the build cache. A lossy layer has no PEFT form, so like an XOR layer it is squashed to export it, and it is baked into the serving base to run it.
+Without `eval=`, the suite is the fine-tune's greedy replies to a fixed set of general prompts, on which the fine-tune scores about 100: the drop is then about the share of reply tokens where the layer's first choice differs from the fine-tune's. A rebuild reuses the deltas and the eval from the build cache. A lossy layer has no PEFT form, so like an XOR layer it is squashed to export it. To run it, the reference engine, and vLLM with `weightpack-vllm` 0.2 or later, serve a bit1 layer on top of an image over the layers below it, sharing them, and their engine, with the other images on them (see the design's Runtime); a sparse layer is baked into the serving base.
 
 ## MIX parameters
 
