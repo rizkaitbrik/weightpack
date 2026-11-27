@@ -123,6 +123,51 @@ def test_run_serves_images_on_one_engine(weightpack, tmp_path):
     assert "of serving files no container uses" in out, out
 
 
+def test_bit1_fine_tunes_share_the_base(weightpack, tmp_path):
+    """Two full fine-tunes imported as bit1 layers run over the base they
+    were imported on, on its engine, each giving what its squashed image
+    gives."""
+    base, _, tok = tiny_model(tmp_path)
+    for seed in (1, 2):
+        model = transformers.AutoModelForCausalLM.from_pretrained(base)
+        gen = torch.Generator().manual_seed(seed)
+        with torch.no_grad():
+            for p in model.parameters():
+                p.mul_(1 + 0.5 * torch.randn(p.shape, generator=gen))
+        model.save_pretrained(tmp_path / f"ft{seed}")
+        tok.save_pretrained(tmp_path / f"ft{seed}")
+        (tmp_path / "Weightfile").write_text(
+            f"FROM ./base\nLAYER ft ./ft{seed} codec=bit1 calibrate=0 max_drop=100\n"
+        )
+        weightpack.wpk("build", "-t", f"ft{seed}", str(tmp_path))
+    (tmp_path / "Weightfile").write_text("FROM ./base\n")
+    weightpack.wpk("build", "-t", "plain", str(tmp_path))
+
+    out = weightpack.wpk("run", "--device", "cpu", "plain")
+    endpoint = re.search(r"endpoint\s+(\S+)", out).group(1)
+    for seed in (1, 2):
+        weightpack.wpk("run", "--device", "cpu", f"ft{seed}")
+    rows = [line.split() for line in weightpack.wpk("ps").splitlines()[1:]]
+    assert sorted(r[0] for r in rows) == ["ft1", "ft2", "plain"]
+    assert len({r[4] for r in rows}) == 1, "the fine-tunes should share the engine"
+
+    # Each fine-tune, and the base between them, as its own dense model.
+    want = {"plain": direct(base, None, tok)}
+    for seed in (1, 2):
+        name = f"ft{seed}"
+        dense = tmp_path / (name + "-dense")
+        weightpack.wpk("squash", "-t", dense.name, name)
+        weightpack.wpk("export", "-o", str(dense), dense.name)
+        want[name] = direct(dense / "base", None, tok)
+    assert len(set(want.values())) == 3
+    for name in ["ft1", "plain", "ft2", "ft1"]:
+        got = chat(endpoint, name)["choices"][0]["message"]["content"]
+        assert got == want[name], name
+    assert "weights switched to" in weightpack.wpk("logs", "ft1")
+
+    weightpack.wpk("stop", "ft1", "ft2", "plain")
+
+
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs Apple Silicon")
 def test_run_on_metal(weightpack, tmp_path):
     base, adapter, tok = tiny_model(tmp_path)

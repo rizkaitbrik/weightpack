@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +19,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/rizkaitbrik/weightpack/libs/go/build/buildtest"
 	"github.com/rizkaitbrik/weightpack/libs/go/safetensors"
 	"github.com/rizkaitbrik/weightpack/libs/go/workerpb"
 )
@@ -138,6 +140,31 @@ func fakeEngine(args []string) int {
 			LoraName *string `json:"lora_name"`
 			LoraPath *string `json:"lora_path"`
 		}{&b.LoraName, &b.LoraPath})
+		// A bit1 layer, as the reference engine reads it: every file it
+		// names must exist.
+		if raw, err := os.ReadFile(filepath.Join(b.LoraPath, "weightpack_delta.json")); err == nil {
+			var meta struct {
+				Version int      `json:"version"`
+				Codec   string   `json:"codec"`
+				Files   []string `json:"files"`
+			}
+			_ = json.Unmarshal(raw, &meta)
+			if meta.Version != 1 || meta.Codec != "bit1" || meta.Files == nil {
+				fail400(w, 400, "bad delta at "+b.LoraPath)
+				return
+			}
+			for _, f := range meta.Files {
+				if _, err := os.Stat(filepath.Join(b.LoraPath, f)); err != nil {
+					fail400(w, 400, "delta file "+f+" missing")
+					return
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			adapters[b.LoraName] = b.LoraPath
+			w.WriteHeader(200)
+			return
+		}
 		if _, err := os.Stat(filepath.Join(b.LoraPath, "adapter_config.json")); err != nil {
 			fail400(w, 400, "no adapter at "+b.LoraPath)
 			return
@@ -367,6 +394,107 @@ func (c *copyWorker) Squash(_ context.Context, req *workerpb.SquashRequest, _ ..
 		_ = h.Close()
 	}
 	return resp, nil
+}
+
+func (c *copyWorker) Info(context.Context, *workerpb.InfoRequest, ...grpc.CallOption) (*workerpb.InfoResponse, error) {
+	return &workerpb.InfoResponse{Version: "1"}, nil
+}
+
+// EncodeLayer stands in for the worker's bit1 encoding: for each tensor the
+// fine-tune changed, zero signs and a zero scale for a matrix, or a zero
+// float32 delta for any other tensor, in the layout the build checks.
+func (c *copyWorker) EncodeLayer(_ context.Context, req *workerpb.EncodeLayerRequest, _ ...grpc.CallOption) (*workerpb.EncodeLayerResponse, error) {
+	if req.Codec != workerpb.Codec_CODEC_BIT1 {
+		return nil, fmt.Errorf("the fake worker encodes bit1 only, not %s", req.Codec)
+	}
+	parent := map[string][]byte{}
+	for _, b := range req.Base {
+		if err := readTensors(b.Path, parent, nil); err != nil {
+			return nil, err
+		}
+	}
+	target, info := map[string][]byte{}, map[string]safetensors.Tensor{}
+	for _, p := range req.TargetFiles {
+		if err := readTensors(p, target, info); err != nil {
+			return nil, err
+		}
+	}
+	resp := &workerpb.EncodeLayerResponse{}
+	for name, raw := range target {
+		if string(raw) == string(parent[name]) {
+			resp.Unchanged++
+			continue
+		}
+		n := int64(1)
+		for _, d := range info[name].Shape {
+			n *= d
+		}
+		entries := []safetensors.Entry{{Name: name + ".delta", DType: "F32", Shape: info[name].Shape}}
+		if len(info[name].Shape) >= 2 {
+			entries = []safetensors.Entry{
+				{Name: name + ".scale", DType: "F32", Shape: []int64{1}},
+				{Name: name + ".signs", DType: "U8", Shape: []int64{(n + 7) / 8}},
+			}
+		}
+		for i := range entries {
+			size, _ := safetensors.ByteSize(entries[i].DType, entries[i].Shape)
+			entries[i].Data = strings.NewReader(string(make([]byte, size)))
+		}
+		r, _, err := safetensors.NewReader(entries, nil)
+		if err != nil {
+			return nil, err
+		}
+		out, _ := io.ReadAll(r)
+		file := fmt.Sprintf("%d.safetensors", len(resp.Tensors))
+		if err := os.WriteFile(filepath.Join(req.OutDir, file), out, 0o600); err != nil {
+			return nil, err
+		}
+		resp.Tensors = append(resp.Tensors, &workerpb.EncodedTensor{Name: name, File: file})
+	}
+	sort.Slice(resp.Tensors, func(i, j int) bool { return resp.Tensors[i].Name < resp.Tensors[j].Name })
+	return resp, nil
+}
+
+// Evaluate passes every eval gate: the layer scores half a point below
+// its source.
+func (c *copyWorker) Evaluate(context.Context, *workerpb.EvaluateRequest, ...grpc.CallOption) (*workerpb.EvaluateResponse, error) {
+	return &workerpb.EvaluateResponse{Suite: "self", Examples: 24, Tokens: 3000, Scores: []*workerpb.ModelScore{
+		{Accuracy: 90, Loss: 1}, {Accuracy: 89.5, Loss: 1.1},
+	}}, nil
+}
+
+func readTensors(path string, data map[string][]byte, info map[string]safetensors.Tensor) error {
+	f, err := safetensors.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	for _, t := range f.Tensors {
+		raw, err := io.ReadAll(f.Data(t))
+		if err != nil {
+			return err
+		}
+		data[t.Name] = raw
+		if info != nil {
+			info[t.Name] = t
+		}
+	}
+	return nil
+}
+
+// writeFinetune writes a full fine-tune of the project's base: its query
+// and value projections changed.
+func writeFinetune(t *testing.T, dir string, seed int64) {
+	t.Helper()
+	var ts []buildtest.Tensor
+	for _, x := range buildtest.BaseTensors() {
+		if strings.Contains(x.Name, "q_proj") || strings.Contains(x.Name, "v_proj") {
+			x.Seed += seed
+		}
+		ts = append(ts, x)
+	}
+	buildtest.WriteBase(t, dir, 1)
+	buildtest.WriteSafetensors(t, filepath.Join(dir, "model.safetensors"), ts)
 }
 
 func (c *copyWorker) count() int {

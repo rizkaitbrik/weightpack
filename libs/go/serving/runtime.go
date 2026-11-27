@@ -1,9 +1,10 @@
 // Package serving runs images: wpk run, ps, stop and logs, and the gateway
 // that routes OpenAI requests to them.
 //
-// An image is served as a dense serving base plus the LoRA adapters on top
-// of it (see plan). The base is exported once, as a Hugging Face directory,
-// under <root>/run; its adapters are exported beside it as PEFT adapters.
+// An image is served as a dense serving base plus the LoRA adapters, or the
+// bit1 fine-tune, on top of it (see plan). The base is exported once, as a
+// Hugging Face directory, under <root>/run; its adapters are exported beside
+// it as PEFT adapters, and a bit1 layer as its own blobs (export.DeltaDir).
 // One engine process serves each base on a device, and every container on
 // that base shares it: the base's weights load once, and each container's
 // adapter loads into the running engine. The gateway sends each request to
@@ -239,9 +240,16 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	if err != nil {
 		return nil, err
 	}
-	p, err := planFor(cfg)
+	p, err := planFor(cfg, kind == EngineReference)
 	if err != nil {
 		return nil, fmt.Errorf("run %s: %w", req.Ref, err)
+	}
+	if kind != EngineReference {
+		if shared, err := planFor(cfg, true); err == nil && shared.base.Chain != p.base.Chain {
+			progress(api.Event{Step: step, Message: fmt.Sprintf(
+				"the %s engine serves no bit1 deltas yet, so layer %s is baked into this image's serving base; the reference engine (--engine reference) serves it over the layers below it, sharing them with the other images on them",
+				kind, shared.adapters[0].ID)})
+		}
 	}
 	maxRank := 0
 	for _, a := range p.adapters {
@@ -266,7 +274,7 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 		if a.Chain == "" {
 			return nil, fmt.Errorf("layer %q has no chain ID; rebuild the image", a.ID)
 		}
-		adapterRels[i] = filepath.Join("adapters", hexOf(a.Chain)+"-"+a.ID)
+		adapterRels[i] = filepath.Join(servedDir(a), hexOf(a.Chain)+"-"+a.ID)
 	}
 	rels := append([]string{baseRel}, adapterRels...)
 	mixRel := ""
@@ -337,7 +345,11 @@ func (rt *Runtime) Run(ctx context.Context, req api.RunRequest, progress func(ap
 	}
 	for i, a := range p.adapters {
 		an := adapterName(a)
-		if err := e.loadAdapter(ctx, an, filepath.Join(rt.dir, adapterRels[i], "adapters", a.ID)); err != nil {
+		dir := filepath.Join(rt.dir, adapterRels[i], "adapters", a.ID)
+		if a.Kind == spec.KindDeltaBit1 {
+			dir = filepath.Join(rt.dir, adapterRels[i], export.DeltaDir(a.ID))
+		}
+		if err := e.loadAdapter(ctx, an, dir); err != nil {
 			for _, loaded := range c.adapters {
 				e.unloadAdapter(loaded)
 			}
@@ -480,9 +492,9 @@ func (rt *Runtime) prepareBase(ctx context.Context, digest string, p *plan, rel,
 	return err
 }
 
-// prepareAdapter exports one LoRA layer as a PEFT adapter, unless an
-// earlier run did. A layer's chain ID pins its content and parents; its
-// id names the directory export writes.
+// prepareAdapter exports one LoRA layer as a PEFT adapter, or a bit1 layer
+// as its deltas, unless an earlier run did. A layer's chain ID pins its
+// content and parents; its id names the directory export writes.
 func (rt *Runtime) prepareAdapter(ctx context.Context, digest string, a spec.Layer, rel string, progress func(api.Event)) error {
 	dir := filepath.Join(rt.dir, rel)
 	defer rt.lockPrep(rel)()
@@ -494,7 +506,11 @@ func (rt *Runtime) prepareAdapter(ctx context.Context, digest string, a spec.Lay
 	}
 	rt.storeLock.Lock()
 	defer rt.storeLock.Unlock()
-	_, err := export.Export(ctx, rt.cfg.Store, digest, export.Options{Dir: dir, NoBase: true, Adapters: []string{a.ID}}, progress)
+	opts := export.Options{Dir: dir, NoBase: true, Adapters: []string{a.ID}}
+	if a.Kind == spec.KindDeltaBit1 {
+		opts.Adapters, opts.Deltas = []string{}, []string{a.ID}
+	}
+	_, err := export.Export(ctx, rt.cfg.Store, digest, opts, progress)
 	return err
 }
 
@@ -819,7 +835,7 @@ func (rt *Runtime) pruneable(dryRun bool) ([]string, error) {
 		}
 	}
 	var doomed []string
-	for _, sub := range []string{"bases", "adapters", "mixes", "routers", "logs"} {
+	for _, sub := range []string{"bases", "adapters", "deltas", "mixes", "routers", "logs"} {
 		dir := filepath.Join(rt.dir, sub)
 		entries, err := os.ReadDir(dir)
 		if errors.Is(err, os.ErrNotExist) {
@@ -857,9 +873,24 @@ func (rt *Runtime) pruneable(dryRun bool) ([]string, error) {
 	return doomed, nil
 }
 
-// adapterName is a LoRA layer's name inside an engine. It is the same for
-// the same layer on the same chain, so containers of one image share it.
-func adapterName(a spec.Layer) string { return "lora-" + short(a.Chain) + "-" + a.ID }
+// adapterName is a LoRA or bit1 layer's name inside an engine. It is the
+// same for the same layer on the same chain, so containers of one image
+// share it.
+func adapterName(a spec.Layer) string {
+	if a.Kind == spec.KindDeltaBit1 {
+		return "bit1-" + short(a.Chain) + "-" + a.ID
+	}
+	return "lora-" + short(a.Chain) + "-" + a.ID
+}
+
+// servedDir is the directory under <root>/run that holds a layer served on
+// top of a base: a PEFT adapter, or a bit1 layer's deltas.
+func servedDir(a spec.Layer) string {
+	if a.Kind == spec.KindDeltaBit1 {
+		return "deltas"
+	}
+	return "adapters"
+}
 
 // mixRank is the rank of a MIX as one adapter: its experts' together.
 func mixRank(p *plan) int {

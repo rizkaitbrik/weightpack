@@ -8,15 +8,18 @@ import (
 	"github.com/rizkaitbrik/weightpack/libs/go/spec"
 )
 
-// plan is how an image is served: a dense serving base, and the LoRA layers
-// an engine applies on top of it at request time.
+// plan is how an image is served: a dense serving base, and the layers an
+// engine applies on top of it at request time.
 //
 // Engines apply one adapter per request, so everything below the image's
 // adapters is baked into the base: its XOR layers, and every stacked LoRA
 // layer but the top one. A stack ending in a LoRA layer serves that layer
 // as the adapter; a MIX serves each expert as an adapter over the whole
-// stack. Images that share those lower layers share the serving base, and
-// with it one engine and one copy of the weights.
+// stack. On an engine that serves bit1 deltas (the reference engine), a
+// stack ending in a bit1 layer, a full fine-tune, serves it the same way,
+// over the layers below it; other engines bake it into the base. Images that
+// share those lower layers share the serving base, and with it one engine
+// and one copy of the weights.
 type plan struct {
 	// base is the top layer of the serving base. Its chain ID names the
 	// base; every image whose layers below their adapters are the same
@@ -25,8 +28,8 @@ type plan struct {
 	// through is the layer to squash the image through to make the base,
 	// or "" when the base is the image's base layer as it is.
 	through string
-	// adapters are served on top of the base: none, the top of a stack, or
-	// a mix's experts.
+	// adapters are served on top of the base: none, the top of a stack (a
+	// LoRA or a bit1 layer), or a mix's experts.
 	adapters []spec.Layer
 	// mix is the image's MIX, if any; its experts are the adapters.
 	mix *spec.Layer
@@ -34,15 +37,21 @@ type plan struct {
 
 // ServingBase returns the chain ID of the base an engine would serve the
 // image on. Images with the same serving base share an engine.
+//
+// It is the base every engine can serve the image on: a bit1 layer on top
+// is baked in, though the reference engine serves it over the layers below
+// it, so placement does not yet prefer a node already serving those.
 func ServingBase(c *spec.Config) (string, error) {
-	p, err := planFor(c)
+	p, err := planFor(c, false)
 	if err != nil {
 		return "", err
 	}
 	return p.base.Chain, nil
 }
 
-func planFor(c *spec.Config) (*plan, error) {
+// planFor plans an image's serving; deltas says the engine serves a bit1
+// layer over the layers below it.
+func planFor(c *spec.Config, deltas bool) (*plan, error) {
 	stack, mix, err := build.Stack(c)
 	if err != nil {
 		return nil, err
@@ -57,12 +66,12 @@ func planFor(c *spec.Config) (*plan, error) {
 		for _, id := range mix.Experts {
 			p.adapters = append(p.adapters, byID[id])
 		}
-	} else if top := stack[len(stack)-1]; len(stack) > 1 && top.Kind == spec.KindLoRA {
+	} else if top := stack[len(stack)-1]; len(stack) > 1 && (top.Kind == spec.KindLoRA || deltas && top.Kind == spec.KindDeltaBit1) {
 		p.adapters = []spec.Layer{top}
 		dense = stack[:len(stack)-1]
 	}
 	for _, a := range p.adapters {
-		if a.Kind != spec.KindLoRA {
+		if a.Kind != spec.KindLoRA && !(mix == nil && a.Kind == spec.KindDeltaBit1) {
 			return nil, fmt.Errorf("layer %q is %s; engines serve only LoRA layers on top of a base, so wpk squash the image and run the result", a.ID, a.Kind)
 		}
 	}
@@ -87,6 +96,8 @@ func (p *plan) describe() string {
 	switch {
 	case p.mix != nil:
 		fmt.Fprintf(&b, ", experts %s as adapters", strings.Join(p.mix.Experts, ", "))
+	case len(p.adapters) == 1 && p.adapters[0].Kind == spec.KindDeltaBit1:
+		fmt.Fprintf(&b, ", %s as a bit1 delta over it", p.adapters[0].ID)
 	case len(p.adapters) == 1:
 		fmt.Fprintf(&b, ", %s as an adapter", p.adapters[0].ID)
 	}
