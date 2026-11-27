@@ -209,12 +209,12 @@ wpk service install && wpk doctor
 **Use:**
 
 ```bash
-wpk build -t assistant:v1 ./project
-wpk push --sign --key release.key ghcr.io/acme/assistant:v1
-wpk pull --exact ghcr.io/acme/assistant:v1
-wpk run assistant:v1
+wpk build -t assistant ./project
+wpk push --sign --key release.key ghcr.io/acme/assistant
+wpk pull --exact ghcr.io/acme/assistant
+wpk run assistant
 curl http://127.0.0.1:8090/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model":"assistant:v1/legal","messages":[{"role":"user","content":"Hi"}]}'
+  -d '{"model":"assistant/legal","messages":[{"role":"user","content":"Hi"}]}'
 ```
 
 **Develop** (Node.js 22+, Go 1.27+, Python 3.10+, [uv](https://docs.astral.sh/uv/)):
