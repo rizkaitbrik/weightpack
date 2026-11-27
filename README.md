@@ -202,7 +202,9 @@ Method and caveats are in the [design doc](docs/design.md).
 **Install** (macOS on Apple Silicon, Linux), then see the [quickstart](docs/quickstart.md):
 
 ```bash
-curl -fsSL   https://raw.githubusercontent.com/rizkaitbrik/weightpack/main/scripts/install.sh | sh
+curl -fsSL \
+  https://raw.githubusercontent.com/rizkaitbrik/weightpack/main/scripts/install.sh \
+  | sh
 wpk service install && wpk doctor
 ```
 
