@@ -171,7 +171,8 @@ Everything below is merged and tested, end to end on Qwen2.5-0.5B-Instruct (`npx
 | Lossy import | `bit1` and `sparse`, eval-gated, calibrated by distillation | [#18](https://github.com/rizkaitbrik/weightpack/pull/18), [#19](https://github.com/rizkaitbrik/weightpack/pull/19) |
 | Store | Build cache, `rm`, `prune` | [#9](https://github.com/rizkaitbrik/weightpack/pull/9) |
 | Serving | `run` / `ps` / `stop` / `logs`, shared bases, vLLM and the reference engine | [#10](https://github.com/rizkaitbrik/weightpack/pull/10) |
-| Token routing | Arrow on the reference engine and inside vLLM; `ROUTER train` | [#15](https://github.com/rizkaitbrik/weightpack/pull/15), [#16](https://github.com/rizkaitbrik/weightpack/pull/16), [#17](https://github.com/rizkaitbrik/weightpack/pull/17) |
+| bit1 serving | bit1 fine-tunes served per token over one shared base, on both engines | [#20](https://github.com/rizkaitbrik/weightpack/pull/20), [#21](https://github.com/rizkaitbrik/weightpack/pull/21) |
+| Token routing | Arrow on the reference engine and inside vLLM, gated in one Triton kernel; `ROUTER train` | [#15](https://github.com/rizkaitbrik/weightpack/pull/15), [#16](https://github.com/rizkaitbrik/weightpack/pull/16), [#17](https://github.com/rizkaitbrik/weightpack/pull/17), [#22](https://github.com/rizkaitbrik/weightpack/pull/22) |
 | Signing | `sign` / `verify` / `keygen` / `trust`, key and keyless Sigstore | [#13](https://github.com/rizkaitbrik/weightpack/pull/13) |
 | Kubernetes | Helm chart and `wpk-control` with base-affinity placement | [#14](https://github.com/rizkaitbrik/weightpack/pull/14) |
 | Tooling | `doctor`, `service install`, release archives, CPU and CUDA images, smoke test | [#7](https://github.com/rizkaitbrik/weightpack/pull/7), [#11](https://github.com/rizkaitbrik/weightpack/pull/11), [#12](https://github.com/rizkaitbrik/weightpack/pull/12) |
