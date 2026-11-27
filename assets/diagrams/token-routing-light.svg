@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 476" width="960" height="476" role="img" aria-label="Token routing in vLLM">
+<title>Token routing in vLLM</title>
+<defs><style>
+      .t{font:600 14px Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif;fill:#171917}
+      .s{font:400 12px Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif;fill:#6E6C64}
+      .m{font:400 11.5px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;fill:#6E6C64}
+      .tag{font:500 10px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;fill:#6E6C64;letter-spacing:.06em}
+      .cap{font:600 10.5px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;fill:#6E6C64;letter-spacing:.12em}
+      .lbl{font:500 11.5px Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif;fill:#171917}
+      .lg{font:400 12px Inter, 'Segoe UI', -apple-system, Helvetica, Arial, sans-serif;fill:#6E6C64}
+      .fig{font:600 11px 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;fill:#6E6C64;letter-spacing:.14em}
+      .edge{fill:none;stroke-width:1.6}
+      .life{fill:none;stroke:#CFC9BA;stroke-width:1.2;stroke-dasharray:2 5}
+      .f-none{fill:none}
+      .f-bg{fill:#F4F1EA} .k-bg{stroke:#F4F1EA;stroke-width:1.4}
+      .f-card{fill:#FFFFFF} .k-card{stroke:#FFFFFF;stroke-width:1.4}
+      .f-ink{fill:#171917} .k-ink{stroke:#171917;stroke-width:1.4}
+      .f-muted{fill:#6E6C64} .k-muted{stroke:#6E6C64;stroke-width:1.4}
+      .f-border{fill:#CFC9BA} .k-border{stroke:#CFC9BA;stroke-width:1.4}
+      .f-group{fill:#ECE7DB} .k-group{stroke:#ECE7DB;stroke-width:1.4}
+      .f-groupBorder{fill:#D3CCBB} .k-groupBorder{stroke:#D3CCBB;stroke-width:1.4}
+      .f-ember{fill:#E65032} .k-ember{stroke:#E65032;stroke-width:1.4}
+      .f-emberTint{fill:#FBE2DA} .k-emberTint{stroke:#FBE2DA;stroke-width:1.4}
+      .f-line{fill:#3B3D39} .k-line{stroke:#3B3D39;stroke-width:1.4}
+      .f-inv{fill:#171917} .k-inv{stroke:#171917;stroke-width:1.4}
+      .f-invText{fill:#F4F1EA} .k-invText{stroke:#F4F1EA;stroke-width:1.4}
+      .k-line{stroke-width:1.6} .k-ember{stroke-width:1.6}
+      .inv{fill:#F4F1EA} .inv-e{fill:#FFFFFF;font-weight:600}</style><marker id="a-line" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0.8 L9.5,5 L0,9.2 z" fill="#3B3D39"/></marker><marker id="a-ember" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0.8 L9.5,5 L0,9.2 z" fill="#E65032"/></marker></defs>
+<rect width="960" height="476" rx="18" fill="#F4F1EA"/>
+<path d="M22,30 l3.2,-8 h11 l-3.2,8 z" fill="#E65032"/>
+<text x="44" y="30" class="fig" text-anchor="start">FIG 8 · TOKEN ROUTING IN VLLM</text>
+<g transform="translate(0 48)"><rect x="20" y="170" width="90" height="52" rx="26" class="f-card k-border" /><text x="65" y="193" class="t" text-anchor="middle">x</text><text x="65" y="209" class="s" text-anchor="middle">hidden state</text><rect x="170" y="30" width="240" height="60" rx="10" class="f-inv k-inv" /><text x="290" y="57" class="t inv" text-anchor="middle">W x</text><text x="290" y="73" class="s inv" text-anchor="middle">base product, once per token</text><rect x="170" y="160" width="240" height="72" rx="10" class="f-emberTint k-ember" /><text x="290" y="185" class="t" text-anchor="middle">Router g(x)</text><text x="290" y="201" class="m" text-anchor="middle">logit_i = |x · w_i| + b_i</text><text x="290" y="217" class="s" text-anchor="middle">top-k · softmax</text><rect x="170" y="290" width="240" height="66" rx="10" class="f-emberTint k-ember" /><text x="290" y="320" class="t" text-anchor="middle">Shrink  z = x Aᵀ</text><text x="290" y="336" class="m" text-anchor="middle">A = [A₁; A₂; A₃]</text><rect x="470" y="250" width="210" height="106" rx="10" class="f-emberTint k-ember" /><text x="575" y="284" class="t" text-anchor="middle">Gate</text><text x="575" y="300" class="s" text-anchor="middle">scale each expert’s</text><text x="575" y="316" class="s" text-anchor="middle">block of z by its</text><text x="575" y="332" class="s" text-anchor="middle">routing coefficient</text><rect x="730" y="290" width="210" height="66" rx="10" class="f-emberTint k-ember" /><text x="835" y="320" class="t" text-anchor="middle">Expand  z Bᵀ</text><text x="835" y="336" class="m" text-anchor="middle">B = [s₁B₁, s₂B₂, s₃B₃]</text><circle cx="835" cy="60" r="20" class="f-card k-line"/><text x="835" y="66" class="t" text-anchor="middle">+</text><rect x="880" y="40" width="60" height="40" rx="20" class="f-card k-border" /><text x="910" y="65" class="t" text-anchor="middle">y</text><path d="M110,196 L130,196 Q138,196 138,188 L138,68 Q138,60 146,60 L170,60" class="edge k-line"  marker-end="url(#a-line)" /><path d="M110,196 L170,196" class="edge k-line"  marker-end="url(#a-line)" /><path d="M110,196 L130,196 Q138,196 138,204 L138,315 Q138,323 146,323 L170,323" class="edge k-line"  marker-end="url(#a-line)" /><path d="M410,60 L815,60" class="edge k-line"  marker-end="url(#a-line)" /><path d="M410,196 L432,196 Q440,196 440,204 L440,272 Q440,280 448,280 L470,280" class="edge k-ember"  marker-end="url(#a-ember)" /><path d="M410,323 L470,323" class="edge k-ember"  marker-end="url(#a-ember)" /><path d="M680,323 L730,323" class="edge k-ember"  marker-end="url(#a-ember)" /><path d="M835,290 L835,80" class="edge k-ember"  marker-end="url(#a-ember)" /><rect x="799.02" y="179" width="71.96000000000001" height="18" rx="9" class="f-bg"/><text x="835" y="192" class="lbl" text-anchor="middle">Σ experts</text><path d="M855,60 L880,60" class="edge k-line"  marker-end="url(#a-line)" /><rect x="20" y="380" width="920" height="34" rx="10" class="f-group k-groupBorder" /><text x="480" y="401" class="s" text-anchor="middle">One adapter slot holds the whole MIX. Mix tokens, single-adapter tokens and base tokens share one batch.</text></g>
+</svg>
